@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -54,7 +54,7 @@ class ModelNode(TimestampMixin, Base):
     base_url: Mapped[str] = mapped_column(String(512), nullable=False)
     api_key: Mapped[str | None] = mapped_column(String(512))
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text)
 
     review_tasks: Mapped[list[ReviewTask]] = relationship(back_populates="model_node")
@@ -66,7 +66,7 @@ class PromptVersion(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     version: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     creator_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
     creator: Mapped[User | None] = relationship(back_populates="prompt_versions")
@@ -74,10 +74,13 @@ class PromptVersion(TimestampMixin, Base):
 
 class ReviewTask(TimestampMixin, Base):
     __tablename__ = "review_tasks"
+    __table_args__ = (Index("ix_review_tasks_created_at", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    model_node_id: Mapped[str] = mapped_column(ForeignKey("model_nodes.id"), nullable=False)
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    model_node_id: Mapped[str] = mapped_column(ForeignKey("model_nodes.id"), nullable=False, index=True)
     input_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[TaskStatus] = mapped_column(
@@ -104,7 +107,9 @@ class ReviewFile(TimestampMixin, Base):
     __tablename__ = "review_files"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    task_id: Mapped[str] = mapped_column(ForeignKey("review_tasks.id", ondelete="CASCADE"), nullable=False)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("review_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     relative_path: Mapped[str] = mapped_column(String(512), nullable=False)
     source_text: Mapped[str] = mapped_column(Text, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)

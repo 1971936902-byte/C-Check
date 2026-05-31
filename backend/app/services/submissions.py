@@ -34,7 +34,21 @@ class Submission:
 
 
 def dispatch_review(task_id: str) -> None:
-    """Task5 replacement must mark the task failed if broker dispatch fails, never leave it queued."""
+    from app.db.session import SessionLocal
+    from app.db.models import TaskStatus
+    from app.tasks.reviews import dispatch_review as celery_dispatch_review
+
+    try:
+        celery_dispatch_review.delay(task_id)
+    except Exception as exc:
+        with SessionLocal() as db:
+            task = db.get(ReviewTask, task_id)
+            if task is None:
+                return
+            task.status = TaskStatus.FAILED
+            task.progress = 100
+            task.error_message = f"failed to dispatch review worker: {exc}"[:1000]
+            db.commit()
 
 
 def _decode_source(content: bytes) -> str:
@@ -196,4 +210,5 @@ def create_review_task(
     db.commit()
     db.refresh(task)
     dispatch_review(task.id)
+    db.refresh(task)
     return task

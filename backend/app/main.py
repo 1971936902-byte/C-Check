@@ -7,12 +7,14 @@ from app.api import router
 from app.core.bootstrap import ensure_initial_admin
 from app.core.config import get_settings
 from app.db import session as db_session
+from app.services.prompts import get_active_prompt
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     with db_session.SessionLocal() as db:
         ensure_initial_admin(db, get_settings())
+        get_active_prompt(db)
     yield
 
 

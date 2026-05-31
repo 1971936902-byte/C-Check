@@ -1,12 +1,14 @@
 from typing import Annotated
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
-from app.db.models import ReviewFile, ReviewTask, User
+from app.db.models import Report, ReviewFile, ReviewTask, TaskStatus, User
 from app.db.session import get_db
 from app.schemas.reviews import ReviewTaskResponse, ReviewTaskSummaryResponse, TextReviewRequest
 from app.services.submissions import (
@@ -101,13 +103,27 @@ def list_reviews(
     db: Annotated[Session, Depends(get_db)],
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    keyword: str | None = None,
+    task_status: Annotated[TaskStatus | None, Query(alias="status")] = None,
+    model_node_id: str | None = None,
+    severity: str | None = Query(default=None, pattern="^(high|medium|low|suggestion)$"),
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
 ) -> list[ReviewTask]:
-    query = (
-        _visible_task_query(current_user)
-        .order_by(ReviewTask.created_at.desc(), ReviewTask.id.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    query = _visible_task_query(current_user)
+    if keyword:
+        query = query.where(ReviewTask.display_name.contains(keyword))
+    if task_status is not None:
+        query = query.where(ReviewTask.status == task_status)
+    if model_node_id:
+        query = query.where(ReviewTask.model_node_id == model_node_id)
+    if start_time:
+        query = query.where(ReviewTask.created_at >= start_time)
+    if end_time:
+        query = query.where(ReviewTask.created_at <= end_time)
+    if severity:
+        query = query.join(ReviewTask.report).where(getattr(Report, f"{severity}_count") > 0)
+    query = query.order_by(ReviewTask.created_at.desc(), ReviewTask.id.desc()).offset(offset).limit(limit)
     return list(db.scalars(query).all())
 
 
