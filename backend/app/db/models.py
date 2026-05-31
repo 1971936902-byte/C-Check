@@ -102,6 +102,10 @@ class ReviewTask(TimestampMixin, Base):
     files: Mapped[list[ReviewFile]] = relationship(back_populates="task", cascade="all, delete-orphan")
     report: Mapped[Report | None] = relationship(back_populates="task", cascade="all, delete-orphan")
 
+    @property
+    def report_id(self) -> str | None:
+        return self.report.id if self.report is not None else None
+
 
 class ReviewFile(TimestampMixin, Base):
     __tablename__ = "review_files"

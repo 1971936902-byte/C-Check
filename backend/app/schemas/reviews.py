@@ -32,6 +32,7 @@ class ReviewTaskSummaryResponse(BaseModel):
     duration_ms: int | None
     file_count: int
     finding_count: int
+    report_id: str | None
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime

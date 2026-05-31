@@ -1,0 +1,16 @@
+<script setup lang="ts">
+import { onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { Delete, Refresh, Search, View } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { errorMessage, reviewApi } from '../api/client'
+import StatusBadge from '../components/StatusBadge.vue'
+import type { ModelNode, ReviewTask } from '../types'
+const filters = reactive({ keyword: '', status: '', model_node_id: '', severity: '' }), tasks = ref<ReviewTask[]>([]), models = ref<ModelNode[]>([]), loading = ref(false), router = useRouter()
+const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
+async function load() { loading.value = true; try { tasks.value = (await reviewApi.list(filters)).data } catch (e) { ElMessage.error(errorMessage(e)) } finally { loading.value = false } }
+async function remove(id: string) { try { await ElMessageBox.confirm('删除后无法恢复，确认继续？', '删除审查记录', { type: 'warning' }); await reviewApi.remove(id); await load(); ElMessage.success('记录已删除') } catch (e) { if (e !== 'cancel') ElMessage.error(errorMessage(e)) } }
+function open(task: ReviewTask) { task.report_id ? router.push(`/reports/${task.report_id}`) : ElMessage.warning('报告暂不可用，请稍后刷新列表') }
+onMounted(async () => { try { models.value = (await reviewApi.models()).data } catch {} await load() })
+</script>
+<template><section><header class="page-header"><div><h1>历史报告</h1><p>筛选、回看与管理个人代码审查记录。</p></div><el-button :icon="Refresh" @click="load">刷新</el-button></header><div class="panel glass"><div class="filter-bar"><el-input v-model="filters.keyword" placeholder="搜索任务名称" :prefix-icon="Search" clearable /><el-select v-model="filters.status" placeholder="任务状态" clearable><el-option label="排队中" value="queued" /><el-option label="审查中" value="running" /><el-option label="已完成" value="completed" /><el-option label="失败" value="failed" /></el-select><el-select v-model="filters.model_node_id" placeholder="模型" clearable><el-option v-for="model in models" :key="model.id" :label="model.display_name" :value="model.id" /></el-select><el-select v-model="filters.severity" placeholder="风险等级" clearable><el-option label="高危" value="high" /><el-option label="中危" value="medium" /><el-option label="低危" value="low" /><el-option label="建议" value="suggestion" /></el-select><el-button type="primary" @click="load">筛选</el-button></div><el-table :data="tasks" v-loading="loading"><el-table-column prop="display_name" label="任务名称" min-width="180" /><el-table-column prop="input_mode" label="提交方式" width="100" /><el-table-column label="状态" width="110"><template #default="{ row }"><StatusBadge :status="row.status" /></template></el-table-column><el-table-column prop="file_count" label="文件" width="70" /><el-table-column prop="finding_count" label="问题" width="70" /><el-table-column label="创建时间" width="170"><template #default="{ row }">{{ date(row.created_at) }}</template></el-table-column><el-table-column label="操作" width="160"><template #default="{ row }"><el-button link type="primary" :icon="View" :disabled="row.status !== 'completed'" @click="open(row)">查看</el-button><el-button link type="danger" :icon="Delete" @click="remove(row.id)">删除</el-button></template></el-table-column></el-table></div></section></template>
