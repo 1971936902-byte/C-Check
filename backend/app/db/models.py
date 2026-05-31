@@ -37,6 +37,7 @@ class User(TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), default="user", nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     review_tasks: Mapped[list[ReviewTask]] = relationship(
         back_populates="owner", cascade="all, delete-orphan", passive_deletes=True

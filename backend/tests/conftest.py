@@ -29,6 +29,11 @@ def db_session_factory(tmp_path):
 def override_session_factory(monkeypatch, db_session_factory):
     monkeypatch.setenv("ALLOW_INSECURE_DEFAULTS", "true")
     monkeypatch.setattr("app.db.session.SessionLocal", db_session_factory)
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture

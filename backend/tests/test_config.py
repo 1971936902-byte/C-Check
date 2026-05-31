@@ -58,6 +58,44 @@ def test_settings_reject_example_file_placeholders(monkeypatch):
         Settings(_env_file=None)
 
 
+@pytest.mark.parametrize(
+    ("environment", "expected_field"),
+    [
+        (
+            {
+                "DATABASE_URL": "mysql+pymysql://c_check:strong-database-password@localhost/c_check",
+                "JWT_SECRET": "short-secret",
+                "ADMIN_PASSWORD": "strong-admin-password",
+            },
+            "JWT_SECRET",
+        ),
+        (
+            {
+                "DATABASE_URL": "mysql+pymysql://c_check:strong-database-password@localhost/c_check",
+                "JWT_SECRET": "production-jwt-secret-at-least-32-characters",
+                "ADMIN_PASSWORD": "too-short",
+            },
+            "ADMIN_PASSWORD",
+        ),
+        (
+            {
+                "DATABASE_URL": "mysql+pymysql://c_check:short@localhost/c_check",
+                "JWT_SECRET": "production-jwt-secret-at-least-32-characters",
+                "ADMIN_PASSWORD": "strong-admin-password",
+            },
+            "DATABASE_URL",
+        ),
+    ],
+)
+def test_settings_reject_weak_credentials(monkeypatch, environment, expected_field):
+    monkeypatch.delenv("ALLOW_INSECURE_DEFAULTS", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError, match=expected_field):
+        Settings(_env_file=None)
+
+
 def test_settings_resolve_relative_storage_path_from_repository_root(monkeypatch, tmp_path):
     monkeypatch.setenv("ALLOW_INSECURE_DEFAULTS", "true")
     monkeypatch.setenv("STORAGE_PATH", "custom-uploads")

@@ -44,12 +44,17 @@ class Settings(BaseSettings):
             self.storage_path = REPOSITORY_ROOT / self.storage_path
         self.storage_path = self.storage_path.resolve()
 
+        database_password = make_url(self.database_url).password
         insecure_fields = []
-        if make_url(self.database_url).password in INSECURE_DATABASE_PASSWORDS:
+        if (
+            database_password in INSECURE_DATABASE_PASSWORDS
+            or not database_password
+            or len(database_password) < 12
+        ):
             insecure_fields.append("DATABASE_URL")
-        if self.jwt_secret in INSECURE_JWT_SECRETS:
+        if self.jwt_secret in INSECURE_JWT_SECRETS or len(self.jwt_secret) < 32:
             insecure_fields.append("JWT_SECRET")
-        if self.admin_password in INSECURE_ADMIN_PASSWORDS:
+        if self.admin_password in INSECURE_ADMIN_PASSWORDS or len(self.admin_password) < 12:
             insecure_fields.append("ADMIN_PASSWORD")
         if insecure_fields and not self.allow_insecure_defaults:
             fields = ", ".join(insecure_fields)
