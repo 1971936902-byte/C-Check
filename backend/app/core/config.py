@@ -31,8 +31,11 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "change-this-password"
     upload_max_file_bytes: int = Field(default=1024 * 1024, gt=0)
+    upload_max_archive_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     upload_max_extracted_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     upload_max_files: int = Field(default=200, gt=0)
+    upload_max_archive_entries: int = Field(default=1000, gt=0)
+    upload_max_path_length: int = Field(default=512, gt=0)
     cors_origins: list[str] = ["http://localhost:5173"]
     storage_path: Path = Path("uploads")
     mock_model_enabled: bool = False
