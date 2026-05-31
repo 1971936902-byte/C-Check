@@ -1,0 +1,1 @@
+"""C-Check backend application."""
