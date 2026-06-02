@@ -1,4 +1,4 @@
-import type { ReviewFile, ReviewTask } from '../types'
+import type { ReviewTask } from '../types'
 
 export const ALL_CHECK_TYPES = [
   { value: 'memory_safety', label: '内存安全' },
@@ -16,12 +16,40 @@ export const ALL_CHECK_TYPES = [
 ] as const
 
 export type FileProgressStatus = 'pending' | 'analyzing' | 'completed'
-export type FileProgress = ReviewFile & { status: FileProgressStatus }
+export type ReviewProgressSummary = {
+  currentLabel: string
+  remainingCount: number
+  state: FileProgressStatus | 'failed'
+  stateLabel: string
+}
 
-export function deriveFileProgress(task: ReviewTask): FileProgress[] {
+export function taskDisplayName(task: ReviewTask) {
+  return task.input_mode === 'text' ? '粘贴代码片段' : task.display_name
+}
+
+export function taskSubmissionCountLabel(task: ReviewTask) {
+  return task.input_mode === 'text' ? '1 个代码片段' : `${task.file_count} 个文件`
+}
+
+export function deriveReviewProgressSummary(task: ReviewTask): ReviewProgressSummary {
+  if (task.status === 'completed') {
+    return { currentLabel: '全部检查完成', remainingCount: 0, state: 'completed', stateLabel: '检查完成' }
+  }
+
   const files = task.files || []
-  if (task.status === 'completed') return files.map((file) => ({ ...file, status: 'completed' }))
-  if (task.status !== 'running') return files.map((file) => ({ ...file, status: 'pending' }))
-  const completed = Math.min(Math.floor((task.progress / 100) * files.length), Math.max(0, files.length - 1))
-  return files.map((file, index) => ({ ...file, status: index < completed ? 'completed' : index === completed ? 'analyzing' : 'pending' }))
+  const total = Math.max(task.file_count, files.length, task.input_mode === 'text' ? 1 : 0)
+  const completed = task.status === 'running'
+    ? Math.min(Math.floor((task.progress / 100) * total), Math.max(0, total - 1))
+    : 0
+  const currentLabel = task.input_mode === 'text'
+    ? '粘贴代码片段'
+    : files[completed]?.relative_path || task.display_name
+
+  if (task.status === 'failed') {
+    return { currentLabel, remainingCount: Math.max(0, total - completed), state: 'failed', stateLabel: '检查中断' }
+  }
+  if (task.status === 'queued') {
+    return { currentLabel, remainingCount: total, state: 'pending', stateLabel: '等待开始' }
+  }
+  return { currentLabel, remainingCount: Math.max(0, total - completed - 1), state: 'analyzing', stateLabel: '正在检查' }
 }
