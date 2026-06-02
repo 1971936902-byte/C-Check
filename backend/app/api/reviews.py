@@ -4,14 +4,14 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
-from app.db.models import Report, ReviewFile, ReviewTask, TaskStatus, User
+from app.db.models import ModelNode, Report, ReviewFile, ReviewTask, TaskStatus, User
 from app.db.session import get_db
-from app.schemas.reviews import ReviewTaskResponse, ReviewTaskSummaryResponse, TextReviewRequest
+from app.schemas.reviews import ReviewTaskPageResponse, ReviewTaskResponse, TextReviewRequest
 from app.services.submissions import (
     Submission,
     SubmissionError,
@@ -112,7 +112,7 @@ async def submit_archive(
     return _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
 
 
-@router.get("", response_model=list[ReviewTaskSummaryResponse])
+@router.get("", response_model=ReviewTaskPageResponse)
 def list_reviews(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
@@ -125,7 +125,9 @@ def list_reviews(
     severity: str | None = Query(default=None, pattern="^(high|medium|low|suggestion)$"),
     start_time: datetime | None = None,
     end_time: datetime | None = None,
-) -> list[ReviewTask]:
+    sort_by: Annotated[str, Query(pattern="^(display_name|tester_name|model|status|file_count|finding_count|duration_ms|created_at)$")] = "created_at",
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "desc",
+) -> ReviewTaskPageResponse:
     query = _visible_task_query(current_user)
     if keyword:
         query = query.where(ReviewTask.display_name.contains(keyword))
@@ -141,8 +143,26 @@ def list_reviews(
         query = query.where(ReviewTask.created_at <= end_time)
     if severity:
         query = query.join(ReviewTask.report).where(getattr(Report, f"{severity}_count") > 0)
-    query = query.order_by(ReviewTask.created_at.desc(), ReviewTask.id.desc()).offset(offset).limit(limit)
-    return list(db.scalars(query).all())
+    sort_columns = {
+        "display_name": ReviewTask.display_name,
+        "status": ReviewTask.status,
+        "file_count": ReviewTask.file_count,
+        "finding_count": ReviewTask.finding_count,
+        "duration_ms": ReviewTask.duration_ms,
+        "created_at": ReviewTask.created_at,
+    }
+    if sort_by == "tester_name":
+        query = query.join(ReviewTask.owner)
+        sort_column = User.username
+    elif sort_by == "model":
+        query = query.join(ReviewTask.model_node)
+        sort_column = ModelNode.display_name
+    else:
+        sort_column = sort_columns[sort_by]
+    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    order = sort_column.asc() if sort_dir == "asc" else sort_column.desc()
+    items = list(db.scalars(query.order_by(order, ReviewTask.id.desc()).offset(offset).limit(limit)).all())
+    return ReviewTaskPageResponse(items=items, total=total)
 
 
 @router.get("/{task_id}", response_model=ReviewTaskResponse)

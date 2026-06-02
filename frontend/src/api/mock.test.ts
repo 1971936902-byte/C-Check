@@ -45,8 +45,8 @@ describe('mockApi', () => {
 
   it('removes a review from history', async () => {
     const reviews = await mockApi.reviews.list()
-    await mockApi.reviews.remove(reviews.data[0].id)
-    expect((await mockApi.reviews.list()).data).toHaveLength(reviews.data.length - 1)
+    await mockApi.reviews.remove(reviews.data.items[0].id)
+    expect((await mockApi.reviews.list()).data.total).toBe(reviews.data.total - 1)
   })
 
   it('includes Git-style source and fixed code snippets in reports', async () => {
@@ -57,7 +57,7 @@ describe('mockApi', () => {
   })
 
   it('filters review history by severity and creation time', async () => {
-    expect((await mockApi.reviews.list({ severity: 'high' })).data.map((task) => task.id)).toEqual(['review-seeded'])
-    expect((await mockApi.reviews.list({ start_time: '2999-01-01T00:00:00.000Z' })).data).toHaveLength(0)
+    expect((await mockApi.reviews.list({ severity: 'high' })).data.items.map((task) => task.id)).toEqual(['review-seeded'])
+    expect((await mockApi.reviews.list({ start_time: '2999-01-01T00:00:00.000Z' })).data.items).toHaveLength(0)
   })
 })

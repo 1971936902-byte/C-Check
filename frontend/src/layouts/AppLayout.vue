@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Clock, DataAnalysis, EditPen, Setting, User, SwitchButton } from '@element-plus/icons-vue'
+import { Clock, DataAnalysis, EditPen, Guide, HomeFilled, Setting, User, SwitchButton } from '@element-plus/icons-vue'
 import { useAuthStore } from '../stores/auth'
 const auth = useAuthStore(); const route = useRoute(); const router = useRouter()
 const items = computed(() => [
+  { path: '/dashboard', label: '工作台概览', icon: HomeFilled },
   { path: '/workspace', label: '代码审查', icon: EditPen },
   { path: '/history', label: '历史报告', icon: Clock },
   ...(auth.isAdmin ? [{ path: '/admin', label: '后台管理', icon: DataAnalysis }] : []),
   { path: '/profile', label: '个人中心', icon: User },
+  { path: '/help', label: '使用帮助', icon: Guide },
 ])
 function logout() { auth.logout(); router.push('/login') }
 </script>

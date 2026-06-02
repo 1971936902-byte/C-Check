@@ -366,8 +366,9 @@ def test_regular_user_can_only_list_get_and_delete_owned_tasks(db_session_factor
         hidden_delete = client.delete(f"/api/reviews/{other['id']}", headers=auth_headers(user_id))
         deleted = client.delete(f"/api/reviews/{own['id']}", headers=auth_headers(user_id))
 
-    assert [task["id"] for task in listing.json()] == [own["id"]]
-    assert "files" not in listing.json()[0]
+    assert [task["id"] for task in listing.json()["items"]] == [own["id"]]
+    assert listing.json()["total"] == 1
+    assert "files" not in listing.json()["items"][0]
     assert hidden_get.status_code == 404
     assert hidden_delete.status_code == 404
     assert deleted.status_code == 204
@@ -393,7 +394,7 @@ def test_admin_reviews_endpoints_are_still_limited_to_owned_tasks(db_session_fac
         hidden_get = client.get(f"/api/reviews/{other['id']}", headers=auth_headers(admin_id))
         hidden_delete = client.delete(f"/api/reviews/{other['id']}", headers=auth_headers(admin_id))
 
-    assert listing.json() == []
+    assert listing.json() == {"items": [], "total": 0}
     assert hidden_get.status_code == 404
     assert hidden_delete.status_code == 404
 
@@ -440,5 +441,6 @@ def test_review_list_defaults_to_twenty_items_and_applies_offset(db_session_fact
         first_page = client.get("/api/reviews", headers=auth_headers(user_id))
         second_page = client.get("/api/reviews?offset=20", headers=auth_headers(user_id))
 
-    assert len(first_page.json()) == 20
-    assert len(second_page.json()) == 1
+    assert len(first_page.json()["items"]) == 20
+    assert first_page.json()["total"] == 21
+    assert len(second_page.json()["items"]) == 1

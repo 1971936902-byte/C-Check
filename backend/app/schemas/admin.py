@@ -43,6 +43,10 @@ class ModelEnabledRequest(BaseModel):
     is_enabled: bool
 
 
+class PromptUpdateRequest(BaseModel):
+    body: str = Field(min_length=1)
+
+
 class AdminModelNodeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -52,6 +56,7 @@ class AdminModelNodeResponse(BaseModel):
     base_url: str
     timeout_seconds: int
     is_enabled: bool
+    is_default: bool
     description: str | None
     created_at: datetime
 

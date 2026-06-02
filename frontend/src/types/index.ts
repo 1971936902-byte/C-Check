@@ -2,7 +2,7 @@ export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed'
 export type Severity = 'high' | 'medium' | 'low' | 'suggestion'
 
 export interface User { id: string; username: string; role: 'user' | 'admin'; is_enabled: boolean }
-export interface ModelNode { id: string; display_name: string; model_identifier: string; base_url: string; api_key?: string | null; timeout_seconds: number; is_enabled: boolean; description?: string | null; created_at?: string }
+export interface ModelNode { id: string; display_name: string; model_identifier: string; base_url: string; api_key?: string | null; timeout_seconds: number; is_enabled: boolean; is_default: boolean; description?: string | null; created_at?: string }
 export interface ReviewFile { id: string; relative_path: string; size_bytes: number }
 export interface ReviewTask {
   id: string; owner_id: string; model_node_id: string; input_mode: string; display_name: string
@@ -19,3 +19,4 @@ export interface Dashboard { users: number; enabled_users: number; models: numbe
 export interface AdminUser extends User { created_at: string }
 export interface Prompt { id: string; version: number; body: string; is_active: boolean; creator_id?: string | null; created_at: string }
 export interface AdminTask { id: string; owner_id: string; model_node_id: string; display_name: string; status: TaskStatus; progress: number; finding_count: number; error_message?: string | null; created_at: string }
+export interface ReviewTaskPage { items: ReviewTask[]; total: number }

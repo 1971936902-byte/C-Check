@@ -5,6 +5,8 @@ import LoginView from '../views/LoginView.vue'
 
 const AppLayout = () => import('../layouts/AppLayout.vue')
 const WorkspaceView = () => import('../views/WorkspaceView.vue')
+const DashboardView = () => import('../views/DashboardView.vue')
+const HelpView = () => import('../views/HelpView.vue')
 const ReportView = () => import('../views/ReportView.vue')
 const HistoryView = () => import('../views/HistoryView.vue')
 const ProfileView = () => import('../views/ProfileView.vue')
@@ -15,11 +17,13 @@ const router = createRouter({
   routes: [
     { path: '/login', component: LoginView, meta: { public: true } },
     { path: '/', component: AppLayout, children: [
-      { path: '', redirect: '/workspace' },
+      { path: '', redirect: '/dashboard' },
+      { path: 'dashboard', component: DashboardView },
       { path: 'workspace', component: WorkspaceView },
       { path: 'reports/:id', component: ReportView },
       { path: 'history', component: HistoryView },
       { path: 'profile', component: ProfileView },
+      { path: 'help', component: HelpView },
       { path: 'admin', component: AdminView, meta: { admin: true } },
     ] },
   ],

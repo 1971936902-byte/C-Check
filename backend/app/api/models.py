@@ -23,15 +23,19 @@ class ModelNodeResponse(BaseModel):
     base_url: str
     timeout_seconds: int
     is_enabled: bool
+    is_default: bool
     description: str | None
 
 
 @router.get("", response_model=list[ModelNodeResponse])
 def list_enabled_models(
-    _current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> list[ModelNode]:
-    return list(db.scalars(select(ModelNode).where(ModelNode.is_enabled.is_(True))).all())
+    query = select(ModelNode).where(ModelNode.is_enabled.is_(True)).order_by(ModelNode.is_default.desc(), ModelNode.created_at.asc())
+    if current_user.role != "admin":
+        query = query.where(ModelNode.is_default.is_(True))
+    return list(db.scalars(query).all())
 
 
 @router.post("/{model_id}/health")

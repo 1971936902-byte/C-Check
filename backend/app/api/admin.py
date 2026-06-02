@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,7 @@ from app.schemas.admin import (
     PasswordResetRequest,
     PromptCreateRequest,
     PromptResponse,
+    PromptUpdateRequest,
     UserCreateRequest,
     UserEnabledRequest,
 )
@@ -107,6 +108,8 @@ def list_models(db: Annotated[Session, Depends(get_db)]) -> list[ModelNode]:
 @router.post("/models", response_model=AdminModelNodeResponse, status_code=status.HTTP_201_CREATED)
 def create_model(request: ModelNodeRequest, db: Annotated[Session, Depends(get_db)]) -> ModelNode:
     node = ModelNode(**request.model_dump())
+    if db.scalar(select(func.count()).select_from(ModelNode).where(ModelNode.is_default.is_(True))) == 0:
+        node.is_default = True
     db.add(node)
     db.commit()
     db.refresh(node)
@@ -140,6 +143,20 @@ def set_model_enabled(
     return node
 
 
+@router.post("/models/{model_id}/default", response_model=AdminModelNodeResponse)
+def set_default_model(model_id: str, db: Annotated[Session, Depends(get_db)]) -> ModelNode:
+    node = db.get(ModelNode, model_id)
+    if node is None:
+        raise _not_found("model node")
+    if not node.is_enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="disabled model node cannot be the default")
+    db.execute(update(ModelNode).values(is_default=False))
+    node.is_default = True
+    db.commit()
+    db.refresh(node)
+    return node
+
+
 @router.delete("/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_model(model_id: str, db: Annotated[Session, Depends(get_db)]) -> Response:
     node = db.get(ModelNode, model_id)
@@ -159,7 +176,7 @@ def delete_model(model_id: str, db: Annotated[Session, Depends(get_db)]) -> Resp
 
 @router.get("/prompts", response_model=list[PromptResponse])
 def list_prompts(db: Annotated[Session, Depends(get_db)]) -> list[PromptVersion]:
-    return list(db.scalars(select(PromptVersion).order_by(PromptVersion.version.desc())).all())
+    return list(db.scalars(select(PromptVersion).order_by(PromptVersion.version.asc())).all())
 
 
 @router.post("/prompts", response_model=PromptResponse, status_code=status.HTTP_201_CREATED)
@@ -177,6 +194,33 @@ def set_active_prompt(prompt_id: str, db: Annotated[Session, Depends(get_db)]) -
     if prompt is None:
         raise _not_found("prompt")
     return activate_prompt(db, prompt)
+
+
+@router.put("/prompts/{prompt_id}", response_model=PromptResponse)
+def update_prompt(
+    prompt_id: str, request: PromptUpdateRequest, db: Annotated[Session, Depends(get_db)]
+) -> PromptVersion:
+    prompt = db.get(PromptVersion, prompt_id)
+    if prompt is None:
+        raise _not_found("prompt")
+    prompt.body = request.body
+    db.commit()
+    db.refresh(prompt)
+    return prompt
+
+
+@router.delete("/prompts/{prompt_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_prompt(prompt_id: str, db: Annotated[Session, Depends(get_db)]) -> Response:
+    prompt = db.get(PromptVersion, prompt_id)
+    if prompt is None:
+        raise _not_found("prompt")
+    if prompt.is_active:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="active prompt cannot be deleted")
+    if (db.scalar(select(func.count()).select_from(PromptVersion)) or 0) <= 1:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="at least one prompt version is required")
+    db.delete(prompt)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/tasks", response_model=list[AdminTaskResponse])

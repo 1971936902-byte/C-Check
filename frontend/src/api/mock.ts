@@ -2,7 +2,7 @@ import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, Review
 
 const STATE_KEY = 'c-check-mock-state'
 const SESSION_KEY = 'c-check-mock-session'
-const STATE_VERSION = 3
+const STATE_VERSION = 4
 
 type MockState = {
   version: number
@@ -55,8 +55,8 @@ const seedState = (): MockState => {
       { id: 'user-disabled', username: 'disabled_user', role: 'user', is_enabled: false, created_at: created },
     ],
     models: [
-      { id: 'model-qwen', display_name: 'Qwen3-Coder 30B', model_identifier: 'qwen3-coder-30b', base_url: 'http://gpu-node-01:8000', timeout_seconds: 120, is_enabled: true, description: '适合日常批量代码审查与规范检查。', created_at: created },
-      { id: 'model-deepseek', display_name: 'DeepSeek-Coder 33B', model_identifier: 'deepseek-coder-33b-instruct', base_url: 'http://gpu-node-02:8000', timeout_seconds: 180, is_enabled: true, description: '适合复杂逻辑与安全漏洞审计。', created_at: created },
+      { id: 'model-qwen', display_name: 'Qwen3-Coder 30B', model_identifier: 'qwen3-coder-30b', base_url: 'http://gpu-node-01:8000', timeout_seconds: 120, is_enabled: true, is_default: true, description: '适合日常批量代码审查与规范检查。', created_at: created },
+      { id: 'model-deepseek', display_name: 'DeepSeek-Coder 33B', model_identifier: 'deepseek-coder-33b-instruct', base_url: 'http://gpu-node-02:8000', timeout_seconds: 180, is_enabled: true, is_default: false, description: '适合复杂逻辑与安全漏洞审计。', created_at: created },
     ],
     prompts: [
       { id: 'prompt-2', version: 2, body: 'C 语言企业级审查提示词：检查内存安全、逻辑漏洞、性能、规范与可移植性。', is_active: true, created_at: created },
@@ -117,7 +117,11 @@ export const mockApi = {
     me: async () => response(requireUser(load()) as User),
     password: async () => response({ ok: true }),
   },
-  models: async () => response(load().models.filter((model) => model.is_enabled)),
+  models: async () => {
+    const state = load()
+    const models = state.models.filter((model) => model.is_enabled).sort((a, b) => Number(b.is_default) - Number(a.is_default))
+    return response(requireUser(state).role === 'admin' ? models : models.filter((model) => model.is_default))
+  },
   reviews: {
     submitText: async (model_node_id: string, source_text: string, check_types: string[]) => createReview(model_node_id, 'text', 'snippet.c', source_text ? 1 : 0, check_types),
     submitFile: async (mode: 'file' | 'archive', model_node_id: string, file: File, check_types: string[]) => createReview(model_node_id, mode, file.name, mode === 'archive' ? 6 : 1, check_types),
@@ -127,6 +131,10 @@ export const mockApi = {
       let tasks = visibleTasks(state)
       if (params?.keyword) tasks = tasks.filter((task) => task.display_name.includes(String(params.keyword)))
       if (params?.tester_name) tasks = tasks.filter((task) => state.users.find((user) => user.id === task.owner_id)?.username.includes(String(params.tester_name)))
+      if (params?.status) tasks = tasks.filter((task) => task.status === params.status)
+      if (params?.model_node_id) tasks = tasks.filter((task) => task.model_node_id === params.model_node_id)
+      if (params?.start_time) tasks = tasks.filter((task) => new Date(task.created_at) >= new Date(String(params.start_time)))
+      if (params?.end_time) tasks = tasks.filter((task) => new Date(task.created_at) <= new Date(String(params.end_time)))
       if (params?.severity) {
         const countKey = `${String(params.severity)}_count` as 'high_count' | 'medium_count' | 'low_count' | 'suggestion_count'
         tasks = tasks.filter((task) => {
@@ -134,7 +142,15 @@ export const mockApi = {
           return Boolean(report?.[countKey])
         })
       }
-      return response(tasks.map((task) => ({ ...task, tester_name: state.users.find((user) => user.id === task.owner_id)?.username || task.owner_id })))
+      const sortBy = String(params?.sort_by || 'created_at')
+      const sortDir = params?.sort_dir === 'asc' ? 1 : -1
+      const modelName = (task: ReviewTask) => state.models.find((model) => model.id === task.model_node_id)?.display_name || task.model_node_id
+      const testerName = (task: ReviewTask) => state.users.find((user) => user.id === task.owner_id)?.username || task.owner_id
+      const value = (task: ReviewTask) => sortBy === 'tester_name' ? testerName(task) : sortBy === 'model' ? modelName(task) : task[sortBy as keyof ReviewTask] ?? ''
+      tasks.sort((left, right) => String(value(left)).localeCompare(String(value(right)), 'zh-CN', { numeric: true }) * sortDir)
+      const total = tasks.length
+      const offset = Number(params?.offset || 0), limit = Number(params?.limit || 20)
+      return response({ items: tasks.slice(offset, offset + limit).map((task) => ({ ...task, tester_name: testerName(task) })), total })
     },
     get: async (taskId: string) => {
       const state = load()
@@ -196,14 +212,15 @@ export const mockApi = {
     saveModel: async (payload: Partial<ModelNode> & { display_name: string; model_identifier: string; base_url: string }, modelId?: string) => {
       const state = load()
       if (modelId) Object.assign(state.models.find((model) => model.id === modelId)!, payload)
-      else state.models.push({ id: id('model'), timeout_seconds: 120, is_enabled: true, ...payload })
+      else state.models.push({ id: id('model'), timeout_seconds: 120, is_enabled: true, is_default: !state.models.some(model => model.is_default), ...payload })
       save(state)
       return response({ ok: true })
     },
     enableModel: async (modelId: string, is_enabled: boolean) => update(state => state.models.find(model => model.id === modelId)!.is_enabled = is_enabled),
+    defaultModel: async (modelId: string) => update(state => state.models.forEach(model => { model.is_default = model.id === modelId })),
     deleteModel: async (modelId: string) => update(state => { state.models = state.models.filter(model => model.id !== modelId) }),
     modelHealth: async () => response({ ok: true }),
-    prompts: async () => response(load().prompts),
+    prompts: async () => response(load().prompts.sort((a, b) => a.version - b.version)),
     createPrompt: async (body: string) => {
       const state = load()
       state.prompts.push({ id: id('prompt'), version: Math.max(...state.prompts.map(prompt => prompt.version)) + 1, body, is_active: false, created_at: now() })
@@ -211,6 +228,12 @@ export const mockApi = {
       return response({ ok: true })
     },
     activatePrompt: async (promptId: string) => update(state => state.prompts.forEach(prompt => { prompt.is_active = prompt.id === promptId })),
+    updatePrompt: async (promptId: string, body: string) => update(state => { state.prompts.find(prompt => prompt.id === promptId)!.body = body }),
+    deletePrompt: async (promptId: string) => update(state => {
+      const prompt = state.prompts.find(item => item.id === promptId)
+      if (!prompt || prompt.is_active || state.prompts.length <= 1) throw new Error('当前启用版本或最后一个版本不可删除')
+      state.prompts = state.prompts.filter(item => item.id !== promptId)
+    }),
     tasks: async (status?: TaskStatus | '') => response(load().tasks.filter(task => !status || task.status === status).map(taskToAdmin)),
   },
 }

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, ReviewTask, TaskStatus, User } from '../types'
+import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
 import { mockApi } from './mock'
 
 export const TOKEN_KEY = 'c-check-token'
@@ -37,7 +37,7 @@ export const reviewApi = {
     return api.post<ReviewTask>(`/reviews/${mode}`, body)
   },
   submitDemoArchive: (checkTypes: string[]) => mockApi.reviews.submitDemoArchive(checkTypes),
-  list: (params?: Record<string, unknown>) => MOCK_API_ENABLED ? mockApi.reviews.list(params) : api.get<ReviewTask[]>('/reviews', { params }),
+  list: (params?: Record<string, unknown>) => MOCK_API_ENABLED ? mockApi.reviews.list(params) : api.get<ReviewTaskPage>('/reviews', { params }),
   get: (id: string) => MOCK_API_ENABLED ? mockApi.reviews.get(id) : api.get<ReviewTask>(`/reviews/${id}`),
   remove: (id: string) => MOCK_API_ENABLED ? mockApi.reviews.remove(id) : api.delete(`/reviews/${id}`),
 }
@@ -54,10 +54,13 @@ export const adminApi = {
   models: () => MOCK_API_ENABLED ? mockApi.admin.models() : api.get<ModelNode[]>('/admin/models'),
   saveModel: (payload: Partial<ModelNode> & { display_name: string; model_identifier: string; base_url: string }, id?: string) => MOCK_API_ENABLED ? mockApi.admin.saveModel(payload, id) : id ? api.put(`/admin/models/${id}`, payload) : api.post('/admin/models', payload),
   enableModel: (id: string, is_enabled: boolean) => MOCK_API_ENABLED ? mockApi.admin.enableModel(id, is_enabled) : api.patch(`/admin/models/${id}/enabled`, { is_enabled }),
+  defaultModel: (id: string) => MOCK_API_ENABLED ? mockApi.admin.defaultModel(id) : api.post(`/admin/models/${id}/default`),
   deleteModel: (id: string) => MOCK_API_ENABLED ? mockApi.admin.deleteModel(id) : api.delete(`/admin/models/${id}`),
   modelHealth: (id: string) => MOCK_API_ENABLED ? mockApi.admin.modelHealth() : api.post(`/models/${id}/health`),
   prompts: () => MOCK_API_ENABLED ? mockApi.admin.prompts() : api.get<Prompt[]>('/admin/prompts'),
   createPrompt: (body: string) => MOCK_API_ENABLED ? mockApi.admin.createPrompt(body) : api.post('/admin/prompts', { body }),
+  updatePrompt: (id: string, body: string) => MOCK_API_ENABLED ? mockApi.admin.updatePrompt(id, body) : api.put(`/admin/prompts/${id}`, { body }),
+  deletePrompt: (id: string) => MOCK_API_ENABLED ? mockApi.admin.deletePrompt(id) : api.delete(`/admin/prompts/${id}`),
   activatePrompt: (id: string) => MOCK_API_ENABLED ? mockApi.admin.activatePrompt(id) : api.post(`/admin/prompts/${id}/activate`),
   tasks: (status?: TaskStatus | '') => MOCK_API_ENABLED ? mockApi.admin.tasks(status) : api.get<AdminTask[]>('/admin/tasks', { params: { status: status || undefined } }),
 }

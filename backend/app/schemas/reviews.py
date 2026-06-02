@@ -44,3 +44,8 @@ class ReviewTaskSummaryResponse(BaseModel):
 
 class ReviewTaskResponse(ReviewTaskSummaryResponse):
     files: list[ReviewFileResponse] = Field(default_factory=list)
+
+
+class ReviewTaskPageResponse(BaseModel):
+    items: list[ReviewTaskSummaryResponse]
+    total: int
