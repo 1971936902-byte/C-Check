@@ -123,20 +123,18 @@ export const mockApi = {
     submitFile: async (mode: 'file' | 'archive', model_node_id: string, file: File, check_types: string[]) => createReview(model_node_id, mode, file.name, mode === 'archive' ? 6 : 1, check_types),
     submitDemoArchive: async (check_types: string[]) => createReview('model-qwen', 'archive', 'embedded-gateway-live-demo.zip', 6, check_types),
     list: async (params?: Record<string, unknown>) => {
-      let tasks = visibleTasks(load())
+      const state = load()
+      let tasks = visibleTasks(state)
       if (params?.keyword) tasks = tasks.filter((task) => task.display_name.includes(String(params.keyword)))
-      if (params?.status) tasks = tasks.filter((task) => task.status === params.status)
-      if (params?.model_node_id) tasks = tasks.filter((task) => task.model_node_id === params.model_node_id)
-      if (params?.start_time) tasks = tasks.filter((task) => new Date(task.created_at) >= new Date(String(params.start_time)))
-      if (params?.end_time) tasks = tasks.filter((task) => new Date(task.created_at) <= new Date(String(params.end_time)))
+      if (params?.tester_name) tasks = tasks.filter((task) => state.users.find((user) => user.id === task.owner_id)?.username.includes(String(params.tester_name)))
       if (params?.severity) {
         const countKey = `${String(params.severity)}_count` as 'high_count' | 'medium_count' | 'low_count' | 'suggestion_count'
         tasks = tasks.filter((task) => {
-          const report = load().reports.find((item) => item.id === task.report_id)
+          const report = state.reports.find((item) => item.id === task.report_id)
           return Boolean(report?.[countKey])
         })
       }
-      return response(tasks)
+      return response(tasks.map((task) => ({ ...task, tester_name: state.users.find((user) => user.id === task.owner_id)?.username || task.owner_id })))
     },
     get: async (taskId: string) => {
       const state = load()

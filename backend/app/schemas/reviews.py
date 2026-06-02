@@ -24,6 +24,7 @@ class ReviewTaskSummaryResponse(BaseModel):
 
     id: str
     owner_id: str
+    tester_name: str
     model_node_id: str
     input_mode: str
     display_name: str

@@ -107,6 +107,10 @@ class ReviewTask(TimestampMixin, Base):
     def report_id(self) -> str | None:
         return self.report.id if self.report is not None else None
 
+    @property
+    def tester_name(self) -> str:
+        return self.owner.username
+
 
 class ReviewFile(TimestampMixin, Base):
     __tablename__ = "review_files"

@@ -6,6 +6,7 @@ export interface ModelNode { id: string; display_name: string; model_identifier:
 export interface ReviewFile { id: string; relative_path: string; size_bytes: number }
 export interface ReviewTask {
   id: string; owner_id: string; model_node_id: string; input_mode: string; display_name: string
+  tester_name?: string
   status: TaskStatus; progress: number; error_message?: string | null; duration_ms?: number | null
   file_count: number; finding_count: number; started_at?: string | null; completed_at?: string | null
   created_at: string; updated_at: string; files?: ReviewFile[]; report_id?: string | null; check_types?: string[]

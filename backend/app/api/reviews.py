@@ -49,7 +49,7 @@ def _create_task(
 
 
 def _visible_task_query(current_user: User):
-    return select(ReviewTask).where(ReviewTask.owner_id == current_user.id)
+    return select(ReviewTask).options(selectinload(ReviewTask.owner)).where(ReviewTask.owner_id == current_user.id)
 
 
 @router.post("/text", response_model=ReviewTaskResponse, status_code=status.HTTP_201_CREATED)
@@ -119,6 +119,7 @@ def list_reviews(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     keyword: str | None = None,
+    tester_name: str | None = None,
     task_status: Annotated[TaskStatus | None, Query(alias="status")] = None,
     model_node_id: str | None = None,
     severity: str | None = Query(default=None, pattern="^(high|medium|low|suggestion)$"),
@@ -128,6 +129,8 @@ def list_reviews(
     query = _visible_task_query(current_user)
     if keyword:
         query = query.where(ReviewTask.display_name.contains(keyword))
+    if tester_name:
+        query = query.where(ReviewTask.owner.has(User.username.contains(tester_name)))
     if task_status is not None:
         query = query.where(ReviewTask.status == task_status)
     if model_node_id:
