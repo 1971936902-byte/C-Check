@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.db.models import ModelNode, ReviewFile
 from app.schemas.model_response import ModelReviewResponse
+from app.services.check_types import check_types_prompt
 
 
 class ModelInvocationError(RuntimeError):
@@ -91,7 +92,8 @@ async def invoke_selected_model(db: Session, task_id: str) -> ModelReviewRespons
     if task is None:
         raise ModelInvocationError("review task does not exist")
     prompt = get_active_prompt(db)
-    return await invoke_model(node=task.model_node, files=task.files, prompt=prompt.body)
+    scoped_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
+    return await invoke_model(node=task.model_node, files=task.files, prompt=scoped_prompt)
 
 
 async def check_model_health(node: ModelNode, settings: Settings | None = None) -> dict[str, Any]:

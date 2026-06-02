@@ -5,20 +5,21 @@ import { CirclePlus, Connection, Refresh } from '@element-plus/icons-vue'
 import { adminApi, errorMessage } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
 import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, TaskStatus } from '../types'
+import { validateModel, validateNewUser, validatePrompt } from './form-validation'
 const active = ref('dashboard'), dashboard = ref<Dashboard>(), users = ref<AdminUser[]>([]), models = ref<ModelNode[]>([]), prompts = ref<Prompt[]>([]), tasks = ref<AdminTask[]>([]), taskStatus = ref<TaskStatus | ''>('')
 const userDialog = ref(false), modelDialog = ref(false), promptDialog = ref(false), editingModel = ref<string>()
 const userForm = reactive({ username: '', password: '', role: 'user' }), modelForm = reactive({ display_name: '', model_identifier: '', base_url: '', api_key: '', timeout_seconds: 120, is_enabled: true, description: '' }), promptBody = ref('')
 const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 async function load() { try { const [d, u, m, p, t] = await Promise.all([adminApi.dashboard(), adminApi.users(), adminApi.models(), adminApi.prompts(), adminApi.tasks(taskStatus.value)]); dashboard.value = d.data; users.value = u.data; models.value = m.data; prompts.value = p.data; tasks.value = t.data } catch (e) { ElMessage.error(errorMessage(e)) } }
-async function createUser() { try { await adminApi.createUser(userForm); userDialog.value = false; Object.assign(userForm, { username: '', password: '', role: 'user' }); await load(); ElMessage.success('用户已创建') } catch (e) { ElMessage.error(errorMessage(e)) } }
+async function createUser() { const message = validateNewUser(userForm); if (message) return ElMessage.warning(message); try { await adminApi.createUser(userForm); userDialog.value = false; Object.assign(userForm, { username: '', password: '', role: 'user' }); await load(); ElMessage.success('用户已创建') } catch (e) { ElMessage.error(errorMessage(e)) } }
 async function toggleUser(row: AdminUser) { try { await adminApi.enableUser(row.id, !row.is_enabled); await load() } catch (e) { ElMessage.error(errorMessage(e)) } }
 async function resetPassword(row: AdminUser) { try { const { value } = await ElMessageBox.prompt('请输入至少 12 位的新密码', `重置 ${row.username} 的密码`, { inputType: 'password', inputValidator: (v) => v.length >= 12 || '密码至少 12 位' }); await adminApi.resetPassword(row.id, value); ElMessage.success('密码已重置') } catch (e) { if (e !== 'cancel') ElMessage.error(errorMessage(e)) } }
 function openModel(row?: ModelNode) { editingModel.value = row?.id; Object.assign(modelForm, row ? { ...row, api_key: row.api_key || '' } : { display_name: '', model_identifier: '', base_url: '', api_key: '', timeout_seconds: 120, is_enabled: true, description: '' }); modelDialog.value = true }
-async function saveModel() { try { await adminApi.saveModel({ ...modelForm, api_key: modelForm.api_key || undefined }, editingModel.value); modelDialog.value = false; await load(); ElMessage.success('模型配置已保存') } catch (e) { ElMessage.error(errorMessage(e)) } }
+async function saveModel() { const message = validateModel(modelForm); if (message) return ElMessage.warning(message); try { await adminApi.saveModel({ ...modelForm, api_key: modelForm.api_key || undefined }, editingModel.value); modelDialog.value = false; await load(); ElMessage.success('模型配置已保存') } catch (e) { ElMessage.error(errorMessage(e)) } }
 async function toggleModel(row: ModelNode) { try { await adminApi.enableModel(row.id, !row.is_enabled); await load() } catch (e) { ElMessage.error(errorMessage(e)) } }
 async function removeModel(id: string) { try { await ElMessageBox.confirm('确认删除此模型节点？', '删除模型', { type: 'warning' }); await adminApi.deleteModel(id); await load() } catch (e) { if (e !== 'cancel') ElMessage.error(errorMessage(e)) } }
 async function health(id: string) { try { await adminApi.modelHealth(id); ElMessage.success('模型服务健康检查通过') } catch (e) { ElMessage.error(errorMessage(e)) } }
-async function createPrompt() { try { await adminApi.createPrompt(promptBody.value); promptDialog.value = false; promptBody.value = ''; await load() } catch (e) { ElMessage.error(errorMessage(e)) } }
+async function createPrompt() { const message = validatePrompt(promptBody.value); if (message) return ElMessage.warning(message); try { await adminApi.createPrompt(promptBody.value); promptDialog.value = false; promptBody.value = ''; await load() } catch (e) { ElMessage.error(errorMessage(e)) } }
 async function activatePrompt(id: string) { try { await adminApi.activatePrompt(id); await load(); ElMessage.success('提示词版本已启用') } catch (e) { ElMessage.error(errorMessage(e)) } }
 onMounted(load)
 </script>

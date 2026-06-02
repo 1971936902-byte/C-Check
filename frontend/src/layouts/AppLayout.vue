@@ -17,6 +17,7 @@ function logout() { auth.logout(); router.push('/login') }
     <aside class="sidebar glass">
       <div class="brand"><div class="brand-mark">C</div><div><strong>C-Check</strong><span>智能代码审查</span></div></div>
       <nav><router-link v-for="item in items" :key="item.path" :to="item.path" :class="{ active: route.path.startsWith(item.path) }"><el-icon><component :is="item.icon" /></el-icon>{{ item.label }}</router-link></nav>
+      <button class="mobile-logout" aria-label="退出登录" title="退出登录" @click="logout"><el-icon><SwitchButton /></el-icon></button>
       <div class="sidebar-bottom"><router-link to="/profile"><el-icon><Setting /></el-icon>{{ auth.user?.username }}</router-link><button @click="logout"><el-icon><SwitchButton /></el-icon>退出登录</button></div>
     </aside>
     <main class="main-area"><router-view /></main>

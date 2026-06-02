@@ -1,4 +1,5 @@
 from typing import Annotated
+import json
 
 from datetime import datetime
 
@@ -33,6 +34,7 @@ def _create_task(
     current_user: User,
     model_node_id: str,
     submission: Submission,
+    check_types: list[str],
 ) -> ReviewTask:
     try:
         return create_review_task(
@@ -40,6 +42,7 @@ def _create_task(
             owner=current_user,
             model_node_id=model_node_id,
             submission=submission,
+            check_types=check_types,
         )
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
@@ -60,12 +63,23 @@ def submit_text(
         submission = collect_text_submission(request.source_text, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    return _create_task(db, current_user, request.model_node_id, submission)
+    return _create_task(db, current_user, request.model_node_id, submission, request.check_types)
+
+
+def _parse_check_types(value: str) -> list[str]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise SubmissionError("check_types must be a JSON array") from exc
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise SubmissionError("check_types must be a JSON array of strings")
+    return parsed
 
 
 @router.post("/file", response_model=ReviewTaskResponse, status_code=status.HTTP_201_CREATED)
 async def submit_file(
     model_node_id: Annotated[str, Form(min_length=1, max_length=36)],
+    check_types: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
@@ -76,12 +90,13 @@ async def submit_file(
         submission = collect_file_submission(file.filename or "", content, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    return _create_task(db, current_user, model_node_id, submission)
+    return _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
 
 
 @router.post("/archive", response_model=ReviewTaskResponse, status_code=status.HTTP_201_CREATED)
 async def submit_archive(
     model_node_id: Annotated[str, Form(min_length=1, max_length=36)],
+    check_types: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
@@ -94,7 +109,7 @@ async def submit_archive(
         submission = collect_archive_submission(file.filename or "", content, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    return _create_task(db, current_user, model_node_id, submission)
+    return _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
 
 
 @router.get("", response_model=list[ReviewTaskSummaryResponse])

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+from app.services.check_types import validate_check_types
 
 
 ALLOWED_SOURCE_EXTENSIONS = {".c", ".h"}
@@ -186,6 +187,7 @@ def create_review_task(
     owner: User,
     model_node_id: str,
     submission: Submission,
+    check_types: list[str],
 ) -> ReviewTask:
     model_node = db.get(ModelNode, model_node_id)
     if model_node is None or not model_node.is_enabled:
@@ -197,6 +199,7 @@ def create_review_task(
         input_mode=submission.input_mode,
         display_name=submission.display_name,
         file_count=len(submission.files),
+        check_types=validate_check_types(check_types),
     )
     task.files.extend(
         ReviewFile(

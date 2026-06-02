@@ -22,6 +22,18 @@ class FindingCategory(str, Enum):
     PORTABILITY = "portability"
 
 
+class CodeLineKind(str, Enum):
+    CONTEXT = "context"
+    REMOVED = "removed"
+    ADDED = "added"
+
+
+class CodeLine(BaseModel):
+    line: int = Field(ge=1)
+    content: str
+    kind: CodeLineKind = CodeLineKind.CONTEXT
+
+
 class ReviewFinding(BaseModel):
     severity: FindingSeverity
     category: FindingCategory
@@ -30,6 +42,8 @@ class ReviewFinding(BaseModel):
     file_path: str = Field(min_length=1, max_length=512)
     line: int | None = Field(default=None, ge=1)
     remediation: str = Field(min_length=1)
+    code_snippet: list[CodeLine] = Field(default_factory=list)
+    fixed_snippet: list[CodeLine] = Field(default_factory=list)
 
 
 class ModelReviewResponse(BaseModel):

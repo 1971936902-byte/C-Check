@@ -21,9 +21,17 @@
       "description": "问题说明",
       "file_path": "对应文件相对路径",
       "line": 1 或 null,
-      "remediation": "可执行的修复建议"
+      "remediation": "可执行的修复建议",
+      "code_snippet": [
+        { "line": 1, "content": "原始代码行", "kind": "context | removed" }
+      ],
+      "fixed_snippet": [
+        { "line": 1, "content": "修复后的代码行", "kind": "context | added" }
+      ]
     }
   ]
 }
+
+每个问题都应尽量返回定位行附近的代码上下文。code_snippet 将问题行标记为 removed，fixed_snippet 将建议修改行标记为 added，其余上下文行标记为 context。
 
 没有问题时 findings 返回空数组，并在 summary 中说明。

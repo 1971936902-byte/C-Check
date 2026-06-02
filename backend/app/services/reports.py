@@ -73,6 +73,14 @@ def render_markdown(report: Report) -> str:
                 "",
             ]
         )
+        for title, snippet in (
+            ("Problematic code", finding.get("code_snippet", [])),
+            ("Suggested code", finding.get("fixed_snippet", [])),
+        ):
+            if snippet:
+                lines.extend([f"**{title}:**", "", "```c"])
+                lines.extend(item["content"] for item in snippet)
+                lines.extend(["```", ""])
     return "\n".join(lines).rstrip() + "\n"
 
 

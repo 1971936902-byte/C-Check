@@ -94,6 +94,7 @@ class ReviewTask(TimestampMixin, Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     file_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     finding_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    check_types: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
 

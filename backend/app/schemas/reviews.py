@@ -8,6 +8,7 @@ from app.db.models import TaskStatus
 class TextReviewRequest(BaseModel):
     model_node_id: str = Field(min_length=1, max_length=36)
     source_text: str
+    check_types: list[str] = Field(min_length=1)
 
 
 class ReviewFileResponse(BaseModel):
@@ -32,6 +33,7 @@ class ReviewTaskSummaryResponse(BaseModel):
     duration_ms: int | None
     file_count: int
     finding_count: int
+    check_types: list[str]
     report_id: str | None
     started_at: datetime | None
     completed_at: datetime | None
