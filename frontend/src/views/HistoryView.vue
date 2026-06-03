@@ -15,7 +15,12 @@ async function load() { loading.value = true; try { const { data } = await revie
 function applyFilters() { page.value = 1; load() }
 function changePage(value: number) { page.value = value; load() }
 function changePageSize(value: number) { pageSize.value = value; page.value = 1; load() }
-function changeSort({ prop, order }: { prop: string; order: 'ascending' | 'descending' | null }) { sortBy.value = prop || 'created_at'; sortDir.value = order === 'ascending' ? 'asc' : 'desc'; page.value = 1; load() }
+function changeSort({ prop, order }: { prop: string; order: 'ascending' | 'descending' | null }) {
+  sortBy.value = order ? prop : 'created_at'
+  sortDir.value = order === 'ascending' ? 'asc' : 'desc'
+  page.value = 1
+  load()
+}
 async function remove(id: string) { try { await ElMessageBox.confirm('删除后无法恢复，确认继续？', '删除审查记录', { type: 'warning' }); await reviewApi.remove(id); await load(); ElMessage.success('记录已删除') } catch (e) { if (e !== 'cancel') ElMessage.error(errorMessage(e)) } }
 function open(task: ReviewTask) { task.report_id ? router.push(`/reports/${task.report_id}`) : ElMessage.warning('报告暂不可用，请稍后刷新列表') }
 async function downloadMarkdown(task: ReviewTask) { if (!task.report_id) return; try { const { data } = await reportApi.download(task.report_id, 'markdown'); const url = URL.createObjectURL(data); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `report-${task.report_id}.md`; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 0) } catch (e) { ElMessage.error(errorMessage(e)) } }
