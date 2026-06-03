@@ -49,7 +49,10 @@ def _create_task(
 
 
 def _visible_task_query(current_user: User):
-    return select(ReviewTask).options(selectinload(ReviewTask.owner)).where(ReviewTask.owner_id == current_user.id)
+    query = select(ReviewTask).options(selectinload(ReviewTask.owner))
+    if current_user.role != "admin":
+        query = query.where(ReviewTask.owner_id == current_user.id)
+    return query
 
 
 @router.post("/text", response_model=ReviewTaskResponse, status_code=status.HTTP_201_CREATED)

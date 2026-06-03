@@ -124,6 +124,8 @@ def update_model(
     if node is None:
         raise _not_found("model node")
     for field, value in request.model_dump().items():
+        if field == "api_key" and field not in request.model_fields_set:
+            continue
         setattr(node, field, value)
     db.commit()
     db.refresh(node)

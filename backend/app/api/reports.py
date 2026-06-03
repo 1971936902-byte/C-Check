@@ -32,7 +32,7 @@ def _owned_report(db: Session, report_id: str, current_user: User) -> Report:
     report = db.get(Report, report_id)
     if report is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="report not found")
-    if report.task.owner_id != current_user.id:
+    if current_user.role != "admin" and report.task.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="report access denied")
     return report
 

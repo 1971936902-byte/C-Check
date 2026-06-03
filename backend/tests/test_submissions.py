@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from app.core.config import Settings
 from app.core.security import create_access_token, hash_password
-from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+from app.db.models import ModelNode, Report, ReviewFile, ReviewTask, User
 
 
 JWT_SECRET = "test-jwt-secret-at-least-32-characters-long"
@@ -22,6 +22,7 @@ def use_secure_test_jwt_secret(monkeypatch):
     from app.core.config import get_settings
 
     monkeypatch.setenv("JWT_SECRET", JWT_SECRET)
+    monkeypatch.setattr("app.services.submissions.dispatch_review", lambda _task_id: None)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -285,7 +286,11 @@ def test_text_submission_persists_task_and_file(db_session_factory):
         response = client.post(
             "/api/reviews/text",
             headers=auth_headers(user_id),
-            json={"model_node_id": node_id, "source_text": "int main(void) { return 0; }"},
+            json={
+                "model_node_id": node_id,
+                "source_text": "int main(void) { return 0; }",
+                "check_types": ["logic"],
+            },
         )
 
     assert response.status_code == 201
@@ -309,13 +314,13 @@ def test_file_and_archive_endpoints_accept_valid_uploads(db_session_factory):
         file_response = client.post(
             "/api/reviews/file",
             headers=auth_headers(user_id),
-            data={"model_node_id": node_id},
+            data={"model_node_id": node_id, "check_types": '["maintainability"]'},
             files={"file": ("main.h", b"#pragma once", "text/plain")},
         )
         archive_response = client.post(
             "/api/reviews/archive",
             headers=auth_headers(user_id),
-            data={"model_node_id": node_id},
+            data={"model_node_id": node_id, "check_types": '["logic"]'},
             files={"file": ("sources.zip", archive, "application/zip")},
         )
 
@@ -332,12 +337,12 @@ def test_submission_rejects_missing_or_disabled_model_node(db_session_factory):
         missing = client.post(
             "/api/reviews/text",
             headers=auth_headers(user_id),
-            json={"model_node_id": "missing-node", "source_text": "int value;"},
+            json={"model_node_id": "missing-node", "source_text": "int value;", "check_types": ["logic"]},
         )
         disabled = client.post(
             "/api/reviews/text",
             headers=auth_headers(user_id),
-            json={"model_node_id": disabled_node_id, "source_text": "int value;"},
+            json={"model_node_id": disabled_node_id, "source_text": "int value;", "check_types": ["logic"]},
         )
 
     assert missing.status_code == 422
@@ -353,12 +358,12 @@ def test_regular_user_can_only_list_get_and_delete_owned_tasks(db_session_factor
         own = client.post(
             "/api/reviews/text",
             headers=auth_headers(user_id),
-            json={"model_node_id": node_id, "source_text": "int own;"},
+            json={"model_node_id": node_id, "source_text": "int own;", "check_types": ["logic"]},
         ).json()
         other = client.post(
             "/api/reviews/text",
             headers=auth_headers(other_id),
-            json={"model_node_id": node_id, "source_text": "int other;"},
+            json={"model_node_id": node_id, "source_text": "int other;", "check_types": ["logic"]},
         ).json()
 
         listing = client.get("/api/reviews", headers=auth_headers(user_id))
@@ -374,29 +379,46 @@ def test_regular_user_can_only_list_get_and_delete_owned_tasks(db_session_factor
     assert deleted.status_code == 204
 
 
-def test_admin_reviews_endpoints_are_still_limited_to_owned_tasks(db_session_factory):
+def test_admin_reviews_and_reports_endpoints_can_manage_all_tasks(db_session_factory):
     from app.main import app
 
     admin_id, other_id, node_id = add_user_and_node(db_session_factory)
     with db_session_factory() as db:
         admin = db.get(User, admin_id)
         admin.role = "admin"
+        owner = db.get(User, other_id)
+        node = db.get(ModelNode, node_id)
+        task = ReviewTask(
+            owner=owner,
+            model_node=node,
+            input_mode="text",
+            display_name="other-snippet.c",
+            file_count=1,
+            check_types=["logic"],
+        )
+        report = Report(
+            task=task,
+            summary="No issues found.",
+            score=100,
+            category_counts={},
+            result_json={"summary": "No issues found.", "score": 100, "findings": []},
+        )
+        db.add_all([task, report])
         db.commit()
+        task_id = task.id
+        report_id = report.id
 
     with TestClient(app) as client:
-        other = client.post(
-            "/api/reviews/text",
-            headers=auth_headers(other_id),
-            json={"model_node_id": node_id, "source_text": "int other;"},
-        ).json()
-
         listing = client.get("/api/reviews", headers=auth_headers(admin_id))
-        hidden_get = client.get(f"/api/reviews/{other['id']}", headers=auth_headers(admin_id))
-        hidden_delete = client.delete(f"/api/reviews/{other['id']}", headers=auth_headers(admin_id))
+        visible_get = client.get(f"/api/reviews/{task_id}", headers=auth_headers(admin_id))
+        visible_report = client.get(f"/api/reports/{report_id}", headers=auth_headers(admin_id))
+        deleted = client.delete(f"/api/reviews/{task_id}", headers=auth_headers(admin_id))
 
-    assert listing.json() == {"items": [], "total": 0}
-    assert hidden_get.status_code == 404
-    assert hidden_delete.status_code == 404
+    assert [task["id"] for task in listing.json()["items"]] == [task_id]
+    assert listing.json()["total"] == 1
+    assert visible_get.status_code == 200
+    assert visible_report.status_code == 200
+    assert deleted.status_code == 204
 
 
 @pytest.mark.parametrize(
