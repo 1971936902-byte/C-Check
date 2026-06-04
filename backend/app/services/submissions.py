@@ -193,13 +193,18 @@ def create_review_task(
     if model_node is None or not model_node.is_enabled:
         raise SubmissionError("model node does not exist or is disabled")
 
+    try:
+        normalized_check_types = validate_check_types(check_types)
+    except ValueError as exc:
+        raise SubmissionError(str(exc)) from exc
+
     task = ReviewTask(
         owner=owner,
         model_node=model_node,
         input_mode=submission.input_mode,
         display_name=submission.display_name,
         file_count=len(submission.files),
-        check_types=validate_check_types(check_types),
+        check_types=normalized_check_types,
     )
     task.files.extend(
         ReviewFile(

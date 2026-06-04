@@ -349,6 +349,22 @@ def test_submission_rejects_missing_or_disabled_model_node(db_session_factory):
     assert disabled.status_code == 422
 
 
+def test_submission_rejects_unsupported_check_types(db_session_factory):
+    from app.main import app
+
+    user_id, _, node_id = add_user_and_node(db_session_factory)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/reviews/text",
+            headers=auth_headers(user_id),
+            json={"model_node_id": node_id, "source_text": "int value;", "check_types": ["style"]},
+        )
+
+    assert response.status_code == 422
+    assert "unsupported check types" in response.json()["detail"]
+
+
 def test_regular_user_can_only_list_get_and_delete_owned_tasks(db_session_factory):
     from app.main import app
 
