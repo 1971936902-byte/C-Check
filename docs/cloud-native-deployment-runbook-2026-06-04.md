@@ -1,0 +1,775 @@
+# C-Check 云服务器前后端部署实战记录
+
+日期：2026-06-04  
+适用范围：Ubuntu 22.04 云服务器，前后端分离部署，FastAPI + Celery + Redis + MySQL + Nginx + Vue3/Vite。
+
+本文记录本次 C-Check 在云服务器上的完整部署步骤、验证方式、踩过的坑和最终成功经验。文档中的密码、Token、数据库密钥请使用你自己的安全值，不要把真实密钥提交到 Git。
+
+## 1. 最终访问架构
+
+本次成功方案不是直接访问服务器的 80 端口，而是使用云平台提供的“预留端口映射”。
+
+```text
+公网访问：
+http://180.127.11.167:24164/
+http://223.109.239.30:24164/
+
+云平台端口映射：
+外网 24164 -> 服务器内网 8800
+
+服务器内部：
+Nginx 监听 0.0.0.0:8800
+Nginx /api/ 反向代理到 127.0.0.1:8000
+FastAPI 监听 127.0.0.1:8000
+Celery worker 连接 Redis
+MySQL 保存用户、模型、任务、报告
+Redis 作为 Celery broker/result backend
+```
+
+服务拆分：
+
+| 服务 | 端口/位置 | 作用 |
+| --- | --- | --- |
+| Nginx | `0.0.0.0:8800` | 对外提供前端静态页面，并代理 `/api/` |
+| FastAPI | `127.0.0.1:8000` | 后端 API |
+| Celery worker | 无 HTTP 端口 | 执行代码审查异步任务 |
+| MySQL | `127.0.0.1:3306` | 持久化业务数据 |
+| Redis | `127.0.0.1:6379` | Celery 队列和结果后端 |
+
+## 2. 前置连接信息
+
+以新服务器为例：
+
+```bash
+ssh root@180.127.11.167 -p 24116
+```
+
+如果电信公网不可用，可尝试移动公网：
+
+```bash
+ssh root@223.109.239.30 -p 24116
+```
+
+建议优先使用 `root` 做首次部署，部署完成后再根据安全需求创建普通运维用户。
+
+## 3. 系统环境检查
+
+登录服务器后先确认系统、GPU、磁盘和端口状态：
+
+```bash
+hostname
+whoami
+cat /etc/os-release
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+df -h /
+ss -ltnp
+```
+
+本次成功环境：
+
+```text
+Ubuntu 22.04.3 LTS
+NVIDIA A100-SXM4-40GB
+根分区约 196G，总可用约 147G
+```
+
+注意：当前可用部署先使用 `mock://local` 模型节点跑通业务闭环，真实 30B+ VLLM 模型可以后续再接入。
+
+## 4. 准备基础软件
+
+如果服务器已经有 MySQL、Redis、Nginx、Python 3.12、Node 22，可以跳过重复安装。检查命令：
+
+```bash
+systemctl status mysql redis-server nginx --no-pager
+python3 --version
+/opt/miniconda/bin/python --version || true
+/opt/node22/bin/node -v || true
+```
+
+如果缺少组件，可按下面方式安装。
+
+### 4.1 安装系统包
+
+```bash
+apt update
+apt install -y \
+  git curl xz-utils build-essential nginx redis-server mysql-server \
+  pkg-config default-libmysqlclient-dev libssl-dev libffi-dev \
+  python3-venv python3-dev
+```
+
+启动基础服务：
+
+```bash
+systemctl enable --now mysql redis-server nginx
+```
+
+### 4.2 安装 Python 3.12
+
+本次使用 Miniconda 提供 Python 3.12：
+
+```bash
+bash /root/Miniconda3-py312_24.9.2-0-Linux-x86_64.sh -b -p /opt/miniconda
+/opt/miniconda/bin/python --version
+```
+
+如果服务器没有安装包，可从清华源、阿里源或 Miniconda 官网下载对应 Linux x86_64 安装脚本。
+
+### 4.3 安装 Node 22
+
+```bash
+cd /opt
+curl -fsSL -o node.tar.xz https://npmmirror.com/mirrors/node/v22.13.1/node-v22.13.1-linux-x64.tar.xz
+mkdir -p /opt/node22
+tar -xJf node.tar.xz --strip-components=1 -C /opt/node22
+/opt/node22/bin/node -v
+/opt/node22/bin/npm -v
+```
+
+后续构建前端时记得设置：
+
+```bash
+export PATH=/opt/node22/bin:$PATH
+```
+
+## 5. 获取代码
+
+```bash
+cd /opt
+git clone https://github.com/1971936902-byte/C-Check.git c-check
+cd /opt/c-check
+git checkout master
+git pull --ff-only origin master
+```
+
+如果服务器已经存在 `/opt/c-check`：
+
+```bash
+cd /opt/c-check
+git fetch origin master
+git reset --hard origin/master
+git rev-parse --short HEAD
+```
+
+本次最终部署提交：
+
+```text
+1ed0f7e fix: return validation error for unsupported check types
+```
+
+## 6. 配置 .env
+
+在仓库根目录创建 `/opt/c-check/.env`。示例：
+
+```dotenv
+MYSQL_DATABASE=c_check
+MYSQL_USER=c_check
+MYSQL_PASSWORD=<strong_mysql_password>
+MYSQL_ROOT_PASSWORD=<strong_mysql_root_password>
+
+DATABASE_URL=mysql+pymysql://c_check:<strong_mysql_password>@127.0.0.1:3306/c_check
+REDIS_URL=redis://127.0.0.1:6379/0
+
+JWT_SECRET=<at_least_32_chars_random_secret>
+JWT_EXPIRE_MINUTES=480
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<strong_admin_password>
+
+UPLOAD_MAX_FILE_BYTES=1048576
+UPLOAD_MAX_ARCHIVE_BYTES=10485760
+UPLOAD_MAX_EXTRACTED_BYTES=10485760
+UPLOAD_MAX_FILES=200
+UPLOAD_MAX_ARCHIVE_ENTRIES=1000
+UPLOAD_MAX_PATH_LENGTH=512
+
+CORS_ORIGINS='["http://180.127.11.167:24164","http://223.109.239.30:24164","http://localhost"]'
+
+MOCK_MODEL_ENABLED=true
+ALLOW_INSECURE_DEFAULTS=false
+WEB_PORT=8800
+STORAGE_PATH=/opt/c-check/uploads
+```
+
+注意点：
+
+- `JWT_SECRET` 至少 32 字符。
+- `ADMIN_PASSWORD` 至少 12 字符。
+- 不要在生产环境设置 `ALLOW_INSECURE_DEFAULTS=true`。
+- `CORS_ORIGINS` 建议用单引号包住 JSON 数组，避免 shell/systemd 解析破坏 JSON。
+- 初次部署为了验证完整流程，可以暂时设置 `MOCK_MODEL_ENABLED=true`。真实模型接入后再改成 `false`。
+
+## 7. 初始化 MySQL 数据库
+
+用 `.env` 中的数据库名、用户名和密码创建数据库：
+
+```bash
+mysql -uroot <<'SQL'
+CREATE DATABASE IF NOT EXISTS c_check CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'c_check'@'127.0.0.1' IDENTIFIED BY '<strong_mysql_password>';
+CREATE USER IF NOT EXISTS 'c_check'@'localhost' IDENTIFIED BY '<strong_mysql_password>';
+GRANT ALL PRIVILEGES ON c_check.* TO 'c_check'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON c_check.* TO 'c_check'@'localhost';
+FLUSH PRIVILEGES;
+SQL
+```
+
+如果 MySQL 已经有旧数据库，需要先确认是否要保留数据，不要直接 drop。
+
+## 8. 后端部署
+
+创建 Python 虚拟环境：
+
+```bash
+cd /opt/c-check
+/opt/miniconda/bin/python -m venv .venv
+.venv/bin/python --version
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install -e 'backend[test]'
+```
+
+执行数据库迁移：
+
+```bash
+cd /opt/c-check/backend
+/opt/c-check/.venv/bin/alembic upgrade head
+/opt/c-check/.venv/bin/alembic current
+```
+
+成功结果应包含：
+
+```text
+0003_model_default (head)
+```
+
+## 9. 后端测试
+
+生产 `.env` 会影响测试配置，例如 `MOCK_MODEL_ENABLED=true`、生产管理员密码等。跑测试时建议临时移开 `.env`：
+
+```bash
+cd /opt/c-check
+mv .env .env.runtime
+cd backend
+/opt/c-check/.venv/bin/python -m pytest tests -q
+cd /opt/c-check
+mv .env.runtime .env
+```
+
+本次最终结果：
+
+```text
+79 passed, 4 warnings
+```
+
+## 10. systemd 服务配置
+
+### 10.1 FastAPI 服务
+
+写入 `/etc/systemd/system/c-check-api.service`：
+
+```ini
+[Unit]
+Description=C-Check FastAPI service
+After=network.target mysql.service redis-server.service
+Wants=mysql.service redis-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/c-check/backend
+ExecStart=/opt/c-check/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 10.2 Celery worker 服务
+
+写入 `/etc/systemd/system/c-check-worker.service`：
+
+```ini
+[Unit]
+Description=C-Check Celery worker
+After=network.target redis-server.service mysql.service
+Wants=redis-server.service mysql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/c-check/backend
+ExecStart=/opt/c-check/.venv/bin/celery -A app.worker.celery_app worker --loglevel=INFO
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启动服务：
+
+```bash
+systemctl daemon-reload
+systemctl enable --now c-check-api c-check-worker
+systemctl status c-check-api c-check-worker --no-pager
+```
+
+注意：这里没有使用 `EnvironmentFile=/opt/c-check/.env`，因为后端配置代码会自动读取仓库根目录 `.env`。这样可以避免 systemd 解析 `CORS_ORIGINS` JSON 字符串时出错。
+
+## 11. 前端构建
+
+```bash
+export PATH=/opt/node22/bin:$PATH
+cd /opt/c-check/frontend
+npm config set registry https://registry.npmmirror.com
+npm ci
+npm run build
+```
+
+构建成功后应存在：
+
+```bash
+ls -lah /opt/c-check/frontend/dist
+```
+
+Vite 可能提示 chunk 超过 500KB，这是体积优化建议，不影响本次部署运行。
+
+## 12. Nginx 配置
+
+写入 `/etc/nginx/sites-available/c-check`：
+
+```nginx
+server {
+    listen 80 default_server;
+    listen 8800 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    root /opt/c-check/frontend/dist;
+    index index.html;
+
+    client_max_body_size 20m;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /assets/ {
+        try_files $uri =404;
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800";
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+```
+
+启用配置：
+
+```bash
+rm -f /etc/nginx/sites-enabled/default
+ln -sfn /etc/nginx/sites-available/c-check /etc/nginx/sites-enabled/c-check
+nginx -t
+systemctl reload nginx
+```
+
+确认监听：
+
+```bash
+ss -ltnp | grep -E ':(8800|8000|80|3306|6379) '
+```
+
+成功时应看到：
+
+```text
+0.0.0.0:8800  nginx
+127.0.0.1:8000 uvicorn
+127.0.0.1:3306 mysqld
+127.0.0.1:6379 redis-server
+```
+
+## 13. 创建 mock 模型节点
+
+初次部署没有真实 VLLM 模型时，先注册 mock 模型节点，保证网站功能可用：
+
+```json
+{
+  "display_name": "Local Mock Model",
+  "model_identifier": "mock-local",
+  "base_url": "mock://local",
+  "timeout_seconds": 30,
+  "is_enabled": true,
+  "description": "Deployment smoke-test model. Replace with VLLM endpoint when ready."
+}
+```
+
+可通过后台页面创建，也可以登录后调用 API：
+
+```bash
+curl -X POST http://127.0.0.1:8800/api/admin/models \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "display_name": "Local Mock Model",
+    "model_identifier": "mock-local",
+    "base_url": "mock://local",
+    "timeout_seconds": 30,
+    "is_enabled": true,
+    "description": "Deployment smoke-test model. Replace with VLLM endpoint when ready."
+  }'
+```
+
+健康检查：
+
+```bash
+curl -X POST http://127.0.0.1:8800/api/models/<model_id>/health \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+应返回：
+
+```json
+{"ok": true, "kind": "mock"}
+```
+
+## 14. 本地与公网验证
+
+### 14.1 服务器本地验证
+
+```bash
+curl -i http://127.0.0.1:8800/
+curl -i -X POST http://127.0.0.1:8800/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<admin_password>"}'
+```
+
+### 14.2 公网验证
+
+根据云平台映射：
+
+```text
+外网 24164 -> 内网 8800
+```
+
+浏览器访问：
+
+```text
+http://180.127.11.167:24164/
+http://223.109.239.30:24164/
+```
+
+命令行验证建议绕过本机代理：
+
+```bash
+curl --noproxy "*" -i http://180.127.11.167:24164/
+```
+
+成功时返回：
+
+```text
+HTTP/1.1 200 OK
+<title>C-Check · C 语言智能代码审查</title>
+```
+
+端到端验证内容：
+
+1. 登录管理员账号。
+2. 获取模型列表，确认存在 `Local Mock Model`。
+3. 提交一段 C 代码。
+4. 轮询任务状态。
+5. 任务完成后读取报告。
+
+本次公网端到端验证结果：
+
+```text
+public_login 200 True
+public_models 200 1 Local Mock Model
+public_task_created 201 queued
+poll 1 completed 100
+public_report 200 100.0 Mock review completed for 1 source file(s).
+```
+
+## 15. 踩过的坑与解决经验
+
+### 15.1 公网 IP:端口不是自动直通服务器端口
+
+现象：
+
+- 服务器内部 `curl http://127.0.0.1:18000/` 正常。
+- Windows 访问公网 `180.127.x.x:18000` 返回 502 或非标准响应。
+- Nginx access log 没有外部请求记录。
+
+原因：
+
+云平台使用 NAT/网关，外网端口必须按“预留端口映射”转发到服务器内网端口。不能假设公网端口和服务器监听端口一致。
+
+解决：
+
+查看云平台预留端口，例如：
+
+```text
+外网 24164 -> 内网 8800
+```
+
+让 Nginx 监听服务器内网 `8800`，然后访问：
+
+```text
+http://公网IP:24164/
+```
+
+### 15.2 本机代理会干扰公网测试
+
+现象：
+
+PowerShell `Invoke-WebRequest` 返回 502，但 TCP 端口是 open。
+
+原因：
+
+本机设置了：
+
+```text
+HTTP_PROXY=http://127.0.0.1:7897
+HTTPS_PROXY=http://127.0.0.1:7897
+```
+
+请求先经过本机代理，502 可能来自代理而不是云服务器。
+
+解决：
+
+用 curl 绕过代理：
+
+```bash
+curl --noproxy "*" -i http://180.127.11.167:24164/
+```
+
+### 15.3 MySQL 非事务 DDL 导致 Alembic 半完成
+
+现象：
+
+第一次迁移失败后，`is_default` 字段已经添加，但 Alembic 版本未记录。再次执行时报：
+
+```text
+Duplicate column name 'is_default'
+```
+
+原因：
+
+MySQL DDL 非事务化，部分 DDL 可能已经落库，迁移版本却没有更新。
+
+解决：
+
+迁移脚本需要具备可恢复能力：先检查列和索引是否存在，再决定是否创建。当前项目已修复：
+
+```text
+c5c51f8 fix: make model default migration resumable
+```
+
+### 15.4 MySQL 不允许同表子查询更新
+
+现象：
+
+迁移中执行：
+
+```sql
+UPDATE model_nodes
+SET is_default = 1
+WHERE id = (
+  SELECT id FROM model_nodes ...
+)
+```
+
+MySQL 报错 1093。
+
+解决：
+
+拆成两步：
+
+1. 先查询默认模型 ID。
+2. 再按 ID 更新。
+
+当前项目已修复：
+
+```text
+21f14ea fix: make default model migration mysql-compatible
+```
+
+### 15.5 测试不要直接读取生产 .env
+
+现象：
+
+远端跑 pytest 时受到生产 `.env` 影响，例如 mock 开关、管理员密码、数据库配置不符合测试预期。
+
+解决：
+
+测试时临时移开 `.env`：
+
+```bash
+mv .env .env.runtime
+cd backend
+/opt/c-check/.venv/bin/python -m pytest tests -q
+cd /opt/c-check
+mv .env.runtime .env
+```
+
+### 15.6 Python 3.14 与当前 SQLAlchemy 组合不适合本地测试
+
+现象：
+
+Windows 本机 Python 3.14 运行后端测试，SQLAlchemy 类型解析报错。
+
+解决：
+
+使用项目更稳定的 Python 3.12 环境跑测试。本次远端 Python 3.12 测试通过：
+
+```text
+79 passed
+```
+
+### 15.7 前端构建日志的特殊字符可能打断本地输出
+
+现象：
+
+远程构建 Vite 时输出 `✓` 等字符，本地 PowerShell/GBK 环境可能出现编码异常。
+
+解决：
+
+本地执行远程脚本时设置：
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'
+```
+
+或减少对特殊字符日志的解析。
+
+### 15.8 systemd 不建议直接解析复杂 .env
+
+问题：
+
+`CORS_ORIGINS='["..."]'` 这类 JSON 字符串在 systemd `EnvironmentFile` 中容易出现引号解析问题。
+
+解决：
+
+不在 systemd service 中设置 `EnvironmentFile`，让 FastAPI 配置模块自动读取 `/opt/c-check/.env`。
+
+### 15.9 先用 mock 模型跑通系统，再接真实 VLLM
+
+原因：
+
+30B+ 模型下载和 VLLM 启动耗时较长，还受 Hugging Face、ModelScope、磁盘和显存影响。部署主站时不应被模型下载阻塞。
+
+成功经验：
+
+1. 先设置 `MOCK_MODEL_ENABLED=true`。
+2. 注册 `mock://local` 模型。
+3. 验证登录、提交、队列、报告、下载全链路。
+4. 后续再接入真实 OpenAI-compatible VLLM endpoint。
+
+## 16. 常用运维命令
+
+查看服务：
+
+```bash
+systemctl status c-check-api c-check-worker nginx mysql redis-server --no-pager
+```
+
+查看日志：
+
+```bash
+journalctl -u c-check-api -n 160 --no-pager
+journalctl -u c-check-worker -n 160 --no-pager
+tail -n 100 /var/log/nginx/access.log
+tail -n 100 /var/log/nginx/error.log
+```
+
+重启服务：
+
+```bash
+systemctl restart c-check-api c-check-worker
+nginx -t && systemctl reload nginx
+```
+
+更新代码：
+
+```bash
+cd /opt/c-check
+git fetch origin master
+git reset --hard origin/master
+cd backend
+/opt/c-check/.venv/bin/alembic upgrade head
+systemctl restart c-check-api c-check-worker
+cd /opt/c-check/frontend
+export PATH=/opt/node22/bin:$PATH
+npm ci
+npm run build
+nginx -t && systemctl reload nginx
+```
+
+确认版本：
+
+```bash
+cd /opt/c-check
+git rev-parse --short HEAD
+cd backend
+/opt/c-check/.venv/bin/alembic current
+```
+
+确认端口：
+
+```bash
+ss -ltnp | grep -E ':(8800|8000|3306|6379) '
+```
+
+## 17. 后续接入真实 VLLM 模型建议
+
+主站已经可用后，再单独部署模型服务。
+
+建议顺序：
+
+1. 准备模型目录和缓存目录，确认磁盘空间。
+2. 优先尝试 Hugging Face 下载；如果网络不可用，使用 ModelScope。
+3. 用 VLLM 启动 OpenAI-compatible API。
+4. 先验证：
+
+```bash
+curl -i http://127.0.0.1:<vllm_port>/v1/models
+```
+
+5. 在 C-Check 管理后台新增模型节点：
+
+```json
+{
+  "display_name": "Qwen Coder 30B",
+  "model_identifier": "<served_model_name>",
+  "base_url": "http://127.0.0.1:<vllm_port>",
+  "api_key": "<optional_api_key>",
+  "timeout_seconds": 600,
+  "is_enabled": true,
+  "description": "VLLM OpenAI-compatible local GPU node"
+}
+```
+
+6. 健康检查通过后，设为默认模型。
+7. 将 `.env` 的 `MOCK_MODEL_ENABLED` 改为 `false`，重启 API 和 worker。
+
+## 18. 成功标准清单
+
+部署完成后至少满足：
+
+- `systemctl is-active c-check-api c-check-worker nginx` 均为 `active`。
+- `alembic current` 显示 `0003_model_default (head)`。
+- `ss -ltnp` 显示 Nginx 监听 `0.0.0.0:8800`。
+- `curl --noproxy "*" -i http://180.127.11.167:24164/` 返回 `HTTP/1.1 200 OK`。
+- 浏览器能打开登录页。
+- 管理员能登录。
+- 模型列表至少有一个可用模型。
+- 能提交 C 代码审查任务。
+- worker 能完成任务。
+- 能打开报告并下载 Markdown。
+
