@@ -87,6 +87,7 @@ class AdminTaskResponse(BaseModel):
     progress: int
     finding_count: int
     error_message: str | None
+    model_log: str | None
     created_at: datetime
 
 

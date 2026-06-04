@@ -6,12 +6,47 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { errorMessage, reportApi, reviewApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
 import type { ModelNode, ReviewTask } from '../types'
-const filters = reactive({ keyword: '', severity: '', tester_name: '' }), tasks = ref<ReviewTask[]>([]), models = ref<ModelNode[]>([]), loading = ref(false), markdownVisible = ref(false), markdownLoading = ref(false), markdownContent = ref(''), markdownTask = ref<ReviewTask>(), router = useRouter()
-const page = ref(1), pageSize = ref(20), total = ref(0), sortBy = ref('created_at'), sortDir = ref<'asc' | 'desc'>('desc')
+
+const filters = reactive({ keyword: '', severity: '', tester_name: '' })
+const tasks = ref<ReviewTask[]>([])
+const models = ref<ModelNode[]>([])
+const loading = ref(false)
+const markdownVisible = ref(false)
+const markdownLoading = ref(false)
+const markdownContent = ref('')
+const markdownTask = ref<ReviewTask>()
+const logVisible = ref(false)
+const logTask = ref<ReviewTask>()
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+const sortBy = ref('created_at')
+const sortDir = ref<'asc' | 'desc'>('desc')
+const router = useRouter()
+
 const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const duration = (value?: number | null) => value ? `${(value / 1000).toFixed(1)}s` : '--'
 const modelName = (id: string) => models.value.find((model) => model.id === id)?.display_name || id
-async function load() { loading.value = true; try { const { data } = await reviewApi.list({ ...filters, offset: (page.value - 1) * pageSize.value, limit: pageSize.value, sort_by: sortBy.value, sort_dir: sortDir.value }); tasks.value = data.items; total.value = data.total } catch (e) { ElMessage.error(errorMessage(e)) } finally { loading.value = false } }
+
+async function load() {
+  loading.value = true
+  try {
+    const { data } = await reviewApi.list({
+      ...filters,
+      offset: (page.value - 1) * pageSize.value,
+      limit: pageSize.value,
+      sort_by: sortBy.value,
+      sort_dir: sortDir.value,
+    })
+    tasks.value = data.items
+    total.value = data.total
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    loading.value = false
+  }
+}
+
 function applyFilters() { page.value = 1; load() }
 function changePage(value: number) { page.value = value; load() }
 function changePageSize(value: number) { pageSize.value = value; page.value = 1; load() }
@@ -21,10 +56,158 @@ function changeSort({ prop, order }: { prop: string; order: 'ascending' | 'desce
   page.value = 1
   load()
 }
-async function remove(id: string) { try { await ElMessageBox.confirm('删除后无法恢复，确认继续？', '删除审查记录', { type: 'warning' }); await reviewApi.remove(id); await load(); ElMessage.success('记录已删除') } catch (e) { if (e !== 'cancel') ElMessage.error(errorMessage(e)) } }
-function open(task: ReviewTask) { task.report_id ? router.push(`/reports/${task.report_id}`) : ElMessage.warning('报告暂不可用，请稍后刷新列表') }
-async function downloadMarkdown(task: ReviewTask) { if (!task.report_id) return; try { const { data } = await reportApi.download(task.report_id, 'markdown'); const url = URL.createObjectURL(data); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `report-${task.report_id}.md`; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 0) } catch (e) { ElMessage.error(errorMessage(e)) } }
-async function previewMarkdown(task: ReviewTask) { if (!task.report_id) return; markdownVisible.value = true; markdownLoading.value = true; markdownTask.value = task; markdownContent.value = ''; try { markdownContent.value = await (await reportApi.download(task.report_id, 'markdown')).data.text() } catch (e) { markdownVisible.value = false; ElMessage.error(errorMessage(e)) } finally { markdownLoading.value = false } }
-onMounted(async () => { try { models.value = (await reviewApi.models()).data } catch {} await load() })
+
+async function remove(id: string) {
+  try {
+    await ElMessageBox.confirm('删除后无法恢复，确认继续？', '删除审查记录', { type: 'warning' })
+    await reviewApi.remove(id)
+    await load()
+    ElMessage.success('记录已删除')
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(errorMessage(e))
+  }
+}
+
+function open(task: ReviewTask) {
+  task.report_id ? router.push(`/reports/${task.report_id}`) : ElMessage.warning('报告暂不可用，请稍后刷新列表')
+}
+
+async function downloadMarkdown(task: ReviewTask) {
+  if (!task.report_id) return
+  try {
+    const { data } = await reportApi.download(task.report_id, 'markdown')
+    const url = URL.createObjectURL(data)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `report-${task.report_id}.md`
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  }
+}
+
+async function previewMarkdown(task: ReviewTask) {
+  if (!task.report_id) return
+  markdownVisible.value = true
+  markdownLoading.value = true
+  markdownTask.value = task
+  markdownContent.value = ''
+  try {
+    markdownContent.value = await (await reportApi.download(task.report_id, 'markdown')).data.text()
+  } catch (e) {
+    markdownVisible.value = false
+    ElMessage.error(errorMessage(e))
+  } finally {
+    markdownLoading.value = false
+  }
+}
+
+function previewModelLog(task: ReviewTask) {
+  logTask.value = task
+  logVisible.value = true
+}
+
+onMounted(async () => {
+  try {
+    models.value = (await reviewApi.models()).data
+  } catch {}
+  await load()
+})
 </script>
-<template><section><header class="page-header"><div><h1>历史报告</h1><p>筛选、回看与管理个人代码审查记录。</p></div><el-tooltip content="刷新列表" placement="bottom"><el-button class="refresh-button" circle :loading="loading" :icon="Refresh" aria-label="刷新列表" @click="load" /></el-tooltip></header><div class="panel glass"><div class="filter-bar"><el-input v-model="filters.keyword" placeholder="搜索任务名称" :prefix-icon="Search" clearable /><el-select v-model="filters.severity" placeholder="风险等级" clearable><el-option label="高危" value="high" /><el-option label="中危" value="medium" /><el-option label="低危" value="low" /><el-option label="建议" value="suggestion" /></el-select><el-input v-model="filters.tester_name" placeholder="搜索测试人员" clearable /><el-button type="primary" @click="applyFilters">筛选</el-button></div><el-table class="history-table" :data="tasks" v-loading="loading" :default-sort="{ prop: 'created_at', order: 'descending' }" @sort-change="changeSort"><el-table-column prop="display_name" label="任务名称" min-width="180" sortable="custom" /><el-table-column prop="tester_name" label="测试人员" width="110" sortable="custom" /><el-table-column prop="model" label="模型" min-width="160" sortable="custom"><template #default="{ row }">{{ modelName(row.model_node_id) }}</template></el-table-column><el-table-column prop="created_at" label="测试日期时间" width="175" sortable="custom"><template #default="{ row }">{{ date(row.created_at) }}</template></el-table-column><el-table-column prop="status" label="状态" width="110" sortable="custom"><template #default="{ row }"><StatusBadge :status="row.status" /></template></el-table-column><el-table-column prop="file_count" label="文件" width="78" sortable="custom" /><el-table-column prop="finding_count" label="问题" width="78" sortable="custom" /><el-table-column prop="duration_ms" label="耗时" width="88" sortable="custom"><template #default="{ row }">{{ duration(row.duration_ms) }}</template></el-table-column><el-table-column label="操作" fixed="right" width="240"><template #default="{ row }"><span class="history-actions"><el-button link type="primary" :icon="View" :disabled="row.status !== 'completed'" @click="open(row)">查看</el-button><el-button link type="primary" :icon="View" :disabled="row.status !== 'completed'" @click="previewMarkdown(row)">MD 预览</el-button><el-button link type="danger" :icon="Delete" @click="remove(row.id)">删除</el-button></span></template></el-table-column></el-table><el-pagination class="history-pagination" :current-page="page" :page-size="pageSize" :page-sizes="[10, 20, 50, 100]" :total="total" layout="total, sizes, prev, pager, next" @current-change="changePage" @size-change="changePageSize" /></div><el-dialog v-model="markdownVisible" :title="`Markdown 报告 · ${markdownTask?.display_name || ''}`" width="760px"><div v-loading="markdownLoading" class="markdown-preview"><pre>{{ markdownContent }}</pre></div><template #footer><el-button @click="markdownVisible = false">关闭</el-button><el-button v-if="markdownTask" type="primary" :icon="Download" @click="downloadMarkdown(markdownTask)">下载 MD</el-button></template></el-dialog></section></template>
+
+<template>
+  <section>
+    <header class="page-header">
+      <div>
+        <h1>历史报告</h1>
+        <p>筛选、回看与管理个人代码审查记录。</p>
+      </div>
+      <el-tooltip content="刷新列表" placement="bottom">
+        <el-button
+          class="refresh-button"
+          circle
+          :loading="loading"
+          :icon="Refresh"
+          aria-label="刷新列表"
+          @click="load"
+        />
+      </el-tooltip>
+    </header>
+
+    <div class="panel glass">
+      <div class="filter-bar">
+        <el-input v-model="filters.keyword" placeholder="搜索任务名称" :prefix-icon="Search" clearable />
+        <el-select v-model="filters.severity" placeholder="风险等级" clearable>
+          <el-option label="高危" value="high" />
+          <el-option label="中危" value="medium" />
+          <el-option label="低危" value="low" />
+          <el-option label="建议" value="suggestion" />
+        </el-select>
+        <el-input v-model="filters.tester_name" placeholder="搜索测试人员" clearable />
+        <el-button type="primary" @click="applyFilters">筛选</el-button>
+      </div>
+
+      <el-table
+        class="history-table"
+        :data="tasks"
+        v-loading="loading"
+        :default-sort="{ prop: 'created_at', order: 'descending' }"
+        @sort-change="changeSort"
+      >
+        <el-table-column prop="display_name" label="任务名称" min-width="180" sortable="custom" />
+        <el-table-column prop="tester_name" label="测试人员" width="110" sortable="custom" />
+        <el-table-column prop="model" label="模型" min-width="160" sortable="custom">
+          <template #default="{ row }">{{ modelName(row.model_node_id) }}</template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="测试日期时间" width="175" sortable="custom">
+          <template #default="{ row }">{{ date(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column prop="status" label="状态" width="110" sortable="custom">
+          <template #default="{ row }"><StatusBadge :status="row.status" /></template>
+        </el-table-column>
+        <el-table-column prop="file_count" label="文件" width="78" sortable="custom" />
+        <el-table-column prop="finding_count" label="问题" width="78" sortable="custom" />
+        <el-table-column prop="duration_ms" label="耗时" width="88" sortable="custom">
+          <template #default="{ row }">{{ duration(row.duration_ms) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" fixed="right" width="292">
+          <template #default="{ row }">
+            <span class="history-actions">
+              <el-button link type="primary" :icon="View" :disabled="row.status !== 'completed'" @click="open(row)">查看</el-button>
+              <el-button link type="primary" :icon="View" :disabled="row.status !== 'completed'" @click="previewMarkdown(row)">MD 预览</el-button>
+              <el-button link type="warning" :icon="View" :disabled="!row.model_log" @click="previewModelLog(row)">模型日志</el-button>
+              <el-button link type="danger" :icon="Delete" @click="remove(row.id)">删除</el-button>
+            </span>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-pagination
+        class="history-pagination"
+        :current-page="page"
+        :page-size="pageSize"
+        :page-sizes="[10, 20, 50, 100]"
+        :total="total"
+        layout="total, sizes, prev, pager, next"
+        @current-change="changePage"
+        @size-change="changePageSize"
+      />
+    </div>
+
+    <el-dialog v-model="markdownVisible" :title="`Markdown 报告 · ${markdownTask?.display_name || ''}`" width="760px">
+      <div v-loading="markdownLoading" class="markdown-preview"><pre>{{ markdownContent }}</pre></div>
+      <template #footer>
+        <el-button @click="markdownVisible = false">关闭</el-button>
+        <el-button v-if="markdownTask" type="primary" :icon="Download" @click="downloadMarkdown(markdownTask)">下载 MD</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="logVisible" :title="`模型日志 · ${logTask?.display_name || ''}`" width="820px">
+      <div class="markdown-preview"><pre>{{ logTask?.model_log || '暂无模型日志' }}</pre></div>
+      <template #footer><el-button @click="logVisible = false">关闭</el-button></template>
+    </el-dialog>
+  </section>
+</template>

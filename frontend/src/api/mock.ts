@@ -65,7 +65,7 @@ const seedState = (): MockState => {
     tasks: [
       { id: taskId, owner_id: 'user-admin', model_node_id: 'model-qwen', input_mode: 'archive', display_name: 'embedded-gateway-demo.zip', status: 'completed', progress: 100, duration_ms: 12840, file_count: 6, finding_count: 4, report_id: reportId, files: demoFiles(), check_types: ['memory_safety', 'logic', 'portability', 'performance'], created_at: created, updated_at: created, completed_at: created },
       { id: 'review-running', owner_id: 'user-demo', model_node_id: 'model-deepseek', input_mode: 'file', display_name: 'network_driver.c', status: 'running', progress: 62, file_count: 1, finding_count: 0, created_at: created, updated_at: created },
-      { id: 'review-failed', owner_id: 'user-demo', model_node_id: 'model-qwen', input_mode: 'archive', display_name: 'legacy-module.zip', status: 'failed', progress: 100, error_message: '模型节点暂时不可用，请稍后重试。', duration_ms: 3100, file_count: 8, finding_count: 0, created_at: created, updated_at: created, completed_at: created },
+      { id: 'review-failed', owner_id: 'user-demo', model_node_id: 'model-qwen', input_mode: 'archive', display_name: 'legacy-module.zip', status: 'failed', progress: 100, error_message: '模型节点暂时不可用，请稍后重试。', model_log: '[demo] selected model node is unavailable', duration_ms: 3100, file_count: 8, finding_count: 0, created_at: created, updated_at: created, completed_at: created },
     ],
     reports: [makeReport(reportId, taskId)],
     polls: {},

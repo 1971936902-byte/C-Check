@@ -31,6 +31,7 @@ class ReviewTaskSummaryResponse(BaseModel):
     status: TaskStatus
     progress: int
     error_message: str | None
+    model_log: str | None
     duration_ms: int | None
     file_count: int
     finding_count: int

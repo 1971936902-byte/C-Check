@@ -4,9 +4,11 @@ import asyncio
 from datetime import UTC, datetime
 from time import monotonic
 
+from app.core.config import get_settings
 from app.db.models import Report, ReviewTask, TaskStatus
 from app.db.session import SessionLocal
-from app.services.model_router import invoke_selected_model
+from app.schemas.model_response import ModelReviewResponse
+from app.services.model_router import ModelInvocationError, invoke_selected_model, truncate_model_log
 from app.services.reports import build_report
 from app.worker import celery_app
 
@@ -15,8 +17,62 @@ def _elapsed_ms(started: float) -> int:
     return max(0, int((monotonic() - started) * 1000))
 
 
+def _append_model_log(current: str | None, entry: str) -> str:
+    timestamp = datetime.now(UTC).isoformat()
+    combined = "\n\n".join(part for part in [current, f"[{timestamp}] {entry}"] if part)
+    return truncate_model_log(combined) or ""
+
+
+def _failure_log(attempt: int, exc: Exception) -> str:
+    parts = [f"Attempt {attempt} failed: {exc}"]
+    if isinstance(exc, ModelInvocationError):
+        if exc.details:
+            parts.append(f"Details:\n{exc.details}")
+        if exc.raw_response:
+            parts.append(f"Raw model response:\n{truncate_model_log(exc.raw_response, 6000)}")
+    return "\n".join(parts)
+
+
+def _invoke_with_retries(db, task_id: str, max_attempts: int) -> ModelReviewResponse:
+    last_exc: Exception | None = None
+    retry_instruction: str | None = None
+    for attempt in range(1, max_attempts + 1):
+        task = db.get(ReviewTask, task_id)
+        if task is None:
+            raise ModelInvocationError("review task does not exist")
+        task.model_log = _append_model_log(task.model_log, f"Attempt {attempt} started.")
+        db.commit()
+        try:
+            result = asyncio.run(invoke_selected_model(db, task_id, retry_instruction=retry_instruction))
+        except Exception as exc:
+            db.rollback()
+            last_exc = exc
+            task = db.get(ReviewTask, task_id)
+            if task is None:
+                raise
+            task.model_log = _append_model_log(task.model_log, _failure_log(attempt, exc))
+            retry_instruction = truncate_model_log(_failure_log(attempt, exc), 4000)
+            if attempt < max_attempts:
+                task.progress = min(90, 10 + attempt * 25)
+                task.error_message = f"{exc}; retrying ({attempt}/{max_attempts})"[:1000]
+            db.commit()
+            continue
+
+        task = db.get(ReviewTask, task_id)
+        if task is not None:
+            task.model_log = _append_model_log(
+                task.model_log,
+                f"Attempt {attempt} succeeded with {len(result.findings)} finding(s).",
+            )
+            db.commit()
+        return result
+    assert last_exc is not None
+    raise last_exc
+
+
 def run_review_task(task_id: str) -> None:
     started = monotonic()
+    settings = get_settings()
     with SessionLocal() as db:
         task = db.get(ReviewTask, task_id)
         if task is None:
@@ -24,13 +80,14 @@ def run_review_task(task_id: str) -> None:
         task.status = TaskStatus.RUNNING
         task.progress = 10
         task.error_message = None
+        task.model_log = None
         task.started_at = datetime.now(UTC)
         if task.report is not None:
             db.delete(task.report)
         db.commit()
 
         try:
-            result = asyncio.run(invoke_selected_model(db, task_id))
+            result = _invoke_with_retries(db, task_id, settings.model_max_attempts)
             task = db.get(ReviewTask, task_id)
             if task is None:
                 return

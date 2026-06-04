@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173"]
     storage_path: Path = Path("uploads")
     mock_model_enabled: bool = False
+    model_max_attempts: int = Field(default=3, ge=1, le=5)
     allow_insecure_defaults: bool = False
 
     @model_validator(mode="after")
