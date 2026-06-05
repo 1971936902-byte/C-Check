@@ -29,6 +29,7 @@ load_env() {
   BACKEND_PORT="${BACKEND_PORT:-8000}"
   WEB_PORT="${WEB_PORT:-8800}"
   PYTHON_BIN="${PYTHON_BIN:-python3}"
+  PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
   NODE_MAJOR="${NODE_MAJOR:-22}"
   STORAGE_PATH="${STORAGE_PATH:-${APP_DIR}/uploads}"
   MODEL_MAX_ATTEMPTS="${MODEL_MAX_ATTEMPTS:-3}"
@@ -53,6 +54,34 @@ install_os_packages() {
   apt-get install -y \
     ca-certificates curl git nginx redis-server mysql-server \
     build-essential pkg-config "${PYTHON_BIN}" "${PYTHON_BIN}-venv" "${PYTHON_BIN}-dev"
+}
+
+python_version_ok() {
+  "${PYTHON_BIN}" - <<'PY'
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 12) else 1)
+PY
+}
+
+install_uv() {
+  if command -v uv >/dev/null 2>&1; then
+    log "uv $(uv --version | awk '{print $2}') already installed"
+    return
+  fi
+  log "Installing uv for Python ${PYTHON_VERSION} runtime management"
+  curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+}
+
+create_backend_venv() {
+  cd "${APP_DIR}"
+  rm -rf .venv
+  if python_version_ok; then
+    "${PYTHON_BIN}" -m venv .venv
+  else
+    install_uv
+    uv python install "${PYTHON_VERSION}"
+    uv venv --python "${PYTHON_VERSION}" .venv
+  fi
 }
 
 install_nodejs() {
@@ -128,8 +157,7 @@ SQL
 
 install_backend() {
   log "Installing backend Python environment"
-  cd "${APP_DIR}"
-  "${PYTHON_BIN}" -m venv .venv
+  create_backend_venv
   .venv/bin/python -m pip install --upgrade pip setuptools wheel
   .venv/bin/python -m pip install -e "backend[test]"
   cd backend

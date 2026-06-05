@@ -19,6 +19,8 @@ Recommended baseline:
 - GPU server only when colocating VLLM
 - Open inbound web port configured by `WEB_PORT`
 
+The backend requires Python 3.12 or newer. On Ubuntu 22.04, the installer automatically uses `uv` to install Python 3.12 for the project virtual environment when the system Python is older.
+
 ## Quick Start
 
 ```bash
