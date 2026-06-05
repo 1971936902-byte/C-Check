@@ -22,6 +22,14 @@ class TaskStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class ModelDeploymentStatus(str, enum.Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    MANUAL_REQUIRED = "manual_required"
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -59,6 +67,41 @@ class ModelNode(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
 
     review_tasks: Mapped[list[ReviewTask]] = relationship(back_populates="model_node")
+    deployments: Mapped[list[ModelDeployment]] = relationship(back_populates="model_node")
+
+
+class ModelDeployment(TimestampMixin, Base):
+    __tablename__ = "model_deployments"
+    __table_args__ = (Index("ix_model_deployments_created_at", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    catalog_key: Mapped[str | None] = mapped_column(String(128), index=True)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_identifier: Mapped[str] = mapped_column(String(255), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_repository: Mapped[str] = mapped_column(String(512), nullable=False)
+    served_model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    port: Mapped[int | None] = mapped_column(Integer)
+    model_dir: Mapped[str | None] = mapped_column(String(512))
+    service_name: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[ModelDeploymentStatus] = mapped_column(
+        Enum(
+            ModelDeploymentStatus,
+            native_enum=False,
+            values_callable=lambda statuses: [s.value for s in statuses],
+        ),
+        default=ModelDeploymentStatus.QUEUED,
+        nullable=False,
+        index=True,
+    )
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    log: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_by_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    model_node_id: Mapped[str | None] = mapped_column(ForeignKey("model_nodes.id", ondelete="SET NULL"))
+
+    model_node: Mapped[ModelNode | None] = relationship(back_populates="deployments")
 
 
 class PromptVersion(TimestampMixin, Base):

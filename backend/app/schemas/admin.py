@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.db.models import TaskStatus
+from app.db.models import ModelDeploymentStatus, TaskStatus
 
 
 class UserCreateRequest(BaseModel):
@@ -41,6 +41,59 @@ class ModelNodeRequest(BaseModel):
 
 class ModelEnabledRequest(BaseModel):
     is_enabled: bool
+
+
+class ModelCatalogItemResponse(BaseModel):
+    key: str
+    display_name: str
+    model_identifier: str
+    description: str | None = None
+    recommended_source: str = "huggingface"
+    huggingface_repo: str | None = None
+    modelscope_repo: str | None = None
+    default_port: int | None = None
+    default_served_model_name: str | None = None
+    estimated_vram_gb: int | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class ModelDeploymentCreateRequest(BaseModel):
+    catalog_key: str | None = Field(default=None, max_length=128)
+    display_name: str | None = Field(default=None, max_length=128)
+    model_identifier: str | None = Field(default=None, max_length=255)
+    source: str = Field(default="huggingface", pattern="^(huggingface|modelscope|local)$")
+    source_repository: str | None = Field(default=None, max_length=512)
+    base_url: str = Field(min_length=1, max_length=512)
+    served_model_name: str | None = Field(default=None, max_length=128)
+    api_key: str | None = Field(default=None, max_length=512)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    model_dir: str | None = Field(default=None, max_length=512)
+    service_name: str | None = Field(default=None, max_length=128)
+    timeout_seconds: int = Field(default=180, ge=1, le=3600)
+    auto_register: bool = True
+
+
+class ModelDeploymentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    catalog_key: str | None
+    display_name: str
+    model_identifier: str
+    source: str
+    source_repository: str
+    served_model_name: str
+    base_url: str
+    port: int | None
+    model_dir: str | None
+    service_name: str | None
+    status: ModelDeploymentStatus
+    progress: int
+    log: str | None
+    error_message: str | None
+    model_node_id: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class PromptUpdateRequest(BaseModel):

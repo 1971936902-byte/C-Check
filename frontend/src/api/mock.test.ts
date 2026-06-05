@@ -60,4 +60,19 @@ describe('mockApi', () => {
     expect((await mockApi.reviews.list({ severity: 'high' })).data.items.map((task) => task.id)).toEqual(['review-seeded'])
     expect((await mockApi.reviews.list({ start_time: '2999-01-01T00:00:00.000Z' })).data.items).toHaveLength(0)
   })
+
+  it('exposes model catalog and creates deployment records', async () => {
+    const catalog = (await mockApi.admin.modelCatalog()).data
+    expect(catalog.map((model) => model.key)).toContain('starcoder2-15b')
+
+    const deployment = await mockApi.admin.createModelDeployment({
+      catalog_key: 'starcoder2-15b',
+      source: 'huggingface',
+      base_url: 'http://127.0.0.1:8103',
+    })
+
+    expect(deployment.data.display_name).toBe('StarCoder2 15B')
+    expect((await mockApi.admin.modelDeployments()).data[0].id).toBe(deployment.data.id)
+    expect((await mockApi.admin.models()).data.some((model) => model.model_identifier === 'starcoder2-15b')).toBe(true)
+  })
 })

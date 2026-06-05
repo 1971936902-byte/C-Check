@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
+import type { AdminTask, AdminUser, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
 import { mockApi } from './mock'
 
 export const TOKEN_KEY = 'c-check-token'
@@ -58,6 +58,9 @@ export const adminApi = {
   defaultModel: (id: string) => MOCK_API_ENABLED ? mockApi.admin.defaultModel(id) : api.post(`/admin/models/${id}/default`),
   deleteModel: (id: string) => MOCK_API_ENABLED ? mockApi.admin.deleteModel(id) : api.delete(`/admin/models/${id}`),
   modelHealth: (id: string) => MOCK_API_ENABLED ? mockApi.admin.modelHealth() : api.post(`/models/${id}/health`),
+  modelCatalog: () => MOCK_API_ENABLED ? mockApi.admin.modelCatalog() : api.get<ModelCatalogItem[]>('/admin/model-catalog'),
+  modelDeployments: () => MOCK_API_ENABLED ? mockApi.admin.modelDeployments() : api.get<ModelDeployment[]>('/admin/model-deployments'),
+  createModelDeployment: (payload: Record<string, unknown>) => MOCK_API_ENABLED ? mockApi.admin.createModelDeployment(payload) : api.post<ModelDeployment>('/admin/model-deployments', payload),
   prompts: () => MOCK_API_ENABLED ? mockApi.admin.prompts() : api.get<Prompt[]>('/admin/prompts'),
   createPrompt: (body: string) => MOCK_API_ENABLED ? mockApi.admin.createPrompt(body) : api.post('/admin/prompts', { body }),
   updatePrompt: (id: string, body: string) => MOCK_API_ENABLED ? mockApi.admin.updatePrompt(id, body) : api.put(`/admin/prompts/${id}`, { body }),

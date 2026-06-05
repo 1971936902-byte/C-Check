@@ -1,0 +1,41 @@
+[
+  {
+    "key": "deepseek-coder-14b-instruct",
+    "display_name": "DeepSeek-Coder 14B Instruct",
+    "model_identifier": "deepseek-ai/deepseek-coder-14b-instruct",
+    "description": "偏复杂逻辑与安全审计的 C/C++ 代码模型，资源压力低于 30B 级模型。",
+    "recommended_source": "modelscope",
+    "huggingface_repo": "deepseek-ai/deepseek-coder-14b-instruct",
+    "modelscope_repo": "deepseek-ai/deepseek-coder-14b-instruct",
+    "default_port": 8101,
+    "default_served_model_name": "deepseek-coder-14b-instruct",
+    "estimated_vram_gb": 28,
+    "tags": ["c", "security", "instruct"]
+  },
+  {
+    "key": "codellama-13b-instruct",
+    "display_name": "CodeLlama 13B Instruct",
+    "model_identifier": "codellama/CodeLlama-13b-Instruct-hf",
+    "description": "通用代码指令模型，适合作为兼容性与代码规范审查的备选节点。",
+    "recommended_source": "huggingface",
+    "huggingface_repo": "codellama/CodeLlama-13b-Instruct-hf",
+    "modelscope_repo": "LLM-Research/CodeLlama-13b-Instruct-hf",
+    "default_port": 8102,
+    "default_served_model_name": "codellama-13b-instruct",
+    "estimated_vram_gb": 26,
+    "tags": ["c", "instruct", "fallback"]
+  },
+  {
+    "key": "starcoder2-15b",
+    "display_name": "StarCoder2 15B",
+    "model_identifier": "bigcode/starcoder2-15b",
+    "description": "多语言代码补全与分析模型，适合作为批量代码质量检查节点。",
+    "recommended_source": "huggingface",
+    "huggingface_repo": "bigcode/starcoder2-15b",
+    "modelscope_repo": "AI-ModelScope/starcoder2-15b",
+    "default_port": 8103,
+    "default_served_model_name": "starcoder2-15b",
+    "estimated_vram_gb": 30,
+    "tags": ["c", "batch", "code"]
+  }
+]

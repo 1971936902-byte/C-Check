@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     model_max_attempts: int = Field(default=3, ge=1, le=5)
     model_max_tokens: int = Field(default=2048, ge=256, le=16384)
     model_structured_outputs_enabled: bool = True
+    model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
+    model_deployment_enabled: bool = False
+    model_deployment_script: Path = REPOSITORY_ROOT / "deploy" / "models" / "deploy-vllm-model.sh"
     allow_insecure_defaults: bool = False
 
     @model_validator(mode="after")
@@ -49,6 +52,12 @@ class Settings(BaseSettings):
         if not self.storage_path.is_absolute():
             self.storage_path = REPOSITORY_ROOT / self.storage_path
         self.storage_path = self.storage_path.resolve()
+        if not self.model_catalog_path.is_absolute():
+            self.model_catalog_path = REPOSITORY_ROOT / self.model_catalog_path
+        self.model_catalog_path = self.model_catalog_path.resolve()
+        if not self.model_deployment_script.is_absolute():
+            self.model_deployment_script = REPOSITORY_ROOT / self.model_deployment_script
+        self.model_deployment_script = self.model_deployment_script.resolve()
 
         database_password = make_url(self.database_url).password
         insecure_fields = []

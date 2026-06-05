@@ -8,13 +8,16 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_admin
 from app.core.security import hash_password
-from app.db.models import ModelNode, PromptVersion, ReviewTask, TaskStatus, User
+from app.db.models import ModelDeployment, ModelNode, PromptVersion, ReviewTask, TaskStatus, User
 from app.db.session import get_db
 from app.schemas.admin import (
     AdminModelNodeResponse,
     AdminTaskResponse,
     AdminUserResponse,
     DashboardResponse,
+    ModelCatalogItemResponse,
+    ModelDeploymentCreateRequest,
+    ModelDeploymentResponse,
     ModelEnabledRequest,
     ModelNodeRequest,
     PasswordResetRequest,
@@ -26,6 +29,11 @@ from app.schemas.admin import (
     UserEnabledRequest,
 )
 from app.core.config import Settings, get_settings
+from app.services.model_deployments import (
+    create_model_deployment,
+    list_model_catalog,
+    start_model_deployment,
+)
 from app.services.prompts import activate_prompt, create_prompt_version
 from app.services.resources import collect_resource_snapshot
 
@@ -42,14 +50,6 @@ def dashboard(db: Annotated[Session, Depends(get_db)]) -> DashboardResponse:
     statuses = dict(
         db.execute(select(ReviewTask.status, func.count()).group_by(ReviewTask.status)).all()
     )
-
-
-@router.get("/resources", response_model=ResourceSnapshotResponse)
-def resources(
-    db: Annotated[Session, Depends(get_db)],
-    settings: Annotated[Settings, Depends(get_settings)],
-) -> ResourceSnapshotResponse:
-    return collect_resource_snapshot(db, settings)
     return DashboardResponse(
         users=db.scalar(select(func.count()).select_from(User)) or 0,
         enabled_users=db.scalar(select(func.count()).select_from(User).where(User.is_enabled.is_(True))) or 0,
@@ -64,6 +64,14 @@ def resources(
         completed_tasks=statuses.get(TaskStatus.COMPLETED, 0),
         failed_tasks=statuses.get(TaskStatus.FAILED, 0),
     )
+
+
+@router.get("/resources", response_model=ResourceSnapshotResponse)
+def resources(
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ResourceSnapshotResponse:
+    return collect_resource_snapshot(db, settings)
 
 
 @router.get("/users", response_model=list[AdminUserResponse])
@@ -234,6 +242,35 @@ def delete_prompt(prompt_id: str, db: Annotated[Session, Depends(get_db)]) -> Re
     db.delete(prompt)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/model-catalog", response_model=list[ModelCatalogItemResponse])
+def model_catalog(settings: Annotated[Settings, Depends(get_settings)]) -> list:
+    return list_model_catalog(settings)
+
+
+@router.get("/model-deployments", response_model=list[ModelDeploymentResponse])
+def list_model_deployments(db: Annotated[Session, Depends(get_db)]) -> list[ModelDeployment]:
+    return list(db.scalars(select(ModelDeployment).order_by(ModelDeployment.created_at.desc())).all())
+
+
+@router.post(
+    "/model-deployments",
+    response_model=ModelDeploymentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_deployment(
+    request: ModelDeploymentCreateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ModelDeployment:
+    try:
+        deployment = create_model_deployment(db, request, admin, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    start_model_deployment(deployment.id)
+    return deployment
 
 
 @router.get("/tasks", response_model=list[AdminTaskResponse])

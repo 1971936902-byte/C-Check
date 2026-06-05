@@ -25,3 +25,16 @@ export interface AdminUser extends User { created_at: string }
 export interface Prompt { id: string; version: number; body: string; is_active: boolean; creator_id?: string | null; created_at: string }
 export interface AdminTask { id: string; owner_id: string; model_node_id: string; display_name: string; status: TaskStatus; progress: number; finding_count: number; error_message?: string | null; created_at: string }
 export interface ReviewTaskPage { items: ReviewTask[]; total: number }
+export type ModelDeploymentStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'manual_required'
+export interface ModelCatalogItem {
+  key: string; display_name: string; model_identifier: string; description?: string | null
+  recommended_source: 'huggingface' | 'modelscope' | 'local' | string
+  huggingface_repo?: string | null; modelscope_repo?: string | null
+  default_port?: number | null; default_served_model_name?: string | null; estimated_vram_gb?: number | null; tags: string[]
+}
+export interface ModelDeployment {
+  id: string; catalog_key?: string | null; display_name: string; model_identifier: string; source: string
+  source_repository: string; served_model_name: string; base_url: string; port?: number | null
+  model_dir?: string | null; service_name?: string | null; status: ModelDeploymentStatus; progress: number
+  log?: string | null; error_message?: string | null; model_node_id?: string | null; created_at: string; updated_at: string
+}

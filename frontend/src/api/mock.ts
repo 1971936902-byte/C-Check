@@ -1,4 +1,4 @@
-import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, TaskStatus, User } from '../types'
+import type { AdminTask, AdminUser, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, TaskStatus, User } from '../types'
 
 const STATE_KEY = 'c-check-mock-state'
 const SESSION_KEY = 'c-check-mock-session'
@@ -8,6 +8,7 @@ type MockState = {
   version: number
   users: AdminUser[]
   models: ModelNode[]
+  deployments: ModelDeployment[]
   prompts: Prompt[]
   tasks: ReviewTask[]
   reports: Report[]
@@ -28,6 +29,48 @@ const findings = [
   { severity: 'medium' as const, category: 'logic', title: '文件句柄在异常分支未关闭', description: '读取失败后函数提前返回，已打开的 FILE 指针没有释放。', file_path: 'src/config.c', line: 87, remediation: '将资源释放集中到统一 cleanup 分支，所有退出路径都执行 fclose。', code_snippet: [{ line: 85, content: 'FILE *file = fopen(path, \"r\");', kind: 'context' as const }, { line: 86, content: 'if (read_config(file, config) < 0) {', kind: 'context' as const }, { line: 87, content: '    return -1;', kind: 'removed' as const }, { line: 88, content: '}', kind: 'context' as const }], fixed_snippet: [{ line: 85, content: 'FILE *file = fopen(path, \"r\");', kind: 'context' as const }, { line: 86, content: 'if (read_config(file, config) < 0) {', kind: 'context' as const }, { line: 87, content: '    fclose(file);', kind: 'added' as const }, { line: 88, content: '    return -1;', kind: 'added' as const }, { line: 89, content: '}', kind: 'context' as const }] },
   { severity: 'low' as const, category: 'portability', title: '整数类型依赖平台位宽', description: '使用 long 保存协议字段，在不同 ABI 下位宽可能不同。', file_path: 'include/protocol.h', line: 18, remediation: '改用 stdint.h 中的 uint32_t，并在序列化时明确字节序。', code_snippet: [{ line: 17, content: 'typedef struct packet_header {', kind: 'context' as const }, { line: 18, content: '    unsigned long payload_size;', kind: 'removed' as const }, { line: 19, content: '} packet_header_t;', kind: 'context' as const }], fixed_snippet: [{ line: 17, content: 'typedef struct packet_header {', kind: 'context' as const }, { line: 18, content: '    uint32_t payload_size;', kind: 'added' as const }, { line: 19, content: '} packet_header_t;', kind: 'context' as const }] },
   { severity: 'suggestion' as const, category: 'performance', title: '循环内重复计算字符串长度', description: '循环条件每次调用 strlen，会重复扫描字符串。', file_path: 'src/utils.c', line: 31, remediation: '进入循环前缓存字符串长度，减少重复遍历。', code_snippet: [{ line: 30, content: 'size_t count_letters(const char *text) {', kind: 'context' as const }, { line: 31, content: '    for (size_t i = 0; i < strlen(text); ++i) {', kind: 'removed' as const }, { line: 32, content: '        inspect(text[i]);', kind: 'context' as const }], fixed_snippet: [{ line: 30, content: 'size_t count_letters(const char *text) {', kind: 'context' as const }, { line: 31, content: '    const size_t length = strlen(text);', kind: 'added' as const }, { line: 32, content: '    for (size_t i = 0; i < length; ++i) {', kind: 'added' as const }, { line: 33, content: '        inspect(text[i]);', kind: 'context' as const }] },
+]
+
+const modelCatalog: ModelCatalogItem[] = [
+  {
+    key: 'deepseek-coder-14b-instruct',
+    display_name: 'DeepSeek-Coder 14B Instruct',
+    model_identifier: 'deepseek-ai/deepseek-coder-14b-instruct',
+    description: '适合复杂逻辑与安全审计的 C/C++ 代码模型。',
+    recommended_source: 'modelscope',
+    huggingface_repo: 'deepseek-ai/deepseek-coder-14b-instruct',
+    modelscope_repo: 'deepseek-ai/deepseek-coder-14b-instruct',
+    default_port: 8101,
+    default_served_model_name: 'deepseek-coder-14b-instruct',
+    estimated_vram_gb: 28,
+    tags: ['c', 'security', 'instruct'],
+  },
+  {
+    key: 'codellama-13b-instruct',
+    display_name: 'CodeLlama 13B Instruct',
+    model_identifier: 'codellama/CodeLlama-13b-Instruct-hf',
+    description: '适合作为兼容性与代码规范审查的备选节点。',
+    recommended_source: 'huggingface',
+    huggingface_repo: 'codellama/CodeLlama-13b-Instruct-hf',
+    modelscope_repo: 'LLM-Research/CodeLlama-13b-Instruct-hf',
+    default_port: 8102,
+    default_served_model_name: 'codellama-13b-instruct',
+    estimated_vram_gb: 26,
+    tags: ['c', 'instruct', 'fallback'],
+  },
+  {
+    key: 'starcoder2-15b',
+    display_name: 'StarCoder2 15B',
+    model_identifier: 'bigcode/starcoder2-15b',
+    description: '适合作为批量代码质量检查节点。',
+    recommended_source: 'huggingface',
+    huggingface_repo: 'bigcode/starcoder2-15b',
+    modelscope_repo: 'AI-ModelScope/starcoder2-15b',
+    default_port: 8103,
+    default_served_model_name: 'starcoder2-15b',
+    estimated_vram_gb: 30,
+    tags: ['c', 'batch', 'code'],
+  },
 ]
 
 const makeReport = (reportId: string, taskId: string): Report => ({
@@ -57,6 +100,26 @@ const seedState = (): MockState => {
     models: [
       { id: 'model-qwen', display_name: 'Qwen3-Coder 30B', model_identifier: 'qwen3-coder-30b', base_url: 'http://gpu-node-01:8000', timeout_seconds: 120, is_enabled: true, is_default: true, description: '适合日常批量代码审查与规范检查。', created_at: created },
       { id: 'model-deepseek', display_name: 'DeepSeek-Coder 33B', model_identifier: 'deepseek-coder-33b-instruct', base_url: 'http://gpu-node-02:8000', timeout_seconds: 180, is_enabled: true, is_default: false, description: '适合复杂逻辑与安全漏洞审计。', created_at: created },
+    ],
+    deployments: [
+      {
+        id: 'deploy-seeded',
+        catalog_key: 'deepseek-coder-14b-instruct',
+        display_name: 'DeepSeek-Coder 14B Instruct',
+        model_identifier: 'deepseek-ai/deepseek-coder-14b-instruct',
+        source: 'modelscope',
+        source_repository: 'deepseek-ai/deepseek-coder-14b-instruct',
+        served_model_name: 'deepseek-coder-14b-instruct',
+        base_url: 'http://127.0.0.1:8101',
+        port: 8101,
+        service_name: 'c-check-vllm-deepseek-coder-14b-instruct',
+        status: 'manual_required',
+        progress: 10,
+        log: '自动部署未开启；请在 Linux GPU 服务器设置 MODEL_DEPLOYMENT_ENABLED=true 后执行。',
+        model_node_id: 'model-qwen',
+        created_at: created,
+        updated_at: created,
+      },
     ],
     prompts: [
       { id: 'prompt-2', version: 2, body: 'C 语言企业级审查提示词：检查内存安全、逻辑漏洞、性能、规范与可移植性。', is_active: true, created_at: created },
@@ -262,6 +325,44 @@ export const mockApi = {
     defaultModel: async (modelId: string) => update(state => state.models.forEach(model => { model.is_default = model.id === modelId })),
     deleteModel: async (modelId: string) => update(state => { state.models = state.models.filter(model => model.id !== modelId) }),
     modelHealth: async () => response({ ok: true }),
+    modelCatalog: async () => response(modelCatalog),
+    modelDeployments: async () => response(load().deployments),
+    createModelDeployment: async (payload: Record<string, unknown>) => {
+      const state = load()
+      const catalog = modelCatalog.find((item) => item.key === payload.catalog_key) || modelCatalog[0]
+      const deployment: ModelDeployment = {
+        id: id('deploy'),
+        catalog_key: String(payload.catalog_key || catalog.key),
+        display_name: String(payload.display_name || catalog.display_name),
+        model_identifier: String(payload.model_identifier || catalog.model_identifier),
+        source: String(payload.source || catalog.recommended_source),
+        source_repository: String(payload.source_repository || catalog.modelscope_repo || catalog.huggingface_repo || catalog.model_identifier),
+        served_model_name: String(payload.served_model_name || catalog.default_served_model_name || catalog.key),
+        base_url: String(payload.base_url || `http://127.0.0.1:${catalog.default_port || 8101}`),
+        port: Number(payload.port || catalog.default_port || 8101),
+        service_name: String(payload.service_name || `c-check-vllm-${catalog.key}`),
+        status: 'queued',
+        progress: 0,
+        log: 'Deployment task queued.',
+        model_node_id: id('model'),
+        created_at: now(),
+        updated_at: now(),
+      }
+      state.deployments.unshift(deployment)
+      state.models.push({
+        id: deployment.model_node_id!,
+        display_name: deployment.display_name,
+        model_identifier: deployment.served_model_name,
+        base_url: deployment.base_url,
+        timeout_seconds: Number(payload.timeout_seconds || 180),
+        is_enabled: true,
+        is_default: !state.models.some(model => model.is_default),
+        description: '由模型部署任务自动登记',
+        created_at: now(),
+      })
+      save(state)
+      return response(deployment)
+    },
     prompts: async () => response(load().prompts.sort((a, b) => a.version - b.version)),
     createPrompt: async (body: string) => {
       const state = load()

@@ -73,6 +73,102 @@ def test_model_update_preserves_existing_api_key_when_field_is_omitted(db_sessio
         assert node.api_key == "existing-secret"
 
 
+def test_admin_dashboard_returns_counts(db_session_factory):
+    from app.main import app
+
+    with db_session_factory() as db:
+        admin = User(username="admin-user", password_hash=hash_password("admin-password"), role="admin")
+        user = User(username="normal-user", password_hash=hash_password("user-password"), role="user")
+        model = ModelNode(
+            display_name="Qwen node",
+            model_identifier="qwen-model",
+            base_url="http://model-node",
+            timeout_seconds=120,
+            is_enabled=True,
+            is_default=True,
+        )
+        db.add_all([admin, user, model])
+        db.commit()
+        admin_id = admin.id
+
+    with TestClient(app) as client:
+        response = client.get("/api/admin/dashboard", headers=auth_headers(admin_id))
+
+    assert response.status_code == 200
+    assert response.json()["users"] == 2
+    assert response.json()["models"] == 1
+
+
+def test_admin_model_catalog_includes_supported_configurable_models(db_session_factory):
+    from app.main import app
+
+    with db_session_factory() as db:
+        admin = User(username="admin-user", password_hash=hash_password("admin-password"), role="admin")
+        db.add(admin)
+        db.commit()
+        admin_id = admin.id
+
+    with TestClient(app) as client:
+        response = client.get("/api/admin/model-catalog", headers=auth_headers(admin_id))
+
+    assert response.status_code == 200
+    model_keys = {item["key"] for item in response.json()}
+    assert {
+        "deepseek-coder-14b-instruct",
+        "codellama-13b-instruct",
+        "starcoder2-15b",
+    }.issubset(model_keys)
+
+
+def test_admin_can_create_model_deployment_and_register_node(db_session_factory, monkeypatch):
+    from app.main import app
+
+    started: list[str] = []
+    monkeypatch.setattr("app.api.admin.start_model_deployment", lambda deployment_id: started.append(deployment_id))
+
+    with db_session_factory() as db:
+        admin = User(username="admin-user", password_hash=hash_password("admin-password"), role="admin")
+        db.add(admin)
+        db.commit()
+        admin_id = admin.id
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/admin/model-deployments",
+            headers=auth_headers(admin_id),
+            json={
+                "catalog_key": "deepseek-coder-14b-instruct",
+                "source": "modelscope",
+                "base_url": "http://127.0.0.1:8101",
+                "served_model_name": "deepseek-coder-14b-instruct",
+                "api_key": "test-key",
+                "auto_register": True,
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "queued"
+    assert payload["model_node_id"]
+    assert payload["display_name"] == "DeepSeek-Coder 14B Instruct"
+    assert started == [payload["id"]]
+
+
+def test_model_deployment_admin_only(db_session_factory):
+    from app.main import app
+
+    with db_session_factory() as db:
+        user = User(username="normal-user", password_hash=hash_password("user-password"), role="user")
+        db.add(user)
+        db.commit()
+        user_id = user.id
+
+    with TestClient(app) as client:
+        response = client.get("/api/admin/model-catalog", headers=auth_headers(user_id))
+
+    assert response.status_code == 403
+
+
 def test_admin_resources_endpoint_returns_runtime_snapshot(db_session_factory, monkeypatch):
     from app.main import app
 
