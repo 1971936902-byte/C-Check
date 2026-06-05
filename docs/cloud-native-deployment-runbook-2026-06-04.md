@@ -730,6 +730,78 @@ ss -ltnp | grep -E ':(8800|8000|3306|6379) '
 
 主站已经可用后，再单独部署模型服务。
 
+### 17.1 2026-06-06 结构化输出审核部署经验
+
+本次线上问题是：前端提交 C 文件审查后，模型返回内容被截断或不符合后端结构要求，前端显示 `model returned an invalid structured response`。后续排查发现，需要同时处理三类风险：
+
+1. 模型可能返回非完整 JSON、Markdown 包裹 JSON、额外解释文本或被截断的 JSON。
+2. 旧解析逻辑可能误抓内部 `finding` 子对象，导致错误信息不直观。
+3. VLLM 的 `max_tokens` 不能等于模型上下文长度，否则会因为没有给输入提示词和源码预留空间而返回 400。
+
+最终采用的方案：
+
+1. 请求模型时启用 `response_format=json_schema`，让 VLLM 在生成阶段约束输出结构。
+2. 后端继续使用 Pydantic schema 做二次审核，只有完全符合 `summary / score / findings` 结构的结果才生成报告。
+3. 审核失败时，将校验错误、原始响应片段和修正要求反馈给模型，自动重试。
+4. 默认最多重试 3 次，仍失败则任务置为 failed，前端可在模型日志中查看每次失败原因。
+5. 将 `findings` 上限控制为 8 条，避免输出过长导致 JSON 截断。
+
+关键配置：
+
+```dotenv
+MODEL_MAX_ATTEMPTS=3
+MODEL_MAX_TOKENS=2048
+MODEL_STRUCTURED_OUTPUTS_ENABLED=true
+```
+
+配置经验：
+
+- 4K 上下文模型建议保持 `MODEL_MAX_TOKENS=2048`，不要设置为 4096。
+- 如果模型服务不支持 `response_format=json_schema`，可临时设置 `MODEL_STRUCTURED_OUTPUTS_ENABLED=false` 回退到普通 JSON object，但仍会保留后端二次审核。
+- 生产环境推荐保持 `MODEL_STRUCTURED_OUTPUTS_ENABLED=true`。
+
+本次部署命令：
+
+```bash
+cd /opt/c-check
+git fetch origin master
+git checkout master
+git reset --hard origin/master
+
+grep -q '^MODEL_STRUCTURED_OUTPUTS_ENABLED=' /etc/c-check/c-check.env \
+  && sed -i 's/^MODEL_STRUCTURED_OUTPUTS_ENABLED=.*/MODEL_STRUCTURED_OUTPUTS_ENABLED=true/' /etc/c-check/c-check.env \
+  || printf '\nMODEL_STRUCTURED_OUTPUTS_ENABLED=true\n' >> /etc/c-check/c-check.env
+
+DEPLOY_ENV=/etc/c-check/c-check.env bash /opt/c-check/deploy/native/c-check-deploy.sh update
+```
+
+部署后检查：
+
+```bash
+cd /opt/c-check
+git rev-parse --short HEAD
+grep -E '^(MODEL_MAX_ATTEMPTS|MODEL_MAX_TOKENS|MODEL_STRUCTURED_OUTPUTS_ENABLED)=' /etc/c-check/c-check.env
+systemctl is-active c-check-api c-check-worker c-check-vllm nginx mysql redis-server
+ss -ltnp | grep -E ':(8000|8001|8800) '
+```
+
+本次成功状态：
+
+- 代码版本：`77c16db feat: add structured model output audit`
+- 线上入口：`http://180.127.11.166:15188/`
+- 线上入口返回：`HTTP/1.1 200 OK`
+- 服务状态：`c-check-api`、`c-check-worker`、`c-check-vllm`、`nginx`、`mysql`、`redis-server` 均为 active。
+- 真实 C 代码审查验证通过，任务第一次尝试完成，生成报告和 findings。
+
+模型日志排查经验：
+
+- 失败任务会在 `review_tasks.model_log` 中记录 `Attempt N started/failed/succeeded`。
+- 如果模型返回了非法 JSON，日志会保存 `Raw model response`。
+- 如果 VLLM 返回 HTTP 400，日志会保存响应正文，例如 `max_tokens is too large`。
+- 前端工作台和历史记录中都可以点击“模型日志”查看这些内容。
+
+这次经验里最重要的一点：不要只依赖提示词让模型“自觉输出 JSON”。更稳的工程方案是“生成阶段 JSON Schema 约束 + 服务端 schema 二次审核 + 带错误反馈的有限重试 + 前端可见日志”。
+
 建议顺序：
 
 1. 准备模型目录和缓存目录，确认磁盘空间。
@@ -772,4 +844,3 @@ curl -i http://127.0.0.1:<vllm_port>/v1/models
 - 能提交 C 代码审查任务。
 - worker 能完成任务。
 - 能打开报告并下载 Markdown。
-
