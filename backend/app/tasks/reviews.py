@@ -33,6 +33,28 @@ def _failure_log(attempt: int, exc: Exception) -> str:
     return "\n".join(parts)
 
 
+def _is_structured_output_audit_failure(exc: Exception) -> bool:
+    return isinstance(exc, ModelInvocationError) and str(exc) == "model returned an invalid structured response"
+
+
+def _retry_instruction(attempt: int, exc: Exception) -> str:
+    if _is_structured_output_audit_failure(exc):
+        parts = [
+            "The previous model output backend JSON schema audit failed.",
+            "Return exactly one complete JSON object only. Do not include Markdown, comments, prose, or extra keys.",
+            "The object must contain exactly: summary, score, findings. Every finding must match the required enum values and field types.",
+            "Return at most 8 findings and escape all quotes/newlines as valid JSON strings.",
+            f"Audit failure from attempt {attempt}:",
+        ]
+        if isinstance(exc, ModelInvocationError):
+            if exc.details:
+                parts.append(f"Validation details:\n{exc.details}")
+            if exc.raw_response:
+                parts.append(f"Rejected raw response excerpt:\n{truncate_model_log(exc.raw_response, 3000)}")
+        return truncate_model_log("\n\n".join(parts), 4000) or ""
+    return truncate_model_log(_failure_log(attempt, exc), 4000) or ""
+
+
 def _invoke_with_retries(db, task_id: str, max_attempts: int) -> ModelReviewResponse:
     last_exc: Exception | None = None
     retry_instruction: str | None = None
@@ -51,7 +73,7 @@ def _invoke_with_retries(db, task_id: str, max_attempts: int) -> ModelReviewResp
             if task is None:
                 raise
             task.model_log = _append_model_log(task.model_log, _failure_log(attempt, exc))
-            retry_instruction = truncate_model_log(_failure_log(attempt, exc), 4000)
+            retry_instruction = _retry_instruction(attempt, exc)
             if attempt < max_attempts:
                 task.progress = min(90, 10 + attempt * 25)
                 task.error_message = f"{exc}; retrying ({attempt}/{max_attempts})"[:1000]
@@ -67,6 +89,17 @@ def _invoke_with_retries(db, task_id: str, max_attempts: int) -> ModelReviewResp
             db.commit()
         return result
     assert last_exc is not None
+    task = db.get(ReviewTask, task_id)
+    if task is not None and _is_structured_output_audit_failure(last_exc):
+        task.model_log = _append_model_log(
+            task.model_log,
+            f"Final audit result: failed after {max_attempts} attempt(s).",
+        )
+        db.commit()
+        raise ModelInvocationError(
+            f"model output audit failed after {max_attempts} attempts",
+            details=retry_instruction,
+        ) from last_exc
     raise last_exc
 
 

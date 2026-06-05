@@ -16,6 +16,7 @@ from app.services.check_types import check_types_prompt
 
 MAX_MODEL_LOG_CHARS = 12000
 RESPONSE_REQUIRED_KEYS = {"summary", "score", "findings"}
+STRUCTURED_RESPONSE_SCHEMA_NAME = "c_review_response"
 RESPONSE_CONTRACT = """
 You must return exactly one JSON object and nothing else. Do not wrap it in Markdown.
 The JSON object must match this schema:
@@ -151,6 +152,19 @@ def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
         ) from exc
 
 
+def _response_format(settings: Settings) -> dict[str, Any]:
+    if not settings.model_structured_outputs_enabled:
+        return {"type": "json_object"}
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": STRUCTURED_RESPONSE_SCHEMA_NAME,
+            "strict": True,
+            "schema": ModelReviewResponse.model_json_schema(),
+        },
+    }
+
+
 async def invoke_model(
     *,
     node: ModelNode,
@@ -181,7 +195,7 @@ async def invoke_model(
         ],
         "temperature": 0,
         "max_tokens": settings.model_max_tokens,
-        "response_format": {"type": "json_object"},
+        "response_format": _response_format(settings),
     }
     try:
         async with httpx.AsyncClient(timeout=node.timeout_seconds) as client:

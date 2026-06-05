@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     mock_model_enabled: bool = False
     model_max_attempts: int = Field(default=3, ge=1, le=5)
     model_max_tokens: int = Field(default=2048, ge=256, le=16384)
+    model_structured_outputs_enabled: bool = True
     allow_insecure_defaults: bool = False
 
     @model_validator(mode="after")

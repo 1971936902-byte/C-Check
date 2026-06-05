@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -130,6 +131,91 @@ def test_invoke_model_sends_output_token_budget(monkeypatch):
     )
 
     assert captured["json"]["max_tokens"] == 3072
+
+
+def test_invoke_model_requests_json_schema_structured_output(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"summary":"ok","score":100,"findings":[]}'
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.model_router.httpx.AsyncClient", FakeClient)
+
+    asyncio.run(
+        invoke_model(
+            node=ModelNode(
+                display_name="test",
+                model_identifier="qwen-test",
+                base_url="http://model.local",
+                is_enabled=True,
+            ),
+            files=[
+                ReviewFile(
+                    relative_path="main.c",
+                    source_text="int main(void){return 0;}",
+                    size_bytes=25,
+                )
+            ],
+            prompt="review",
+        )
+    )
+
+    response_format = captured["json"]["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["name"] == "c_review_response"
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 8
+
+
+def test_parse_response_rejects_too_many_findings_for_audit():
+    finding = {
+        "severity": "low",
+        "category": "maintainability",
+        "title": "style",
+        "description": "description",
+        "file_path": "main.c",
+        "line": 1,
+        "remediation": "remediation",
+        "code_snippet": [],
+        "fixed_snippet": [],
+    }
+    content = {
+        "summary": "too many findings",
+        "score": 60,
+        "findings": [finding for _ in range(9)],
+    }
+
+    with pytest.raises(ModelInvocationError) as raised:
+        _parse_response({"choices": [{"message": {"content": json.dumps(content)}}]})
+
+    assert "invalid structured response" in str(raised.value)
+    assert "at most 8 items" in (raised.value.details or "")
 
 
 def test_invoke_model_keeps_http_error_response_body(monkeypatch):
