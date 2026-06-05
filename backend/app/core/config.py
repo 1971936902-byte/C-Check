@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     storage_path: Path = Path("uploads")
     mock_model_enabled: bool = False
     model_max_attempts: int = Field(default=3, ge=1, le=5)
+    model_max_tokens: int = Field(default=4096, ge=256, le=16384)
     allow_insecure_defaults: bool = False
 
     @model_validator(mode="after")

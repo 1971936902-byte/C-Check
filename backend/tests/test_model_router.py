@@ -1,7 +1,10 @@
+import asyncio
+
 import pytest
 
+from app.db.models import ModelNode, ReviewFile
 from app.schemas.model_response import FindingCategory
-from app.services.model_router import ModelInvocationError, _parse_response
+from app.services.model_router import ModelInvocationError, _parse_response, invoke_model
 
 
 def test_parse_response_accepts_json_inside_markdown_fence():
@@ -35,6 +38,97 @@ def test_parse_response_error_keeps_raw_model_content():
     assert "invalid structured response" in str(raised.value)
     assert raised.value.raw_response == "not valid json"
     assert raised.value.details
+
+
+def test_parse_response_rejects_nested_finding_from_truncated_response():
+    content = """
+{
+  "summary": "代码存在问题。",
+  "score": 20,
+  "findings": [
+    {
+      "severity": "high",
+      "category": "buffer_overflow",
+      "title": "固定缓冲区写入缺少边界检查",
+      "description": "strcpy 写入固定缓冲区。",
+      "file_path": "CTest.c",
+      "line": 14,
+      "remediation": "使用带边界的拷贝函数。",
+      "code_snippet": [
+        { "line": 14, "content": "strcpy(buf, input);", "kind": "removed" }
+      ],
+      "fixed_snippet": [
+        { "line": 14, "content": "snprintf(buf, sizeof(buf), \"%s\", input);", "kind": "added" }
+      ]
+    },
+    {
+      "severity": "high"
+"""
+
+    with pytest.raises(ModelInvocationError) as raised:
+        _parse_response({"choices": [{"message": {"content": content}}]})
+
+    assert "invalid structured response" in str(raised.value)
+    assert "complete top-level JSON object" in (raised.value.details or "")
+    assert raised.value.raw_response == content
+
+
+def test_invoke_model_sends_output_token_budget(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"summary":"未发现明显问题。","score":100,"findings":[]}'
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.model_router.httpx.AsyncClient", FakeClient)
+    monkeypatch.setenv("MODEL_MAX_TOKENS", "3072")
+
+    asyncio.run(
+        invoke_model(
+            node=ModelNode(
+                display_name="test",
+                model_identifier="qwen-test",
+                base_url="http://model.local",
+                is_enabled=True,
+            ),
+            files=[
+                ReviewFile(
+                    relative_path="main.c",
+                    source_text="int main(void){return 0;}",
+                    size_bytes=25,
+                )
+            ],
+            prompt="review",
+        )
+    )
+
+    assert captured["json"]["max_tokens"] == 3072
 
 
 def test_finding_category_accepts_frontend_check_type_values():

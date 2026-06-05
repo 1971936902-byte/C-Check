@@ -15,6 +15,7 @@ from app.services.check_types import check_types_prompt
 
 
 MAX_MODEL_LOG_CHARS = 12000
+RESPONSE_REQUIRED_KEYS = {"summary", "score", "findings"}
 RESPONSE_CONTRACT = """
 You must return exactly one JSON object and nothing else. Do not wrap it in Markdown.
 The JSON object must match this schema:
@@ -43,6 +44,7 @@ Use null for "line" only when the finding cannot be tied to a specific line.
 Use an empty findings array when no issue is found.
 All enum values must be lowercase exactly as listed.
 All strings must be valid JSON strings with escaped quotes and newlines.
+Return at most 12 findings. Prioritize high-risk and concrete C language defects.
 """
 
 
@@ -84,6 +86,10 @@ def truncate_model_log(value: str | None, limit: int = MAX_MODEL_LOG_CHARS) -> s
     return value[:limit] + f"\n... [truncated {len(value) - limit} chars]"
 
 
+def _is_contract_object(value: Any) -> bool:
+    return isinstance(value, dict) and RESPONSE_REQUIRED_KEYS.issubset(value)
+
+
 def _extract_json_object(content: str) -> str:
     stripped = content.strip()
     if stripped.startswith("```"):
@@ -94,17 +100,39 @@ def _extract_json_object(content: str) -> str:
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
     if stripped.startswith("{") and stripped.endswith("}"):
-        return stripped
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if _is_contract_object(parsed):
+                return stripped
+
+    found_json_object = False
+    found_partial_contract = False
 
     decoder = json.JSONDecoder()
     for index, char in enumerate(stripped):
         if char != "{":
             continue
         try:
-            _, end = decoder.raw_decode(stripped[index:])
+            parsed, end = decoder.raw_decode(stripped[index:])
         except json.JSONDecodeError:
+            if index == 0 and any(f'"{key}"' in stripped for key in RESPONSE_REQUIRED_KEYS):
+                found_partial_contract = True
             continue
-        return stripped[index : index + end]
+        if isinstance(parsed, dict):
+            found_json_object = True
+            if _is_contract_object(parsed):
+                return stripped[index : index + end]
+    if found_partial_contract:
+        raise ValueError(
+            "model response contains a truncated top-level JSON object; no complete top-level JSON object with summary, score, and findings was found"
+        )
+    if found_json_object:
+        raise ValueError(
+            "model response contains JSON fragments, but no complete top-level JSON object with summary, score, and findings was found"
+        )
     return stripped
 
 
@@ -115,7 +143,7 @@ def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
         if not isinstance(content, str):
             raise TypeError("assistant content is not text")
         return ModelReviewResponse.model_validate_json(_extract_json_object(content))
-    except (KeyError, IndexError, TypeError, ValidationError, json.JSONDecodeError) as exc:
+    except (KeyError, IndexError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
         raise ModelInvocationError(
             "model returned an invalid structured response",
             raw_response=content or json.dumps(payload, ensure_ascii=False),
@@ -152,6 +180,7 @@ async def invoke_model(
             {"role": "user", "content": _source_message(files)},
         ],
         "temperature": 0,
+        "max_tokens": settings.model_max_tokens,
         "response_format": {"type": "json_object"},
     }
     try:
