@@ -25,7 +25,7 @@ Output rules are mandatory:
 3. `summary` must be a concise Chinese summary.
 4. `score` must be a number from 0 to 100. Higher means better code quality.
 5. `findings` must be an array. Return an empty array when no issue is found.
-   Return at most 12 findings, prioritizing high-risk, concrete defects over minor style issues.
+   Return at most 8 findings, prioritizing high-risk, concrete defects over minor style issues.
 6. Every finding must contain exactly these fields:
    `severity`, `category`, `title`, `description`, `file_path`, `line`,
    `remediation`, `code_snippet`, `fixed_snippet`.

@@ -44,7 +44,7 @@ Use null for "line" only when the finding cannot be tied to a specific line.
 Use an empty findings array when no issue is found.
 All enum values must be lowercase exactly as listed.
 All strings must be valid JSON strings with escaped quotes and newlines.
-Return at most 12 findings. Prioritize high-risk and concrete C language defects.
+Return at most 8 findings. Prioritize high-risk and concrete C language defects.
 """
 
 
@@ -192,6 +192,11 @@ async def invoke_model(
             )
             response.raise_for_status()
             payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        details = str(exc)
+        if exc.response is not None:
+            details = f"{details}\nResponse body:\n{truncate_model_log(exc.response.text, 4000)}"
+        raise ModelInvocationError("selected model node is unavailable", details=details) from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise ModelInvocationError("selected model node is unavailable", details=str(exc)) from exc
     return _parse_response(payload)

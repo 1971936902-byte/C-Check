@@ -1,5 +1,6 @@
 import asyncio
 
+import httpx
 import pytest
 
 from app.db.models import ModelNode, ReviewFile
@@ -129,6 +130,54 @@ def test_invoke_model_sends_output_token_budget(monkeypatch):
     )
 
     assert captured["json"]["max_tokens"] == 3072
+
+
+def test_invoke_model_keeps_http_error_response_body(monkeypatch):
+    class FakeResponse:
+        text = '{"error":"max_tokens is too large"}'
+
+        def raise_for_status(self):
+            request = httpx.Request("POST", "http://model.local/v1/chat/completions")
+            response = httpx.Response(400, request=request, text=self.text)
+            raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.model_router.httpx.AsyncClient", FakeClient)
+
+    with pytest.raises(ModelInvocationError) as raised:
+        asyncio.run(
+            invoke_model(
+                node=ModelNode(
+                    display_name="test",
+                    model_identifier="qwen-test",
+                    base_url="http://model.local",
+                    is_enabled=True,
+                ),
+                files=[
+                    ReviewFile(
+                        relative_path="main.c",
+                        source_text="int main(void){return 0;}",
+                        size_bytes=25,
+                    )
+                ],
+                prompt="review",
+            )
+        )
+
+    assert "selected model node is unavailable" in str(raised.value)
+    assert "max_tokens is too large" in (raised.value.details or "")
 
 
 def test_finding_category_accepts_frontend_check_type_values():
