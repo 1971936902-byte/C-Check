@@ -31,6 +31,9 @@ load_env() {
   PYTHON_BIN="${PYTHON_BIN:-python3}"
   PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
   NODE_MAJOR="${NODE_MAJOR:-22}"
+  NODE_VERSION="${NODE_VERSION:-22.21.1}"
+  NODE_DIST_URL="${NODE_DIST_URL:-https://npmmirror.com/mirrors/node}"
+  NODE_INSTALL_DIR="${NODE_INSTALL_DIR:-/opt/nodejs/${NODE_VERSION}}"
   STORAGE_PATH="${STORAGE_PATH:-${APP_DIR}/uploads}"
   MODEL_MAX_ATTEMPTS="${MODEL_MAX_ATTEMPTS:-3}"
 }
@@ -53,7 +56,7 @@ install_os_packages() {
   apt-get update
   apt-get install -y \
     ca-certificates curl git nginx redis-server mysql-server \
-    build-essential pkg-config "${PYTHON_BIN}" "${PYTHON_BIN}-venv" "${PYTHON_BIN}-dev"
+    build-essential pkg-config xz-utils "${PYTHON_BIN}" "${PYTHON_BIN}-venv" "${PYTHON_BIN}-dev"
 }
 
 python_version_ok() {
@@ -89,9 +92,50 @@ install_nodejs() {
     log "Node.js $(node -v) already installed"
     return
   fi
-  log "Installing Node.js ${NODE_MAJOR}"
-  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-  apt-get install -y nodejs
+
+  log "Installing Node.js ${NODE_MAJOR} from NodeSource"
+  if curl -fsSL --connect-timeout 20 --retry 3 "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+    && apt-get install -y nodejs \
+    && command -v node >/dev/null 2>&1 \
+    && node -v | grep -q "^v${NODE_MAJOR}\\."; then
+    log "Node.js $(node -v) installed from NodeSource"
+    return
+  fi
+
+  log "NodeSource install failed, falling back to Node.js ${NODE_VERSION} tarball"
+  install_nodejs_tarball
+}
+
+install_nodejs_tarball() {
+  local machine arch tarball url tmp_dir extracted_dir
+  machine="$(uname -m)"
+  case "${machine}" in
+    x86_64|amd64) arch="x64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) die "Unsupported CPU architecture for Node.js tarball: ${machine}" ;;
+  esac
+
+  tarball="node-v${NODE_VERSION}-linux-${arch}.tar.xz"
+  url="${NODE_DIST_URL%/}/v${NODE_VERSION}/${tarball}"
+  tmp_dir="$(mktemp -d)"
+
+  log "Downloading ${url}"
+  curl -fL --connect-timeout 30 --retry 5 --retry-delay 3 -o "${tmp_dir}/${tarball}" "${url}"
+  tar -xJf "${tmp_dir}/${tarball}" -C "${tmp_dir}"
+  extracted_dir="${tmp_dir}/node-v${NODE_VERSION}-linux-${arch}"
+
+  rm -rf "${NODE_INSTALL_DIR}"
+  mkdir -p "$(dirname "${NODE_INSTALL_DIR}")"
+  mv "${extracted_dir}" "${NODE_INSTALL_DIR}"
+  ln -sfn "${NODE_INSTALL_DIR}/bin/node" /usr/local/bin/node
+  ln -sfn "${NODE_INSTALL_DIR}/bin/npm" /usr/local/bin/npm
+  ln -sfn "${NODE_INSTALL_DIR}/bin/npx" /usr/local/bin/npx
+  rm -rf "${tmp_dir}"
+  hash -r
+
+  command -v node >/dev/null 2>&1 || die "Node.js tarball install did not create node command."
+  node -v | grep -q "^v${NODE_MAJOR}\\." || die "Installed Node.js $(node -v) does not match NODE_MAJOR=${NODE_MAJOR}."
+  log "Node.js $(node -v) installed from tarball"
 }
 
 sync_source() {
@@ -167,6 +211,9 @@ install_backend() {
 build_frontend() {
   log "Building frontend"
   cd "${APP_DIR}/frontend"
+  if [[ -x "${NODE_INSTALL_DIR}/bin/node" ]]; then
+    export PATH="${NODE_INSTALL_DIR}/bin:${PATH}"
+  fi
   npm ci
   npm run build
 }

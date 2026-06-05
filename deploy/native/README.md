@@ -95,4 +95,5 @@ sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh up
 - Existing source checkout is reset to `origin/${BRANCH}`.
 - The script refuses placeholder secrets.
 - Backups are stored under `${APP_DIR}/backups/<timestamp>`.
+- Node.js is installed from NodeSource first. If that network path fails, the installer falls back to a configurable Node.js tarball mirror through `NODE_VERSION`, `NODE_DIST_URL`, and `NODE_INSTALL_DIR`.
 - Use the existing Docker Compose `start.sh` when you prefer containerized deployment.
