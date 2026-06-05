@@ -83,7 +83,10 @@ create_backend_venv() {
   else
     install_uv
     uv python install "${PYTHON_VERSION}"
-    uv venv --python "${PYTHON_VERSION}" .venv
+    uv venv --seed --python "${PYTHON_VERSION}" .venv
+  fi
+  if ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
+    .venv/bin/python -m ensurepip --upgrade
   fi
 }
 
