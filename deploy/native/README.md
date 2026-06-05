@@ -37,6 +37,7 @@ After installation, open the configured `PUBLIC_ORIGIN`.
 ## Required Edits
 
 Before running `install`, replace all `CHANGE_ME` values in `/etc/c-check/c-check.env`.
+For a Chinese field-by-field guide, read [配置说明文档.md](配置说明文档.md).
 
 Important fields:
 

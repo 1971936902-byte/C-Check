@@ -17,7 +17,8 @@ vim /etc/c-check/c-check.env
 sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh install
 ```
 
-See [deploy/native/README.md](deploy/native/README.md) for configuration, updates, backups, and VLLM registration.
+See [deploy/native/README.md](deploy/native/README.md) and
+[deploy/native/配置说明文档.md](deploy/native/配置说明文档.md) for configuration, updates, backups, and VLLM registration.
 
 ### Docker Compose deployment
 
