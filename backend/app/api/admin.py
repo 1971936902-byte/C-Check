@@ -21,10 +21,13 @@ from app.schemas.admin import (
     PromptCreateRequest,
     PromptResponse,
     PromptUpdateRequest,
+    ResourceSnapshotResponse,
     UserCreateRequest,
     UserEnabledRequest,
 )
+from app.core.config import Settings, get_settings
 from app.services.prompts import activate_prompt, create_prompt_version
+from app.services.resources import collect_resource_snapshot
 
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -39,6 +42,14 @@ def dashboard(db: Annotated[Session, Depends(get_db)]) -> DashboardResponse:
     statuses = dict(
         db.execute(select(ReviewTask.status, func.count()).group_by(ReviewTask.status)).all()
     )
+
+
+@router.get("/resources", response_model=ResourceSnapshotResponse)
+def resources(
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ResourceSnapshotResponse:
+    return collect_resource_snapshot(db, settings)
     return DashboardResponse(
         users=db.scalar(select(func.count()).select_from(User)) or 0,
         enabled_users=db.scalar(select(func.count()).select_from(User).where(User.is_enabled.is_(True))) or 0,

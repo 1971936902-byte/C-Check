@@ -1,4 +1,4 @@
-import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, ReviewTask, TaskStatus, User } from '../types'
+import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, TaskStatus, User } from '../types'
 
 const STATE_KEY = 'c-check-mock-state'
 const SESSION_KEY = 'c-check-mock-session'
@@ -198,6 +198,48 @@ export const mockApi = {
         completed_tasks: state.tasks.filter((task) => task.status === 'completed').length,
         failed_tasks: state.tasks.filter((task) => task.status === 'failed').length,
       } satisfies Dashboard)
+    },
+    resources: async () => {
+      const state = load()
+      const tasks = {
+        users: state.users.length,
+        enabled_users: state.users.filter((user) => user.is_enabled).length,
+        models: state.models.length,
+        enabled_models: state.models.filter((model) => model.is_enabled).length,
+        tasks: state.tasks.length,
+        queued_tasks: state.tasks.filter((task) => task.status === 'queued').length,
+        running_tasks: state.tasks.filter((task) => task.status === 'running').length,
+        completed_tasks: state.tasks.filter((task) => task.status === 'completed').length,
+        failed_tasks: state.tasks.filter((task) => task.status === 'failed').length,
+      }
+      return response({
+        captured_at: now(),
+        system: {
+          cpu_percent: 28,
+          load_average_1m: 1.35,
+          memory_total_bytes: 64 * 1024 ** 3,
+          memory_used_bytes: 31 * 1024 ** 3,
+          memory_percent: 48.4,
+          disk_total_bytes: 500 * 1024 ** 3,
+          disk_used_bytes: 182 * 1024 ** 3,
+          disk_percent: 36.4,
+        },
+        gpus: [
+          { index: 0, name: 'NVIDIA A100', utilization_percent: 62, memory_used_mb: 24576, memory_total_mb: 81920, memory_percent: 30, temperature_c: 58, power_w: 220 },
+        ],
+        models: state.models.map((model) => ({
+          node_id: model.id,
+          display_name: model.display_name,
+          base_url: model.base_url,
+          metrics_available: model.is_enabled,
+          prompt_throughput_tps: model.is_enabled ? 1200 : null,
+          generation_throughput_tps: model.is_enabled ? 150 : null,
+          running_requests: model.is_enabled ? 2 : 0,
+          pending_requests: 0,
+          gpu_kv_cache_usage_percent: model.is_enabled ? 27.4 : null,
+        })),
+        tasks,
+      } satisfies ResourceSnapshot)
     },
     users: async () => response(load().users),
     createUser: async (payload: { username: string; password: string; role: string }) => {

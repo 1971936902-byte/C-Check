@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
+import type { AdminTask, AdminUser, Dashboard, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
 import { mockApi } from './mock'
 
 export const TOKEN_KEY = 'c-check-token'
@@ -47,6 +47,7 @@ export const reportApi = {
 }
 export const adminApi = {
   dashboard: () => MOCK_API_ENABLED ? mockApi.admin.dashboard() : api.get<Dashboard>('/admin/dashboard'),
+  resources: () => MOCK_API_ENABLED ? mockApi.admin.resources() : api.get<ResourceSnapshot>('/admin/resources'),
   users: () => MOCK_API_ENABLED ? mockApi.admin.users() : api.get<AdminUser[]>('/admin/users'),
   createUser: (payload: { username: string; password: string; role: string }) => MOCK_API_ENABLED ? mockApi.admin.createUser(payload) : api.post('/admin/users', payload),
   enableUser: (id: string, is_enabled: boolean) => MOCK_API_ENABLED ? mockApi.admin.enableUser(id, is_enabled) : api.patch(`/admin/users/${id}/enabled`, { is_enabled }),

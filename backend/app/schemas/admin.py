@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -101,3 +101,46 @@ class DashboardResponse(BaseModel):
     running_tasks: int
     completed_tasks: int
     failed_tasks: int
+
+
+class SystemResourceResponse(BaseModel):
+    cpu_percent: float | None = None
+    load_average_1m: float | None = None
+    memory_total_bytes: int | None = None
+    memory_used_bytes: int | None = None
+    memory_percent: float | None = None
+    disk_total_bytes: int | None = None
+    disk_used_bytes: int | None = None
+    disk_percent: float | None = None
+
+
+class GpuDeviceResponse(BaseModel):
+    index: int
+    name: str
+    utilization_percent: float | None = None
+    memory_used_mb: float | None = None
+    memory_total_mb: float | None = None
+    memory_percent: float | None = None
+    temperature_c: float | None = None
+    power_w: float | None = None
+
+
+class ModelRuntimeMetricResponse(BaseModel):
+    node_id: str
+    display_name: str
+    base_url: str
+    metrics_available: bool
+    prompt_throughput_tps: float | None = None
+    generation_throughput_tps: float | None = None
+    running_requests: int | None = None
+    pending_requests: int | None = None
+    gpu_kv_cache_usage_percent: float | None = None
+    error: str | None = None
+
+
+class ResourceSnapshotResponse(BaseModel):
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    system: SystemResourceResponse
+    gpus: list[GpuDeviceResponse] = Field(default_factory=list)
+    models: list[ModelRuntimeMetricResponse] = Field(default_factory=list)
+    tasks: DashboardResponse
