@@ -147,12 +147,23 @@ def _metric_value(metrics: str, names: tuple[str, ...]) -> float | None:
     return None
 
 
-def _model_metrics(node: ModelNode) -> ModelRuntimeMetricResponse:
+def _percent_metric(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(value * 100, 2) if 0 <= value <= 1 else round(value, 2)
+
+
+def _fetch_metrics(node: ModelNode) -> str:
     headers = {"Authorization": f"Bearer {node.api_key}"} if node.api_key else None
+    with httpx.Client(timeout=3) as client:
+        response = client.get(f"{node.base_url.rstrip('/')}/metrics", headers=headers)
+        response.raise_for_status()
+        return response.text
+
+
+def _model_metrics(node: ModelNode) -> ModelRuntimeMetricResponse:
     try:
-        with httpx.Client(timeout=3) as client:
-            response = client.get(f"{node.base_url.rstrip('/')}/metrics", headers=headers)
-            response.raise_for_status()
+        metrics = _fetch_metrics(node)
     except httpx.HTTPError as exc:
         return ModelRuntimeMetricResponse(
             node_id=node.id,
@@ -161,7 +172,34 @@ def _model_metrics(node: ModelNode) -> ModelRuntimeMetricResponse:
             metrics_available=False,
             error=str(exc)[:300],
         )
-    metrics = response.text
+
+    prompt_throughput = _metric_value(
+        metrics,
+        ("vllm:avg_prompt_throughput_toks_per_s", "vllm_avg_prompt_throughput_toks_per_s"),
+    )
+    generation_throughput = _metric_value(
+        metrics,
+        ("vllm:avg_generation_throughput_toks_per_s", "vllm_avg_generation_throughput_toks_per_s"),
+    )
+    if prompt_throughput is None or generation_throughput is None:
+        prompt_total = _metric_value(metrics, ("vllm:prompt_tokens_total", "vllm_prompt_tokens_total"))
+        generation_total = _metric_value(metrics, ("vllm:generation_tokens_total", "vllm_generation_tokens_total"))
+        try:
+            started = time.monotonic()
+            time.sleep(0.35)
+            next_metrics = _fetch_metrics(node)
+            elapsed = max(time.monotonic() - started, 0.001)
+            next_prompt_total = _metric_value(next_metrics, ("vllm:prompt_tokens_total", "vllm_prompt_tokens_total"))
+            next_generation_total = _metric_value(next_metrics, ("vllm:generation_tokens_total", "vllm_generation_tokens_total"))
+        except httpx.HTTPError:
+            next_prompt_total = None
+            next_generation_total = None
+            elapsed = 1
+        if prompt_throughput is None and prompt_total is not None and next_prompt_total is not None:
+            prompt_throughput = max(0.0, round((next_prompt_total - prompt_total) / elapsed, 2))
+        if generation_throughput is None and generation_total is not None and next_generation_total is not None:
+            generation_throughput = max(0.0, round((next_generation_total - generation_total) / elapsed, 2))
+
     running = _metric_value(metrics, ("vllm:num_requests_running", "vllm_num_requests_running"))
     pending = _metric_value(metrics, ("vllm:num_requests_waiting", "vllm_num_requests_waiting"))
     return ModelRuntimeMetricResponse(
@@ -169,19 +207,12 @@ def _model_metrics(node: ModelNode) -> ModelRuntimeMetricResponse:
         display_name=node.display_name,
         base_url=node.base_url,
         metrics_available=True,
-        prompt_throughput_tps=_metric_value(
-            metrics,
-            ("vllm:avg_prompt_throughput_toks_per_s", "vllm_avg_prompt_throughput_toks_per_s"),
-        ),
-        generation_throughput_tps=_metric_value(
-            metrics,
-            ("vllm:avg_generation_throughput_toks_per_s", "vllm_avg_generation_throughput_toks_per_s"),
-        ),
+        prompt_throughput_tps=prompt_throughput,
+        generation_throughput_tps=generation_throughput,
         running_requests=int(running) if running is not None else None,
         pending_requests=int(pending) if pending is not None else None,
-        gpu_kv_cache_usage_percent=_metric_value(
-            metrics,
-            ("vllm:gpu_cache_usage_perc", "vllm_gpu_cache_usage_perc"),
+        gpu_kv_cache_usage_percent=_percent_metric(
+            _metric_value(metrics, ("vllm:gpu_cache_usage_perc", "vllm_gpu_cache_usage_perc"))
         ),
     )
 
