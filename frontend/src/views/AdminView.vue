@@ -59,6 +59,10 @@ const taskRunningPercent = computed(() => {
 })
 const selectedCatalog = computed(() => modelCatalog.value.find((item) => item.key === deploymentForm.catalog_key))
 const generatedDeploymentBaseUrl = computed(() => `http://127.0.0.1:${deploymentForm.port || selectedCatalog.value?.default_port || 8101}`)
+const deploymentSourceOptions = [
+  { label: 'HuggingFace', value: 'huggingface' },
+  { label: 'ModelScope', value: 'modelscope' },
+]
 
 const withSingleDefault = (items: ModelNode[], defaultId?: string) => {
   const fallback = items.find((model) => model.is_default)?.id
@@ -446,7 +450,13 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
           </el-select>
         </el-form-item>
         <el-form-item label="下载来源">
-          <el-segmented v-model="deploymentForm.source" :options="['huggingface', 'modelscope']" />
+          <div class="source-picker">
+            <el-segmented v-model="deploymentForm.source" :options="deploymentSourceOptions" />
+            <div class="source-links">
+              <el-link href="https://huggingface.co/models" target="_blank" rel="noopener noreferrer" type="primary">HuggingFace 模型库</el-link>
+              <el-link href="https://modelscope.cn/models" target="_blank" rel="noopener noreferrer" type="primary">ModelScope 模型库</el-link>
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="自动生成地址"><el-switch v-model="deploymentForm.auto_base_url" /></el-form-item>
         <el-form-item label="模型仓库"><el-input :model-value="deploymentForm.source === 'modelscope' ? selectedCatalog?.modelscope_repo : selectedCatalog?.huggingface_repo" disabled /></el-form-item>
