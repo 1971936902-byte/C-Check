@@ -342,7 +342,8 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
           <div class="table-tools resource-tools">
             <span>服务器与模型推理实时状态，最后采样：{{ latestResourceTime }}</span>
             <div>
-              <el-switch v-model="autoRefresh" active-text="自动刷新" />
+              <span>自动刷新</span>
+              <el-switch v-model="autoRefresh" />
               <el-button :icon="Refresh" :loading="resourceLoading" @click="loadResources()">立即刷新</el-button>
             </div>
           </div>
