@@ -452,7 +452,7 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
         <el-form-item label="模型仓库"><el-input :model-value="deploymentForm.source === 'modelscope' ? selectedCatalog?.modelscope_repo : selectedCatalog?.huggingface_repo" disabled /></el-form-item>
         <el-form-item label="端口"><el-input-number v-model="deploymentForm.port" :min="1" :max="65535" /></el-form-item>
         <el-form-item label="VLLM 服务地址"><el-input v-model="deploymentForm.base_url" :disabled="deploymentForm.auto_base_url" /></el-form-item>
-        <el-form-item label="Served Model Name"><el-input v-model="deploymentForm.served_model_name" /></el-form-item>
+        <el-form-item label="模型服务名称"><el-input v-model="deploymentForm.served_model_name" /></el-form-item>
         <el-form-item label="API Key（可选）"><el-input v-model="deploymentForm.api_key" type="password" show-password /></el-form-item>
         <el-form-item label="自动登记为模型节点"><el-switch v-model="deploymentForm.auto_register" /></el-form-item>
       </el-form>
