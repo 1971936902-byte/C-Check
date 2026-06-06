@@ -63,7 +63,7 @@ class ModelDeploymentCreateRequest(BaseModel):
     model_identifier: str | None = Field(default=None, max_length=255)
     source: str = Field(default="huggingface", pattern="^(huggingface|modelscope|local)$")
     source_repository: str | None = Field(default=None, max_length=512)
-    base_url: str = Field(min_length=1, max_length=512)
+    base_url: str | None = Field(default=None, min_length=1, max_length=512)
     served_model_name: str | None = Field(default=None, max_length=128)
     api_key: str | None = Field(default=None, max_length=512)
     port: int | None = Field(default=None, ge=1, le=65535)

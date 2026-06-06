@@ -154,6 +154,44 @@ def test_admin_can_create_model_deployment_and_register_node(db_session_factory,
     assert started == [payload["id"]]
 
 
+def test_admin_model_deployment_generates_local_base_url(db_session_factory, monkeypatch):
+    from app.main import app
+
+    started: list[str] = []
+    monkeypatch.setattr("app.api.admin.start_model_deployment", lambda deployment_id: started.append(deployment_id))
+
+    with db_session_factory() as db:
+        admin = User(username="admin-user", password_hash=hash_password("admin-password"), role="admin")
+        db.add(admin)
+        db.commit()
+        admin_id = admin.id
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/admin/model-deployments",
+            headers=auth_headers(admin_id),
+            json={
+                "catalog_key": "deepseek-coder-14b-instruct",
+                "source": "modelscope",
+                "served_model_name": "deepseek-coder-14b-instruct",
+                "port": 8123,
+                "auto_register": True,
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["base_url"] == "http://127.0.0.1:8123"
+    assert payload["port"] == 8123
+    assert payload["model_node_id"]
+    assert started == [payload["id"]]
+
+    with db_session_factory() as db:
+        node = db.get(ModelNode, payload["model_node_id"])
+        assert node is not None
+        assert node.base_url == "http://127.0.0.1:8123"
+
+
 def test_model_deployment_admin_only(db_session_factory):
     from app.main import app
 

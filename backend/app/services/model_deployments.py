@@ -60,6 +60,19 @@ def _source_repository(catalog: ModelCatalogItem | None, request: ModelDeploymen
     return catalog.model_identifier
 
 
+def _deployment_port(catalog: ModelCatalogItem | None, request: ModelDeploymentCreateRequest) -> int | None:
+    return request.port or (catalog.default_port if catalog else None)
+
+
+def _deployment_base_url(catalog: ModelCatalogItem | None, request: ModelDeploymentCreateRequest) -> str:
+    if request.base_url:
+        return request.base_url
+    port = _deployment_port(catalog, request)
+    if port:
+        return f"http://127.0.0.1:{port}"
+    raise ValueError("base_url or port is required")
+
+
 def _append_log(existing: str | None, line: str) -> str:
     return f"{existing.rstrip()}\n{line}" if existing else line
 
@@ -84,12 +97,14 @@ def create_model_deployment(
         catalog.default_served_model_name if catalog else model_identifier.split("/")[-1]
     )
     source_repository = _source_repository(catalog, request)
+    port = _deployment_port(catalog, request)
+    base_url = _deployment_base_url(catalog, request)
     node: ModelNode | None = None
     if request.auto_register:
         node = ModelNode(
             display_name=display_name,
             model_identifier=served_model_name,
-            base_url=request.base_url,
+            base_url=base_url,
             api_key=request.api_key,
             timeout_seconds=request.timeout_seconds,
             is_enabled=True,
@@ -106,8 +121,8 @@ def create_model_deployment(
         source=request.source,
         source_repository=source_repository,
         served_model_name=served_model_name,
-        base_url=request.base_url,
-        port=request.port or (catalog.default_port if catalog else None),
+        base_url=base_url,
+        port=port,
         model_dir=request.model_dir,
         service_name=request.service_name or f"c-check-vllm-{served_model_name}".replace("/", "-"),
         status=ModelDeploymentStatus.QUEUED,

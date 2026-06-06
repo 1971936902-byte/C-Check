@@ -29,7 +29,7 @@ const editingModel = ref<string>()
 const editingPrompt = ref<string>()
 const userForm = reactive({ username: '', password: '', role: 'user' })
 const modelForm = reactive({ display_name: '', model_identifier: '', base_url: '', api_key: '', timeout_seconds: 120, is_enabled: true, description: '' })
-const deploymentForm = reactive({ catalog_key: '', source: 'modelscope', base_url: '', served_model_name: '', api_key: '', port: 8101, timeout_seconds: 180, auto_register: true })
+const deploymentForm = reactive({ catalog_key: '', source: 'modelscope', base_url: '', auto_base_url: true, served_model_name: '', api_key: '', port: 8101, timeout_seconds: 180, auto_register: true })
 const promptBody = ref('')
 let resourceTimer: number | undefined
 
@@ -58,6 +58,7 @@ const taskRunningPercent = computed(() => {
   return Number((resources.value!.tasks.running_tasks / total * 100).toFixed(1))
 })
 const selectedCatalog = computed(() => modelCatalog.value.find((item) => item.key === deploymentForm.catalog_key))
+const generatedDeploymentBaseUrl = computed(() => `http://127.0.0.1:${deploymentForm.port || selectedCatalog.value?.default_port || 8101}`)
 
 const withSingleDefault = (items: ModelNode[], defaultId?: string) => {
   const fallback = items.find((model) => model.is_default)?.id
@@ -177,6 +178,7 @@ function openDeployment(item?: ModelCatalogItem) {
     catalog_key: target.key,
     source: target.recommended_source || 'huggingface',
     base_url: `http://127.0.0.1:${target.default_port || 8101}`,
+    auto_base_url: true,
     served_model_name: target.default_served_model_name || target.key,
     api_key: '',
     port: target.default_port || 8101,
@@ -192,14 +194,27 @@ watch(() => deploymentForm.catalog_key, (key) => {
   deploymentForm.source = target.recommended_source || deploymentForm.source
   deploymentForm.port = target.default_port || deploymentForm.port
   deploymentForm.served_model_name = target.default_served_model_name || target.key
-  deploymentForm.base_url = `http://127.0.0.1:${target.default_port || deploymentForm.port}`
+  if (deploymentForm.auto_base_url) deploymentForm.base_url = generatedDeploymentBaseUrl.value
+})
+
+watch(() => deploymentForm.port, () => {
+  if (deploymentForm.auto_base_url) deploymentForm.base_url = generatedDeploymentBaseUrl.value
+})
+
+watch(() => deploymentForm.auto_base_url, (enabled) => {
+  if (enabled) deploymentForm.base_url = generatedDeploymentBaseUrl.value
 })
 
 async function createDeployment() {
   if (!deploymentForm.catalog_key) return ElMessage.warning('请选择模型')
-  if (!deploymentForm.base_url.trim()) return ElMessage.warning('请输入 VLLM 服务地址')
+  if (!deploymentForm.auto_base_url && !deploymentForm.base_url.trim()) return ElMessage.warning('请输入 VLLM 服务地址')
   try {
-    await adminApi.createModelDeployment({ ...deploymentForm, api_key: deploymentForm.api_key || undefined })
+    const { auto_base_url, ...payload } = deploymentForm
+    await adminApi.createModelDeployment({
+      ...payload,
+      base_url: auto_base_url ? undefined : payload.base_url,
+      api_key: payload.api_key || undefined,
+    })
     deploymentDialog.value = false
     await load()
     ElMessage.success('模型部署任务已创建')
@@ -433,9 +448,10 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
         <el-form-item label="下载来源">
           <el-segmented v-model="deploymentForm.source" :options="['huggingface', 'modelscope']" />
         </el-form-item>
+        <el-form-item label="自动生成地址"><el-switch v-model="deploymentForm.auto_base_url" /></el-form-item>
         <el-form-item label="模型仓库"><el-input :model-value="deploymentForm.source === 'modelscope' ? selectedCatalog?.modelscope_repo : selectedCatalog?.huggingface_repo" disabled /></el-form-item>
-        <el-form-item label="VLLM 服务地址"><el-input v-model="deploymentForm.base_url" /></el-form-item>
         <el-form-item label="端口"><el-input-number v-model="deploymentForm.port" :min="1" :max="65535" /></el-form-item>
+        <el-form-item label="VLLM 服务地址"><el-input v-model="deploymentForm.base_url" :disabled="deploymentForm.auto_base_url" /></el-form-item>
         <el-form-item label="Served Model Name"><el-input v-model="deploymentForm.served_model_name" /></el-form-item>
         <el-form-item label="API Key（可选）"><el-input v-model="deploymentForm.api_key" type="password" show-password /></el-form-item>
         <el-form-item label="自动登记为模型节点"><el-switch v-model="deploymentForm.auto_register" /></el-form-item>
