@@ -16,6 +16,7 @@ const modelCatalog = ref<ModelCatalogItem[]>([])
 const modelDeployments = ref<ModelDeployment[]>([])
 const prompts = ref<Prompt[]>([])
 const tasks = ref<AdminTask[]>([])
+const resourceSamples = ref<ResourceSnapshot[]>([])
 const taskStatus = ref<TaskStatus | ''>('')
 const loading = ref(false)
 const resourceLoading = ref(false)
@@ -45,6 +46,7 @@ const bytes = (value?: number | null) => {
   return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`
 }
 const mb = (value?: number | null) => value == null ? '--' : `${value.toFixed(0)} MB`
+const peakLabel = (value?: number | null, suffix = '%', digits = 1) => value == null ? '峰值 --' : `峰值 ${value.toFixed(digits)}${suffix}`
 const progressStatus = (value?: number | null) => {
   const n = percent(value)
   if (n >= 90) return 'exception'
@@ -57,6 +59,42 @@ const taskRunningPercent = computed(() => {
   if (!total) return 0
   return Number((resources.value!.tasks.running_tasks / total * 100).toFixed(1))
 })
+const sampleWindowMinutes = computed(() => {
+  const first = resourceSamples.value[0]?.captured_at
+  const last = resourceSamples.value[resourceSamples.value.length - 1]?.captured_at
+  if (!first || !last) return 0
+  return Math.max(0, Math.round((new Date(last).getTime() - new Date(first).getTime()) / 60000))
+})
+const maxNumber = (values: Array<number | null | undefined>) => {
+  const available = values.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+  return available.length ? Math.max(...available) : undefined
+}
+const resourcePeaks = computed(() => ({
+  cpu_percent: maxNumber(resourceSamples.value.map((item) => item.system.cpu_percent)),
+  memory_percent: maxNumber(resourceSamples.value.map((item) => item.system.memory_percent)),
+  disk_percent: maxNumber(resourceSamples.value.map((item) => item.system.disk_percent)),
+  running_tasks: maxNumber(resourceSamples.value.map((item) => item.tasks.running_tasks)),
+  gpu_count: maxNumber(resourceSamples.value.map((item) => item.gpus.length)),
+}))
+const gpuPeaks = (index: number) => {
+  const samples = resourceSamples.value.map((item) => item.gpus.find((gpu) => gpu.index === index)).filter(Boolean)
+  return {
+    utilization_percent: maxNumber(samples.map((gpu) => gpu?.utilization_percent)),
+    memory_percent: maxNumber(samples.map((gpu) => gpu?.memory_percent)),
+    temperature_c: maxNumber(samples.map((gpu) => gpu?.temperature_c)),
+    power_w: maxNumber(samples.map((gpu) => gpu?.power_w)),
+  }
+}
+const modelRuntimePeaks = (nodeId: string) => {
+  const samples = resourceSamples.value.map((item) => item.models.find((model) => model.node_id === nodeId)).filter(Boolean)
+  return {
+    prompt_throughput_tps: maxNumber(samples.map((model) => model?.prompt_throughput_tps)),
+    generation_throughput_tps: maxNumber(samples.map((model) => model?.generation_throughput_tps)),
+    running_requests: maxNumber(samples.map((model) => model?.running_requests)),
+    pending_requests: maxNumber(samples.map((model) => model?.pending_requests)),
+    gpu_kv_cache_usage_percent: maxNumber(samples.map((model) => model?.gpu_kv_cache_usage_percent)),
+  }
+}
 const selectedCatalog = computed(() => modelCatalog.value.find((item) => item.key === deploymentForm.catalog_key))
 const generatedDeploymentBaseUrl = computed(() => `http://127.0.0.1:${deploymentForm.port || selectedCatalog.value?.default_port || 8101}`)
 const deploymentSourceOptions = [
@@ -115,7 +153,12 @@ async function load() {
 async function loadResources(silent = false) {
   if (!silent) resourceLoading.value = true
   try {
-    resources.value = (await adminApi.resources()).data
+    const snapshot = (await adminApi.resources()).data
+    resources.value = snapshot
+    const cutoff = Date.now() - 30 * 60 * 1000
+    resourceSamples.value = [...resourceSamples.value, snapshot]
+      .filter((item) => new Date(item.captured_at).getTime() >= cutoff)
+      .slice(-360)
   } catch (e) {
     if (!silent) ElMessage.error(errorMessage(e))
   } finally {
@@ -309,27 +352,31 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
               <div class="resource-card-head"><span>CPU</span><b>{{ metric(resources.system.cpu_percent) }}%</b></div>
               <el-progress :percentage="percent(resources.system.cpu_percent)" :status="progressStatus(resources.system.cpu_percent)" />
               <small>1 分钟负载：{{ metric(resources.system.load_average_1m, 2) }}</small>
+              <small>{{ peakLabel(resourcePeaks.cpu_percent) }}</small>
             </section>
             <section class="resource-card">
               <div class="resource-card-head"><span>内存</span><b>{{ metric(resources.system.memory_percent) }}%</b></div>
               <el-progress :percentage="percent(resources.system.memory_percent)" :status="progressStatus(resources.system.memory_percent)" />
               <small>{{ bytes(resources.system.memory_used_bytes) }} / {{ bytes(resources.system.memory_total_bytes) }}</small>
+              <small>{{ peakLabel(resourcePeaks.memory_percent) }}</small>
             </section>
             <section class="resource-card">
               <div class="resource-card-head"><span>磁盘</span><b>{{ metric(resources.system.disk_percent) }}%</b></div>
               <el-progress :percentage="percent(resources.system.disk_percent)" :status="progressStatus(resources.system.disk_percent)" />
               <small>{{ bytes(resources.system.disk_used_bytes) }} / {{ bytes(resources.system.disk_total_bytes) }}</small>
+              <small>{{ peakLabel(resourcePeaks.disk_percent) }}</small>
             </section>
             <section class="resource-card">
               <div class="resource-card-head"><span>任务队列</span><b>{{ resources.tasks.running_tasks }}</b></div>
               <el-progress :percentage="taskRunningPercent" />
               <small>{{ resources.tasks.queued_tasks }} 排队 / {{ resources.tasks.failed_tasks }} 失败</small>
+              <small>{{ peakLabel(resourcePeaks.running_tasks, ' 个', 0) }}</small>
             </section>
           </div>
 
           <div class="resource-section">
             <div class="section-heading">
-              <div><h2>GPU 与显存</h2><p>通过 nvidia-smi 采集，未安装或无 GPU 时会显示为空。</p></div>
+              <div><h2>GPU 与显存</h2><p>当前 {{ resources?.gpus.length || 0 }} 张显卡，采样峰值 {{ resourcePeaks.gpu_count ?? 0 }} 张；峰值统计基于近 {{ sampleWindowMinutes }} 分钟页面采样。</p></div>
             </div>
             <el-empty v-if="!resources?.gpus.length" description="当前未采集到 GPU 指标" />
             <div v-else class="gpu-grid">
@@ -341,6 +388,10 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
                   <span>显存占用 {{ metric(gpu.memory_percent) }}%</span>
                   <span>温度 {{ metric(gpu.temperature_c, 0) }}°C</span>
                   <span>功耗 {{ metric(gpu.power_w, 0) }} W</span>
+                  <span>利用率峰值 {{ metric(gpuPeaks(gpu.index).utilization_percent) }}%</span>
+                  <span>显存峰值 {{ metric(gpuPeaks(gpu.index).memory_percent) }}%</span>
+                  <span>温度峰值 {{ metric(gpuPeaks(gpu.index).temperature_c, 0) }}°C</span>
+                  <span>功耗峰值 {{ metric(gpuPeaks(gpu.index).power_w, 0) }} W</span>
                 </div>
               </article>
             </div>
@@ -356,11 +407,11 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
               <el-table-column label="状态" width="110">
                 <template #default="{ row }"><el-tag :type="row.metrics_available ? 'success' : 'warning'">{{ row.metrics_available ? '可采集' : '不可用' }}</el-tag></template>
               </el-table-column>
-              <el-table-column label="Prompt tok/s" width="130"><template #default="{ row }">{{ metric(row.prompt_throughput_tps) }}</template></el-table-column>
-              <el-table-column label="生成 tok/s" width="120"><template #default="{ row }">{{ metric(row.generation_throughput_tps) }}</template></el-table-column>
-              <el-table-column label="运行请求" width="100"><template #default="{ row }">{{ row.running_requests ?? '--' }}</template></el-table-column>
-              <el-table-column label="等待请求" width="100"><template #default="{ row }">{{ row.pending_requests ?? '--' }}</template></el-table-column>
-              <el-table-column label="KV Cache" width="110"><template #default="{ row }">{{ metric(row.gpu_kv_cache_usage_percent) }}%</template></el-table-column>
+              <el-table-column label="Prompt tok/s" width="130"><template #default="{ row }"><div class="metric-cell"><b>{{ metric(row.prompt_throughput_tps) }}</b><small>{{ peakLabel(modelRuntimePeaks(row.node_id).prompt_throughput_tps, '', 1) }}</small></div></template></el-table-column>
+              <el-table-column label="生成 tok/s" width="120"><template #default="{ row }"><div class="metric-cell"><b>{{ metric(row.generation_throughput_tps) }}</b><small>{{ peakLabel(modelRuntimePeaks(row.node_id).generation_throughput_tps, '', 1) }}</small></div></template></el-table-column>
+              <el-table-column label="运行请求" width="100"><template #default="{ row }"><div class="metric-cell"><b>{{ row.running_requests ?? '--' }}</b><small>{{ peakLabel(modelRuntimePeaks(row.node_id).running_requests, ' 个', 0) }}</small></div></template></el-table-column>
+              <el-table-column label="等待请求" width="100"><template #default="{ row }"><div class="metric-cell"><b>{{ row.pending_requests ?? '--' }}</b><small>{{ peakLabel(modelRuntimePeaks(row.node_id).pending_requests, ' 个', 0) }}</small></div></template></el-table-column>
+              <el-table-column label="KV Cache" width="110"><template #default="{ row }"><div class="metric-cell"><b>{{ metric(row.gpu_kv_cache_usage_percent) }}%</b><small>{{ peakLabel(modelRuntimePeaks(row.node_id).gpu_kv_cache_usage_percent) }}</small></div></template></el-table-column>
               <el-table-column prop="error" label="采集错误" min-width="180" show-overflow-tooltip />
             </el-table>
           </div>
