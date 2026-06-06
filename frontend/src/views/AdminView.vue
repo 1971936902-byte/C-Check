@@ -63,6 +63,21 @@ const deploymentSourceOptions = [
   { label: 'HuggingFace', value: 'huggingface' },
   { label: 'ModelScope', value: 'modelscope' },
 ]
+const defaultModel = computed(() => models.value.find((model) => model.is_default))
+
+const isDefaultCatalogModel = (item: ModelCatalogItem) => {
+  const model = defaultModel.value
+  if (!model) return false
+  return model.model_identifier === item.model_identifier || model.model_identifier === item.default_served_model_name
+}
+
+const isDefaultDeployment = (row: ModelDeployment) => {
+  const model = defaultModel.value
+  if (!model) return false
+  return row.model_node_id === model.id || row.served_model_name === model.model_identifier || row.model_identifier === model.model_identifier
+}
+
+const deploymentRowClassName = ({ row }: { row: ModelDeployment }) => isDefaultDeployment(row) ? 'is-default-deployment' : ''
 
 const withSingleDefault = (items: ModelNode[], defaultId?: string) => {
   const fallback = items.find((model) => model.is_default)?.id
@@ -379,10 +394,13 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
             <el-button type="primary" :icon="Download" @click="openDeployment()">部署模型</el-button>
           </div>
           <div class="deployment-grid">
-            <section v-for="item in modelCatalog" :key="item.key" class="deployment-card">
+            <section v-for="item in modelCatalog" :key="item.key" class="deployment-card" :class="{ 'is-default-model': isDefaultCatalogModel(item) }">
               <div class="deployment-card-head">
                 <div><h3>{{ item.display_name }}</h3><p>{{ item.model_identifier }}</p></div>
-                <el-tag>{{ item.estimated_vram_gb || '--' }} GB</el-tag>
+                <div class="deployment-card-tags">
+                  <el-tag v-if="isDefaultCatalogModel(item)" type="success">默认</el-tag>
+                  <el-tag>{{ item.estimated_vram_gb || '--' }} GB</el-tag>
+                </div>
               </div>
               <p>{{ item.description }}</p>
               <div class="deployment-tags">
@@ -395,8 +413,13 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
             <div class="section-heading">
               <div><h2>部署记录</h2><p>自动部署关闭时会返回手动执行指令；Linux GPU 服务器开启后会执行脚本并回写状态。</p></div>
             </div>
-            <el-table :data="modelDeployments">
-              <el-table-column prop="display_name" label="模型" min-width="180" />
+            <el-table :data="modelDeployments" :row-class-name="deploymentRowClassName">
+              <el-table-column label="模型" min-width="180">
+                <template #default="{ row }">
+                  <span>{{ row.display_name }}</span>
+                  <el-tag v-if="isDefaultDeployment(row)" class="model-default-tag" type="success">默认</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column prop="source" label="来源" width="110" />
               <el-table-column prop="base_url" label="服务地址" min-width="180" />
               <el-table-column label="状态" width="130">
