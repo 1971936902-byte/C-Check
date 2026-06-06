@@ -266,6 +266,74 @@ def test_invoke_model_keeps_http_error_response_body(monkeypatch):
     assert "max_tokens is too large" in (raised.value.details or "")
 
 
+def test_invoke_model_retries_with_smaller_output_budget_when_context_is_tight(monkeypatch):
+    requested_tokens: list[int] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            self.text = (
+                '{"error":{"message":"\'max_tokens\' or \'max_completion_tokens\' is too large: '
+                "2048. This model's maximum context length is 4096 tokens and your request has "
+                '2524 input tokens (2048 > 4096 - 2524). None"}}'
+            )
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                request = httpx.Request("POST", "http://model.local/v1/chat/completions")
+                response = httpx.Response(self.status_code, request=request, text=self.text)
+                raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"summary":"ok","score":100,"findings":[]}'
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            requested_tokens.append(json["max_tokens"])
+            return FakeResponse(400 if len(requested_tokens) == 1 else 200)
+
+    monkeypatch.setattr("app.services.model_router.httpx.AsyncClient", FakeClient)
+
+    result = asyncio.run(
+        invoke_model(
+            node=ModelNode(
+                display_name="test",
+                model_identifier="qwen-test",
+                base_url="http://model.local",
+                is_enabled=True,
+            ),
+            files=[
+                ReviewFile(
+                    relative_path="main.c",
+                    source_text="int main(void){return 0;}",
+                    size_bytes=25,
+                )
+            ],
+            prompt="review",
+        )
+    )
+
+    assert result.summary == "ok"
+    assert requested_tokens == [2048, 1444]
+
+
 def test_finding_category_accepts_frontend_check_type_values():
     assert FindingCategory.BUFFER_OVERFLOW.value == "buffer_overflow"
     assert FindingCategory.INTEGER_SAFETY.value == "integer_safety"

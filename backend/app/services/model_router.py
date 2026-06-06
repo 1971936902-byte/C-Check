@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -17,6 +18,12 @@ from app.services.check_types import check_types_prompt
 MAX_MODEL_LOG_CHARS = 12000
 RESPONSE_REQUIRED_KEYS = {"summary", "score", "findings"}
 STRUCTURED_RESPONSE_SCHEMA_NAME = "c_review_response"
+TOKEN_BUDGET_SAFETY_MARGIN = 128
+MIN_RETRY_OUTPUT_TOKENS = 128
+TOKEN_BUDGET_PATTERN = re.compile(
+    r"maximum context length is (?P<context>\d+) tokens and your request has (?P<input>\d+) input tokens",
+    re.IGNORECASE,
+)
 RESPONSE_CONTRACT = """
 You must return exactly one JSON object and nothing else. Do not wrap it in Markdown.
 The JSON object must match this schema:
@@ -165,6 +172,19 @@ def _response_format(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _reduced_output_budget_from_error(error_text: str, current_max_tokens: int) -> int | None:
+    match = TOKEN_BUDGET_PATTERN.search(error_text)
+    if match is None:
+        return None
+    context_window = int(match.group("context"))
+    input_tokens = int(match.group("input"))
+    available = context_window - input_tokens - TOKEN_BUDGET_SAFETY_MARGIN
+    if available < MIN_RETRY_OUTPUT_TOKENS:
+        return None
+    reduced = min(current_max_tokens - 1, available)
+    return reduced if reduced >= MIN_RETRY_OUTPUT_TOKENS else None
+
+
 async def invoke_model(
     *,
     node: ModelNode,
@@ -199,18 +219,33 @@ async def invoke_model(
     }
     try:
         async with httpx.AsyncClient(timeout=node.timeout_seconds) as client:
-            response = await client.post(
-                f"{node.base_url.rstrip('/')}/v1/chat/completions",
-                headers=headers,
-                json=body,
-            )
-            response.raise_for_status()
-            payload = response.json()
-    except httpx.HTTPStatusError as exc:
-        details = str(exc)
-        if exc.response is not None:
-            details = f"{details}\nResponse body:\n{truncate_model_log(exc.response.text, 4000)}"
-        raise ModelInvocationError("selected model node is unavailable", details=details) from exc
+            for _ in range(2):
+                response = await client.post(
+                    f"{node.base_url.rstrip('/')}/v1/chat/completions",
+                    headers=headers,
+                    json=body,
+                )
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    response_text = exc.response.text if exc.response is not None else ""
+                    reduced_budget = _reduced_output_budget_from_error(
+                        response_text,
+                        int(body["max_tokens"]),
+                    )
+                    if reduced_budget is not None and reduced_budget < int(body["max_tokens"]):
+                        body = {**body, "max_tokens": reduced_budget}
+                        continue
+                    details = str(exc)
+                    if exc.response is not None:
+                        details = f"{details}\nResponse body:\n{truncate_model_log(response_text, 4000)}"
+                    raise ModelInvocationError("selected model node is unavailable", details=details) from exc
+                payload = response.json()
+                break
+            else:
+                raise ModelInvocationError("selected model node is unavailable")
+    except ModelInvocationError:
+        raise
     except (httpx.HTTPError, ValueError) as exc:
         raise ModelInvocationError("selected model node is unavailable", details=str(exc)) from exc
     return _parse_response(payload)
