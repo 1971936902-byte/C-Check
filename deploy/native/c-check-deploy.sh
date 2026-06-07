@@ -12,6 +12,20 @@ die() {
   exit 1
 }
 
+random_secret() {
+  openssl rand -base64 48 | tr -d '\n'
+}
+
+json_array() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+
+items = [item for item in sys.argv[1:] if item]
+print(json.dumps(items, ensure_ascii=False))
+PY
+}
+
 require_root() {
   [[ "${EUID}" -eq 0 ]] || die "Run as root, for example: sudo DEPLOY_ENV=${DEPLOY_ENV} bash $0 $*"
 }
@@ -79,6 +93,10 @@ install_uv() {
 
 create_backend_venv() {
   cd "${APP_DIR}"
+  if [[ "${FORCE_RECREATE_VENV:-false}" != "true" && -x .venv/bin/python ]]; then
+    log "Reusing existing backend virtual environment"
+    return
+  fi
   rm -rf .venv
   if python_version_ok; then
     "${PYTHON_BIN}" -m venv .venv
@@ -218,6 +236,91 @@ install_backend() {
   "${APP_DIR}/.venv/bin/alembic" upgrade head
 }
 
+bootstrap_env() {
+  require_root "$@"
+  local public_host="${PUBLIC_HOST:-${1:-}}"
+  local public_port="${PUBLIC_PORT:-${2:-}}"
+  local web_port="${WEB_PORT:-${3:-8800}}"
+  [[ -n "${public_host}" ]] || die "Set PUBLIC_HOST or pass: bootstrap-env <public-host> [public-port] [internal-web-port]"
+
+  mkdir -p "$(dirname "${DEPLOY_ENV}")"
+
+  local origin
+  if [[ -n "${public_port}" ]]; then
+    origin="http://${public_host}:${public_port}"
+  else
+    origin="http://${public_host}"
+  fi
+
+  local extra_origins=()
+  if [[ -n "${PUBLIC_HOST_ALT:-}" ]]; then
+    if [[ -n "${public_port}" ]]; then
+      extra_origins+=("http://${PUBLIC_HOST_ALT}:${public_port}")
+    else
+      extra_origins+=("http://${PUBLIC_HOST_ALT}")
+    fi
+  fi
+
+  local cors
+  cors="$(json_array "${origin}" "${extra_origins[@]}" "http://${public_host}" "${PUBLIC_HOST_ALT:+http://${PUBLIC_HOST_ALT}}" "http://localhost" "http://127.0.0.1:18000")"
+
+  if [[ -f "${DEPLOY_ENV}" ]]; then
+    cp "${DEPLOY_ENV}" "${DEPLOY_ENV}.bak"
+  fi
+
+  cat >"${DEPLOY_ENV}" <<EOF
+REPO_URL=${REPO_URL:-https://github.com/1971936902-byte/C-Check.git}
+BRANCH=${BRANCH:-master}
+APP_DIR=${APP_DIR:-/opt/c-check}
+WEB_PORT=${web_port}
+BACKEND_HOST=${BACKEND_HOST:-127.0.0.1}
+BACKEND_PORT=${BACKEND_PORT:-8000}
+PUBLIC_ORIGIN=${origin}
+CORS_ORIGINS='${cors}'
+APP_USER=${APP_USER:-c-check}
+MYSQL_DATABASE=${MYSQL_DATABASE:-c_check}
+MYSQL_USER=${MYSQL_USER:-c_check}
+MYSQL_PASSWORD=${MYSQL_PASSWORD:-$(random_secret)}
+MYSQL_ROOT_LOGIN="${MYSQL_ROOT_LOGIN:-mysql -uroot}"
+REDIS_URL=${REDIS_URL:-redis://127.0.0.1:6379/0}
+JWT_SECRET=${JWT_SECRET:-$(random_secret)}
+JWT_EXPIRE_MINUTES=${JWT_EXPIRE_MINUTES:-480}
+ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(random_secret)}
+UPLOAD_MAX_FILE_BYTES=${UPLOAD_MAX_FILE_BYTES:-1048576}
+UPLOAD_MAX_ARCHIVE_BYTES=${UPLOAD_MAX_ARCHIVE_BYTES:-10485760}
+UPLOAD_MAX_EXTRACTED_BYTES=${UPLOAD_MAX_EXTRACTED_BYTES:-10485760}
+UPLOAD_MAX_FILES=${UPLOAD_MAX_FILES:-200}
+UPLOAD_MAX_ARCHIVE_ENTRIES=${UPLOAD_MAX_ARCHIVE_ENTRIES:-1000}
+UPLOAD_MAX_PATH_LENGTH=${UPLOAD_MAX_PATH_LENGTH:-512}
+STORAGE_PATH=${STORAGE_PATH:-/opt/c-check/uploads}
+MOCK_MODEL_ENABLED=${MOCK_MODEL_ENABLED:-false}
+MODEL_MAX_ATTEMPTS=${MODEL_MAX_ATTEMPTS:-3}
+MODEL_MAX_TOKENS=${MODEL_MAX_TOKENS:-2048}
+MODEL_STRUCTURED_OUTPUTS_ENABLED=${MODEL_STRUCTURED_OUTPUTS_ENABLED:-true}
+MODEL_CATALOG_PATH=${MODEL_CATALOG_PATH:-/opt/c-check/deploy/models/catalog.json}
+MODEL_DEPLOYMENT_ENABLED=${MODEL_DEPLOYMENT_ENABLED:-false}
+MODEL_DEPLOYMENT_SCRIPT=${MODEL_DEPLOYMENT_SCRIPT:-/opt/c-check/deploy/models/deploy-vllm-model.sh}
+ALLOW_INSECURE_DEFAULTS=${ALLOW_INSECURE_DEFAULTS:-false}
+PYTHON_BIN=${PYTHON_BIN:-python3}
+PYTHON_VERSION=${PYTHON_VERSION:-3.12}
+NODE_MAJOR=${NODE_MAJOR:-22}
+NODE_VERSION=${NODE_VERSION:-22.21.1}
+NODE_DIST_URL=${NODE_DIST_URL:-https://npmmirror.com/mirrors/node}
+NODE_INSTALL_DIR=${NODE_INSTALL_DIR:-/opt/nodejs/22.21.1}
+REGISTER_VLLM_MODEL=${REGISTER_VLLM_MODEL:-false}
+VLLM_DISPLAY_NAME=${VLLM_DISPLAY_NAME:-Qwen2.5 Coder 32B AWQ}
+VLLM_MODEL_IDENTIFIER=${VLLM_MODEL_IDENTIFIER:-qwen2.5-coder-32b-awq}
+VLLM_BASE_URL=${VLLM_BASE_URL:-http://127.0.0.1:8001}
+VLLM_API_KEY=${VLLM_API_KEY:-}
+VLLM_TIMEOUT_SECONDS=${VLLM_TIMEOUT_SECONDS:-600}
+EOF
+
+  chmod 0600 "${DEPLOY_ENV}"
+  log "Wrote ${DEPLOY_ENV}"
+  log "Open ${origin} after install/recover."
+}
+
 build_frontend() {
   log "Building frontend"
   cd "${APP_DIR}/frontend"
@@ -337,6 +440,31 @@ restart_services() {
   systemctl reload nginx
 }
 
+start_optional_vllm() {
+  if systemctl list-unit-files c-check-vllm.service >/dev/null 2>&1; then
+    systemctl start c-check-vllm || true
+  fi
+}
+
+healthcheck() {
+  load_env
+  log "Running health checks"
+  curl -fsS -I --max-time 8 "http://127.0.0.1:${WEB_PORT}/" >/dev/null \
+    || die "Frontend is not reachable on http://127.0.0.1:${WEB_PORT}/"
+  curl -sS --max-time 8 "http://127.0.0.1:${WEB_PORT}/api/models" >/tmp/c-check-health-api.txt \
+    || true
+  if grep -q "Not authenticated" /tmp/c-check-health-api.txt 2>/dev/null; then
+    log "API proxy is reachable; unauthenticated response is expected."
+  else
+    log "API proxy response: $(head -c 120 /tmp/c-check-health-api.txt 2>/dev/null || true)"
+  fi
+  if [[ -n "${PUBLIC_ORIGIN:-}" ]]; then
+    curl -fsS -I --max-time 12 "${PUBLIC_ORIGIN}/" >/dev/null \
+      && log "Public origin reachable: ${PUBLIC_ORIGIN}" \
+      || log "Public origin not reachable from this server/client yet: ${PUBLIC_ORIGIN}"
+  fi
+}
+
 install_all() {
   require_root "$@"
   load_env
@@ -372,7 +500,27 @@ update_all() {
 
 start() {
   require_root "$@"
-  systemctl start mysql redis-server nginx c-check-api c-check-worker
+  load_env
+  systemctl start mysql redis-server nginx
+  start_optional_vllm
+  systemctl start c-check-api c-check-worker
+  status
+}
+
+recover() {
+  require_root "$@"
+  load_env
+  validate_env
+  sync_source
+  write_app_env
+  write_systemd_units
+  write_nginx_config
+  systemctl start mysql redis-server nginx
+  start_optional_vllm
+  systemctl restart c-check-api c-check-worker
+  systemctl reload nginx
+  status
+  healthcheck
 }
 
 stop() {
@@ -420,15 +568,23 @@ Commands:
   status    Show service and port status
   logs      Follow a systemd service log, default c-check-api
   backup    Dump MySQL, uploads, and env files
+  provision Generate env and install; args: <public-host> [public-port] [internal-web-port]
+  bootstrap-env  Generate ${DEPLOY_ENV}; args: <public-host> [public-port] [internal-web-port]
+  recover   Recover after reboot/SSH or port mapping change
+  health    Check local web/API and configured public origin
 EOF
 }
 
 case "${1:-}" in
   install) install_all "$@" ;;
   update) update_all "$@" ;;
+  provision) shift; bootstrap_env "$@"; install_all provision ;;
+  bootstrap-env) shift; bootstrap_env "$@" ;;
+  recover) recover "$@" ;;
   start) start "$@" ;;
   stop) stop "$@" ;;
   status) status ;;
+  health) healthcheck ;;
   logs) logs "$@" ;;
   backup) backup "$@" ;;
   *) usage; exit 1 ;;

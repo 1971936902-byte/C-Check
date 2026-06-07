@@ -23,6 +23,32 @@ The backend requires Python 3.12 or newer. On Ubuntu 22.04, the installer automa
 
 ## Quick Start
 
+For a new server, prefer the one-command provision path. It generates `/etc/c-check/c-check.env`, installs dependencies, builds the frontend, writes systemd/Nginx config, starts services, and runs health checks:
+
+```bash
+git clone https://github.com/1971936902-byte/C-Check.git /opt/c-check
+cd /opt/c-check
+
+sudo DEPLOY_ENV=/etc/c-check/c-check.env \
+  PUBLIC_HOST_ALT=180.127.11.177 \
+  bash deploy/native/c-check-deploy.sh provision 223.109.239.36 13958 8800
+```
+
+Arguments are:
+
+- `223.109.239.36`: primary public host
+- `13958`: public web port shown by the cloud provider
+- `8800`: internal server port mapped by the cloud provider
+
+After a server reboot or SSH/port mapping change, use:
+
+```bash
+cd /opt/c-check
+sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh recover
+```
+
+The older manual env editing path is still available when you want full control:
+
 ```bash
 git clone https://github.com/1971936902-byte/C-Check.git /opt/c-check
 cd /opt/c-check
@@ -53,8 +79,11 @@ Important fields:
 ## Commands
 
 ```bash
+sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh provision 223.109.239.36 13958 8800
 sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh install
 sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh update
+sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh recover
+sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh health
 sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh status
 sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh logs c-check-worker
 sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh backup
