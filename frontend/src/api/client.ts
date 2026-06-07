@@ -19,8 +19,27 @@ api.interceptors.response.use(undefined, (error) => {
   return Promise.reject(error)
 })
 
+const formatErrorDetail = (detail: unknown) => {
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object' && 'msg' in item) {
+          const loc = Array.isArray(item.loc) ? item.loc.join('.') : ''
+          return loc ? `${loc}: ${item.msg}` : String(item.msg)
+        }
+        return ''
+      })
+      .filter(Boolean)
+    return messages.length ? messages.join('；') : '请求参数无效，请检查筛选条件'
+  }
+  if (detail && typeof detail === 'object') return JSON.stringify(detail)
+  return ''
+}
+
 export const errorMessage = (error: unknown) => {
-  if (axios.isAxiosError(error)) return error.response?.data?.detail || error.message
+  if (axios.isAxiosError(error)) return formatErrorDetail(error.response?.data?.detail) || error.message || '请求失败，请稍后重试'
   return error instanceof Error ? error.message : '请求失败，请稍后重试'
 }
 export const authApi = {

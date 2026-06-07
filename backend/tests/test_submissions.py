@@ -457,6 +457,20 @@ def test_review_list_validates_pagination_bounds(db_session_factory, query, expe
     assert response.status_code == expected_status
 
 
+def test_review_list_ignores_empty_optional_filters(db_session_factory):
+    from app.main import app
+
+    user_id, _, _ = add_user_and_node(db_session_factory)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/reviews?keyword=&severity=&tester_name=&offset=0&limit=20",
+            headers=auth_headers(user_id),
+        )
+
+    assert response.status_code == 200
+
+
 def test_review_list_defaults_to_twenty_items_and_applies_offset(db_session_factory):
     from app.main import app
 

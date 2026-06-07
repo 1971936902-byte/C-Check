@@ -23,6 +23,7 @@ from app.services.submissions import (
 
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
+SEVERITY_FILTERS = {"high", "medium", "low", "suggestion"}
 
 
 def _unprocessable(exc: SubmissionError) -> HTTPException:
@@ -125,7 +126,7 @@ def list_reviews(
     tester_name: str | None = None,
     task_status: Annotated[TaskStatus | None, Query(alias="status")] = None,
     model_node_id: str | None = None,
-    severity: str | None = Query(default=None, pattern="^(high|medium|low|suggestion)$"),
+    severity: str | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
     sort_by: Annotated[str, Query(pattern="^(display_name|tester_name|model|status|file_count|finding_count|duration_ms|created_at)$")] = "created_at",
@@ -144,6 +145,13 @@ def list_reviews(
         query = query.where(ReviewTask.created_at >= start_time)
     if end_time:
         query = query.where(ReviewTask.created_at <= end_time)
+    if severity == "":
+        severity = None
+    if severity and severity not in SEVERITY_FILTERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="severity must be one of high, medium, low, suggestion",
+        )
     if severity:
         query = query.join(ReviewTask.report).where(getattr(Report, f"{severity}_count") > 0)
     sort_columns = {

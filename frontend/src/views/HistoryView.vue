@@ -27,12 +27,15 @@ const router = useRouter()
 const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const duration = (value?: number | null) => value ? `${(value / 1000).toFixed(1)}s` : '--'
 const modelName = (id: string) => models.value.find((model) => model.id === id)?.display_name || id
+const optionalText = (value: string) => value.trim() || undefined
 
 async function load() {
   loading.value = true
   try {
     const { data } = await reviewApi.list({
-      ...filters,
+      keyword: optionalText(filters.keyword),
+      severity: filters.severity || undefined,
+      tester_name: optionalText(filters.tester_name),
       offset: (page.value - 1) * pageSize.value,
       limit: pageSize.value,
       sort_by: sortBy.value,
