@@ -844,3 +844,136 @@ curl -i http://127.0.0.1:<vllm_port>/v1/models
 - 能提交 C 代码审查任务。
 - worker 能完成任务。
 - 能打开报告并下载 Markdown。
+
+## 19. 2026-06-07 云服务器重启后的恢复经验
+
+本次云服务器重启后，C-Check 恢复耗时较长，主要原因不是单个服务启动失败，而是 SSH、端口映射、Nginx 配置、本地隧道和 Windows 命令转义同时变化或互相影响。
+
+### 19.1 本次新连接信息
+
+云平台重启后 SSH 入口发生变化：
+
+```text
+移动 SSH：223.109.239.36:13912
+电信 SSH：180.127.11.177:13912
+公网 Web：223.109.239.36:13958 -> 服务器内网 8800
+公网 Web：180.127.11.177:13958 -> 服务器内网 8800
+```
+
+注意：文档只记录连接形态，不记录真实 SSH 密码、API Key、数据库密码等敏感信息。
+
+### 19.2 为什么这次启动花了较久
+
+1. **SSH 端口变更**：原来的 SSH 端口不可再用，需要改为 `13912` 重新连接。
+2. **Nginx 监听端口不匹配**：云平台预留端口映射到服务器内网 `8800`，但服务器上的 `/etc/c-check/c-check.env` 仍是 `WEB_PORT=80`，导致一键部署脚本会把 Nginx 写回 80。
+3. **公网访问需要带外网端口**：本次可用入口是 `http://223.109.239.36:13958/` 或 `http://180.127.11.177:13958/`，不是裸 IP 的 80 端口。
+4. **本地隧道端口被旧进程占用**：Windows 本地 `127.0.0.1:18000` 被旧 Python 进程占着，页面访问超时，需要结束旧进程后重新建立 SSH 隧道。
+5. **Windows PowerShell 与远程 Bash 引号冲突**：包含 `$(date ...)`、JSON 字符串、`||` 的远程命令容易被本地 PowerShell 提前解析，曾导致 `CORS_ORIGINS` 写坏。
+6. **VLLM active 不代表立刻完全可用**：`c-check-vllm` systemd 进入 active 后，还需要等待模型权重和 API server 完成初始化；未带 API Key 请求 `/v1/models` 返回 `401 Unauthorized` 反而说明服务已经响应。
+
+### 19.3 推荐恢复顺序
+
+先确认 SSH：
+
+```bash
+ssh -p 13912 root@223.109.239.36
+```
+
+检查项目和服务：
+
+```bash
+cd /opt/c-check
+git log -1 --oneline
+systemctl is-active c-check-api c-check-worker nginx mysql redis-server c-check-vllm
+ss -ltnp | grep -E ':(8800|8000|8001) '
+```
+
+确认 `/etc/c-check/c-check.env` 的 Web 端口与云平台映射一致：
+
+```bash
+grep -E '^(WEB_PORT|PUBLIC_ORIGIN|CORS_ORIGINS)=' /etc/c-check/c-check.env
+```
+
+本次正确配置示例：
+
+```dotenv
+WEB_PORT=8800
+PUBLIC_ORIGIN=http://223.109.239.36:13958
+CORS_ORIGINS='["http://223.109.239.36:13958", "http://180.127.11.177:13958", "http://223.109.239.36", "http://180.127.11.177", "http://localhost", "http://127.0.0.1:18000"]'
+```
+
+如果 Nginx 没有监听 `8800`，补写配置并重载：
+
+```bash
+grep -q 'listen 0.0.0.0:8800;' /etc/nginx/sites-available/c-check.conf \
+  || sed -i '/listen 0.0.0.0:80;/a\    listen 0.0.0.0:8800;' /etc/nginx/sites-available/c-check.conf
+
+nginx -t
+systemctl reload nginx
+curl -I http://127.0.0.1:8800/
+```
+
+重启后端和 worker：
+
+```bash
+systemctl restart c-check-api c-check-worker
+systemctl is-active c-check-api c-check-worker
+```
+
+确认 VLLM：
+
+```bash
+systemctl status c-check-vllm --no-pager -l
+curl -i http://127.0.0.1:8001/v1/models
+```
+
+如果返回 `401 Unauthorized`，说明 VLLM API server 已经响应，只是需要带 API Key。
+
+公网检查：
+
+```bash
+curl -I http://223.109.239.36:13958/
+curl -I http://180.127.11.177:13958/
+```
+
+本地 Windows 浏览器隧道：
+
+```powershell
+Get-NetTCPConnection -LocalPort 18000 -ErrorAction SilentlyContinue
+Stop-Process -Id <旧占用进程ID> -Force
+Start-Process -FilePath ssh.exe -ArgumentList @(
+  '-N',
+  '-L','18000:127.0.0.1:8800',
+  '-o','ExitOnForwardFailure=yes',
+  '-o','StrictHostKeyChecking=no',
+  '-p','13912',
+  'root@223.109.239.36'
+) -WindowStyle Hidden
+curl.exe -I http://127.0.0.1:18000/admin
+```
+
+### 19.4 PowerShell 远程命令注意事项
+
+从 Windows PowerShell 直接执行复杂 SSH 命令时，尽量避免：
+
+- `$(date ...)` 这类会被本地 PowerShell 抢先解析的语法。
+- 多层嵌套 JSON 引号。
+- Bash 专属的 `|| true` 被本地解析。
+
+更稳的做法：
+
+1. 简单命令直接 SSH 执行。
+2. 复杂配置修改用远程 `python3` 脚本生成文件内容。
+3. 修改 `/etc/c-check/c-check.env` 后，必须用 `grep` 回读确认格式。
+4. 对 `CORS_ORIGINS` 这类 JSON 数组，确认它仍是合法 JSON 字符串数组。
+
+### 19.5 本次成功状态
+
+- 代码版本：`afc5a81 fix: place auto refresh label before switch`
+- 本地隧道：`http://127.0.0.1:18000/admin`
+- 移动公网：`http://223.109.239.36:13958/`
+- 电信公网：`http://180.127.11.177:13958/`
+- 服务状态：`c-check-api`、`c-check-worker`、`c-check-vllm`、`nginx`、`mysql`、`redis-server` 均为 `active`
+- Nginx：监听 `0.0.0.0:8800`
+- 后端：监听 `127.0.0.1:8000`
+- VLLM：监听 `127.0.0.1:8001`
