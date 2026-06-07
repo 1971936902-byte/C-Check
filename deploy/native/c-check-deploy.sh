@@ -309,7 +309,7 @@ NODE_VERSION=${NODE_VERSION:-22.21.1}
 NODE_DIST_URL=${NODE_DIST_URL:-https://npmmirror.com/mirrors/node}
 NODE_INSTALL_DIR=${NODE_INSTALL_DIR:-/opt/nodejs/22.21.1}
 REGISTER_VLLM_MODEL=${REGISTER_VLLM_MODEL:-false}
-VLLM_DISPLAY_NAME=${VLLM_DISPLAY_NAME:-Qwen2.5 Coder 32B AWQ}
+VLLM_DISPLAY_NAME='${VLLM_DISPLAY_NAME:-Qwen2.5 Coder 32B AWQ}'
 VLLM_MODEL_IDENTIFIER=${VLLM_MODEL_IDENTIFIER:-qwen2.5-coder-32b-awq}
 VLLM_BASE_URL=${VLLM_BASE_URL:-http://127.0.0.1:8001}
 VLLM_API_KEY=${VLLM_API_KEY:-}
@@ -482,6 +482,7 @@ install_all() {
   register_vllm_model
   restart_services
   status
+  healthcheck
   log "Install complete. Open ${PUBLIC_ORIGIN}"
 }
 
