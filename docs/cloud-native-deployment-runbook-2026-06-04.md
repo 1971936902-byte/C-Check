@@ -977,3 +977,378 @@ curl.exe -I http://127.0.0.1:18000/admin
 - Nginx：监听 `0.0.0.0:8800`
 - 后端：监听 `127.0.0.1:8000`
 - VLLM：监听 `127.0.0.1:8001`
+
+## 20. 2026-06-08 双 GPU 服务器部署验证经验
+
+本节记录双 GPU 云服务器的实操流程和卡点。不要把 SSH 密码、VLLM API Key、数据库密码写入 Git 文档；这里只记录命令模板和判断标准。
+
+### 20.1 先确认是不是目标机器
+
+拿到新 SSH 入口后，先做三类检查：公网端口、系统/GPU、已有部署状态。
+
+Windows 本地：
+
+```powershell
+Test-NetConnection 223.109.239.11 -Port 20432
+Test-NetConnection 180.127.11.169 -Port 20432
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -p 20432 root@223.109.239.11 "echo ok"
+```
+
+如果 `BatchMode=yes` 返回 `Permission denied (publickey,password)`，说明端口通但需要密码；如果是 `Connection refused` 或 `TcpTestSucceeded=False`，说明云平台 SSH 映射或实例网络不可达，继续部署没有意义。
+
+登录服务器后：
+
+```bash
+hostname
+whoami
+grep PRETTY_NAME /etc/os-release
+uname -r
+nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
+docker --version || true
+docker info --format '{{json .Runtimes}}' || true
+git -C /opt/c-check rev-parse --short HEAD || true
+test -f /etc/c-check/c-check.env && echo env-present || echo env-missing
+systemctl is-active c-check-api c-check-worker nginx mysql redis-server docker 2>/dev/null || true
+ss -ltnp | grep -E ':(8800|8000|8001|8101) ' || true
+df -h /
+```
+
+本次确认到的可用硬件形态：
+
+```text
+GPU_COUNT=2
+0, NVIDIA A100-SXM4-40GB, 40960 MiB
+1, NVIDIA A100-SXM4-40GB, 40960 MiB
+```
+
+### 20.2 主站优先跑通，不要被模型下载阻塞
+
+主站和模型服务解耦。双 GPU 服务器上也应先让 C-Check Web/API/worker/MySQL/Redis/Nginx 可用，再启动 VLLM。
+
+一键入口仍优先使用：
+
+```bash
+PUBLIC_HOST_ALT=180.127.11.169 \
+ADMIN_PASSWORD='<替换为管理员密码>' \
+MOCK_MODEL_ENABLED=false \
+MODEL_DEPLOYMENT_ENABLED=true \
+VLLM_API_KEY='<替换为VLLM_API_KEY>' \
+DEPLOY_ENV=/etc/c-check/c-check.env \
+bash /opt/c-check/deploy/native/c-check-deploy.sh provision 223.109.239.11 18000 8800
+```
+
+如果 `provision/install` 中途因为 GitHub SSL timeout 中断，但 `/opt/c-check` 已经 clone 成功，可以直接从已克隆代码恢复，不必删除重来：
+
+```bash
+cd /opt/c-check
+git rev-parse --short HEAD
+grep -E '^(WEB_PORT|PUBLIC_ORIGIN|CORS_ORIGINS|MOCK_MODEL_ENABLED|MODEL_DEPLOYMENT_ENABLED)=' /etc/c-check/c-check.env
+
+DEPLOY_ENV=/etc/c-check/c-check.env bash /opt/c-check/deploy/native/c-check-deploy.sh recover
+```
+
+如果 `recover` 还不够，因为前一次中断在依赖安装前，可以按以下顺序补齐：
+
+```bash
+cd /opt/c-check
+.venv/bin/python --version || python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip setuptools wheel
+.venv/bin/python -m pip install -e "backend[test]"
+cd /opt/c-check/backend
+/opt/c-check/.venv/bin/alembic upgrade head
+
+cd /opt/c-check/frontend
+npm ci --no-audit --no-fund
+npm run build
+
+DEPLOY_ENV=/etc/c-check/c-check.env bash /opt/c-check/deploy/native/c-check-deploy.sh recover
+```
+
+主站成功标准：
+
+```bash
+systemctl is-active c-check-api c-check-worker nginx mysql redis-server
+ss -ltnp | grep -E ':(8800|8000) '
+curl -I http://127.0.0.1:8800/
+curl -sS http://127.0.0.1:8800/api/models
+```
+
+预期：
+
+- `c-check-api`、`c-check-worker`、`nginx`、`mysql`、`redis-server` 均为 `active`
+- Nginx 监听 `0.0.0.0:8800`
+- API 监听 `127.0.0.1:8000`
+- 未登录请求 `/api/models` 返回 `{"detail":"Not authenticated"}`，说明 API 代理链路正常
+
+### 20.3 Docker + NVIDIA runtime 检查
+
+双 GPU VLLM Docker 路线要求 Docker 和 NVIDIA Container Toolkit 都可用。
+
+安装 Docker：
+
+```bash
+apt-get update
+apt-get install -y ca-certificates curl gnupg lsb-release git openssl
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+. /etc/os-release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+```
+
+安装 NVIDIA Container Toolkit：
+
+```bash
+rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /etc/apt/sources.list.d/nvidia-container-toolkit.list
+curl -4 -fsSL --connect-timeout 20 --max-time 120 --retry 3 https://nvidia.github.io/libnvidia-container/gpgkey \
+  | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -4 -fsSL --connect-timeout 20 --max-time 120 --retry 3 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+apt-get update
+apt-get install -y nvidia-container-toolkit
+nvidia-ctk runtime configure --runtime=docker
+systemctl restart docker
+```
+
+检查：
+
+```bash
+nvidia-container-cli info | head -80
+docker info --format '{{json .Runtimes}}' | grep nvidia
+```
+
+如果能看到两张 GPU，且 Docker runtimes 里有 `nvidia`，GPU 容器运行时已就绪。
+
+本次踩坑：Docker Hub 不稳定，以下命令可能失败：
+
+```bash
+docker manifest inspect hello-world:latest
+docker manifest inspect vllm/vllm-openai:latest
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+```
+
+典型错误：
+
+```text
+TLS handshake timeout
+EOF
+failed to resolve reference "docker.io/nvidia/cuda..."
+```
+
+结论：这类错误是 Docker Hub 网络问题，不代表 NVIDIA runtime 不可用。若 `nvidia-container-cli info` 正常，可转为本机 Python vLLM 路线，或者配置稳定的 Docker 镜像源后再跑容器路线。
+
+### 20.4 Docker 路线启动双 GPU VLLM
+
+Docker Hub 可用时，使用项目脚本启动，关键变量是 `TENSOR_PARALLEL_SIZE=2`。
+
+```bash
+export VLLM_IMAGE=vllm/vllm-openai:latest
+export VLLM_API_KEY='<替换为VLLM_API_KEY>'
+export TENSOR_PARALLEL_SIZE=2
+export GPU_MEMORY_UTILIZATION=0.90
+export MAX_MODEL_LEN=8192
+export MODEL_CACHE_DIR=/data/huggingface
+
+bash /opt/c-check/deploy/models/deploy-vllm-model.sh \
+  --source modelscope \
+  --repository deepseek-ai/deepseek-coder-14b-instruct \
+  --served-model-name deepseek-coder-14b-instruct \
+  --base-url http://127.0.0.1:8101 \
+  --port 8101 \
+  --service-name c-check-vllm-deepseek-coder-14b
+```
+
+检查：
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+docker logs -f c-check-vllm-deepseek-coder-14b
+curl -i -H "Authorization: Bearer <VLLM_API_KEY>" http://127.0.0.1:8101/v1/models
+nvidia-smi
+```
+
+成功标准：
+
+- `/v1/models` 返回的 `id` 等于 `deepseek-coder-14b-instruct`
+- `nvidia-smi` 看到两个 GPU 都有显存占用
+- VLLM 日志中没有 NCCL、CUDA OOM、模型路径错误
+
+### 20.5 本机 Python vLLM 路线
+
+当 Docker Hub 长时间不可用时，用独立 `/opt/vllm` Python 环境绕过 Docker 镜像下载。
+
+安装：
+
+```bash
+python3 -m venv /opt/vllm
+/opt/vllm/bin/python -m pip install --upgrade pip setuptools wheel
+/opt/vllm/bin/python -m pip install 'vllm==0.22.1'
+
+/opt/vllm/bin/python - <<'PY'
+import torch, vllm
+print("torch", torch.__version__, "cuda", torch.cuda.is_available(), "devices", torch.cuda.device_count())
+print("vllm", vllm.__version__)
+PY
+```
+
+注意：`vllm==0.22.1` 会下载 PyTorch、CUDA、NCCL、Triton、FlashInfer 等大 wheel，体积数 GB。SSH 可能因云平台网络抖动断开，不要立刻判定失败；重连后看：
+
+```bash
+pgrep -a -f 'install-vllm-native|pip install|vllm' || true
+tail -n 80 /tmp/vllm-install.log
+/opt/vllm/bin/python - <<'PY'
+import torch, vllm
+print(torch.__version__, torch.cuda.is_available(), torch.cuda.device_count(), vllm.__version__)
+PY
+```
+
+本机 vLLM systemd 示例：
+
+```bash
+cat >/etc/systemd/system/c-check-vllm.service <<'EOF'
+[Unit]
+Description=C-Check VLLM OpenAI API
+After=network.target
+
+[Service]
+Type=simple
+Environment=HF_TOKEN=
+Environment=VLLM_USE_MODELSCOPE=true
+Environment=CUDA_VISIBLE_DEVICES=0,1
+WorkingDirectory=/opt/c-check
+ExecStart=/opt/vllm/bin/python -m vllm.entrypoints.openai.api_server \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --model deepseek-ai/deepseek-coder-14b-instruct \
+  --served-model-name deepseek-coder-14b-instruct \
+  --api-key <替换为VLLM_API_KEY> \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.90 \
+  --max-model-len 8192
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now c-check-vllm
+journalctl -u c-check-vllm -f
+```
+
+验证：
+
+```bash
+systemctl is-active c-check-vllm
+curl -i http://127.0.0.1:8001/v1/models
+curl -i -H "Authorization: Bearer <VLLM_API_KEY>" http://127.0.0.1:8001/v1/models
+nvidia-smi
+```
+
+未带 API Key 返回 `401 Unauthorized` 说明 API server 已响应；带 API Key 能返回模型列表才算可注册。
+
+### 20.6 注册双 GPU 模型节点到 C-Check
+
+VLLM 可用后，把节点登记为默认模型：
+
+```bash
+grep -q '^REGISTER_VLLM_MODEL=' /etc/c-check/c-check.env \
+  && sed -i 's/^REGISTER_VLLM_MODEL=.*/REGISTER_VLLM_MODEL=true/' /etc/c-check/c-check.env \
+  || echo 'REGISTER_VLLM_MODEL=true' >> /etc/c-check/c-check.env
+
+grep -q '^VLLM_DISPLAY_NAME=' /etc/c-check/c-check.env \
+  && sed -i 's/^VLLM_DISPLAY_NAME=.*/VLLM_DISPLAY_NAME=DeepSeek-Coder 14B Instruct TP2/' /etc/c-check/c-check.env \
+  || echo 'VLLM_DISPLAY_NAME=DeepSeek-Coder 14B Instruct TP2' >> /etc/c-check/c-check.env
+
+grep -q '^VLLM_MODEL_IDENTIFIER=' /etc/c-check/c-check.env \
+  && sed -i 's/^VLLM_MODEL_IDENTIFIER=.*/VLLM_MODEL_IDENTIFIER=deepseek-coder-14b-instruct/' /etc/c-check/c-check.env \
+  || echo 'VLLM_MODEL_IDENTIFIER=deepseek-coder-14b-instruct' >> /etc/c-check/c-check.env
+
+grep -q '^VLLM_BASE_URL=' /etc/c-check/c-check.env \
+  && sed -i 's#^VLLM_BASE_URL=.*#VLLM_BASE_URL=http://127.0.0.1:8001#' /etc/c-check/c-check.env \
+  || echo 'VLLM_BASE_URL=http://127.0.0.1:8001' >> /etc/c-check/c-check.env
+
+DEPLOY_ENV=/etc/c-check/c-check.env bash /opt/c-check/deploy/native/c-check-deploy.sh update
+systemctl restart c-check-api c-check-worker
+```
+
+检查：
+
+```bash
+curl -sS http://127.0.0.1:8800/api/models
+journalctl -u c-check-worker -n 100 --no-pager
+```
+
+如果未登录 `/api/models` 返回 401，用浏览器登录后在管理后台确认默认模型显示为 TP2 节点。
+
+### 20.7 SSH/NAT 抖动时的判断
+
+本次多次出现 SSH 入口短暂恢复后又不可达：
+
+```powershell
+Test-NetConnection 223.109.239.11 -Port 20432
+Test-NetConnection 180.127.11.169 -Port 20432
+```
+
+判断规则：
+
+- `Permission denied (publickey,password)`：SSH 服务和端口映射正常，只是需要密码。
+- `Connection refused`：远端端口没有监听或云平台映射断开。
+- `TcpTestSucceeded=False`：本地无法到达该公网端口。
+- Web 返回 `502 Bad Gateway`：云网关通了，但没有正常转发到服务器内 Nginx，或内网目标端口不对。
+- 服务器内 `curl -I http://127.0.0.1:8800/` 是 200，但公网 502：优先查云平台 Web 端口映射，不要先改应用代码。
+
+SSH 不稳定时，所有长任务都写日志文件，不要依赖交互输出：
+
+```bash
+DEPLOY_ENV=/etc/c-check/c-check.env bash /opt/c-check/deploy/native/c-check-deploy.sh install \
+  >/tmp/c-check-install.log 2>&1 &
+
+tail -f /tmp/c-check-install.log
+```
+
+vLLM 安装同理：
+
+```bash
+bash /tmp/install-vllm-native.sh >/tmp/vllm-install.log 2>&1 &
+tail -f /tmp/vllm-install.log
+```
+
+### 20.8 本次阶段性结论
+
+已验证成功：
+
+- 双 GPU 硬件识别正常。
+- NVIDIA Container Toolkit 安装后，`nvidia-container-cli info` 能看到两张 A100。
+- C-Check 主站在服务器内已跑通，`127.0.0.1:8800` 返回 200。
+- API、worker、Nginx、MySQL、Redis 均可启动为 active。
+
+未完成项：
+
+- Docker Hub 拉取 `hello-world`、`nvidia/cuda`、`vllm/vllm-openai` 不稳定，容器路线未完成。
+- 已开始本机 Python vLLM 安装，但 SSH/NAT 中断后未能最终确认 `/opt/vllm` 安装完成。
+- 公网 Web 返回云网关 502，需要云平台确认公网端口映射到服务器内网 `8800`。
+- SSH `20432` 多次不可达，需要云平台恢复 SSH/NAT 后继续。
+
+恢复后第一组命令：
+
+```bash
+systemctl is-active c-check-api c-check-worker nginx mysql redis-server docker
+curl -I http://127.0.0.1:8800/
+pgrep -a -f 'pip install|vllm' || true
+tail -n 100 /tmp/vllm-install.log 2>/dev/null || true
+/opt/vllm/bin/python - <<'PY'
+import torch, vllm
+print(torch.__version__, torch.cuda.is_available(), torch.cuda.device_count(), vllm.__version__)
+PY
+```
+
+如果 vLLM 安装已完成，直接写 `c-check-vllm.service` 并使用 `--tensor-parallel-size 2` 启动。
