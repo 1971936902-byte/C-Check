@@ -7,7 +7,7 @@ import { errorMessage, MOCK_API_ENABLED, reviewApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
 import type { ModelNode, ReviewTask } from '../types'
 import { useAuthStore } from '../stores/auth'
-import { activeUpload, type InputMode } from './workspace-input'
+import { activeUpload, canSubmitReview, hasReviewInput, type InputMode } from './workspace-input'
 import { ALL_CHECK_TYPES, deriveReviewProgressSummary, taskDisplayName, taskSubmissionCountLabel } from './task-progress'
 
 const models = ref<ModelNode[]>([])
@@ -19,13 +19,38 @@ const archiveFile = ref<File>()
 const task = ref<ReviewTask>()
 const submitting = ref(false)
 const logVisible = ref(false)
+const sourcePreviewVisible = ref(false)
+const sourcePreviewLoading = ref(false)
+const sourcePreviewName = ref('')
+const sourcePreviewText = ref('')
 const router = useRouter()
 const auth = useAuthStore()
 const checkTypes = ref<string[]>(ALL_CHECK_TYPES.map((item) => item.value))
 let timer: number | undefined
 
 const upload = computed(() => activeUpload(mode.value, singleFile.value, archiveFile.value))
-const canSubmit = computed(() => selectedModel.value && checkTypes.value.length && (mode.value === 'text' ? source.value.trim() : upload.value))
+const highlightedSourcePreview = computed(() => sourcePreviewText.value
+  ? sourcePreviewText.value.split('\n').map((line, index) => (
+    `<div class="code-preview-line"><span class="code-preview-line-number">${index + 1}</span><code>${highlightCLine(line)}</code></div>`
+  )).join('')
+  : '<div class="code-preview-empty">暂无可预览内容</div>')
+const canSubmit = computed(() => canSubmitReview({
+  mode: mode.value,
+  selectedModel: selectedModel.value,
+  sourceText: source.value,
+  singleFile: singleFile.value,
+  archiveFile: archiveFile.value,
+  checkTypes: checkTypes.value,
+}))
+const submitBlockReason = computed(() => {
+  if (!models.value.length) return '暂无可用模型，请先在后台配置并启用模型'
+  if (!selectedModel.value) return '请选择模型'
+  if (!checkTypes.value.length) return '请至少选择一种检查类型'
+  if (!hasReviewInput(mode.value, source.value, singleFile.value, archiveFile.value)) {
+    return mode.value === 'text' ? '请粘贴待审查代码' : '请先选择或拖入文件'
+  }
+  return ''
+})
 const selectedModelInfo = computed(() => models.value.find((model) => model.id === selectedModel.value))
 const allChecksSelected = computed(() => checkTypes.value.length === ALL_CHECK_TYPES.length)
 const progressSummary = computed(() => task.value ? deriveReviewProgressSummary(task.value) : undefined)
@@ -33,7 +58,7 @@ const progressSummary = computed(() => task.value ? deriveReviewProgressSummary(
 onMounted(async () => {
   try {
     models.value = (await reviewApi.models()).data
-    selectedModel.value = models.value[0]?.id || ''
+    selectedModel.value = models.value.find((model) => model.is_default)?.id || models.value[0]?.id || ''
   } catch (e) {
     ElMessage.error(errorMessage(e))
   }
@@ -52,9 +77,60 @@ function setSingleFile(file: { raw: File }) { setFile('file', file) }
 function setArchiveFile(file: { raw: File }) { setFile('archive', file) }
 function toggleAllChecks(value: boolean) { checkTypes.value = value ? ALL_CHECK_TYPES.map((item) => item.value) : [] }
 
+const cKeywords = new Set([
+  'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else',
+  'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register',
+  'restrict', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef',
+  'union', 'unsigned', 'void', 'volatile', 'while', 'NULL',
+])
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function highlightCLine(line: string) {
+  if (line.trimStart().startsWith('#')) {
+    return `<span class="code-token-preprocessor">${escapeHtml(line)}</span>`
+  }
+  const commentIndex = line.indexOf('//')
+  const codePart = commentIndex >= 0 ? line.slice(0, commentIndex) : line
+  const commentPart = commentIndex >= 0 ? line.slice(commentIndex) : ''
+  const highlighted = codePart.replace(
+    /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b([A-Za-z_][A-Za-z0-9_]*)\b|\b(\d+(?:\.\d+)?)\b/g,
+    (match, stringToken, wordToken, numberToken) => {
+      if (stringToken) return `<span class="code-token-string">${escapeHtml(stringToken)}</span>`
+      if (numberToken) return `<span class="code-token-number">${escapeHtml(numberToken)}</span>`
+      if (cKeywords.has(wordToken)) return `<span class="code-token-keyword">${escapeHtml(wordToken)}</span>`
+      return escapeHtml(match)
+    },
+  )
+  return highlighted + (commentPart ? `<span class="code-token-comment">${escapeHtml(commentPart)}</span>` : '')
+}
+
+async function previewSingleFile() {
+  if (!singleFile.value) return ElMessage.warning('请先选择单个 .c / .h 文件')
+  sourcePreviewLoading.value = true
+  sourcePreviewName.value = singleFile.value.name
+  sourcePreviewVisible.value = true
+  try {
+    sourcePreviewText.value = await singleFile.value.text()
+  } catch {
+    sourcePreviewText.value = ''
+    ElMessage.error('文件内容读取失败，请确认文件可访问')
+  } finally {
+    sourcePreviewLoading.value = false
+  }
+}
+
 async function submit() {
+  if (!models.value.length) return ElMessage.warning('暂无可用模型，请先在后台配置并启用模型')
   if (!checkTypes.value.length) return ElMessage.warning('请至少选择一种检查类型')
-  if (!canSubmit.value) return ElMessage.warning('请选择模型并提供待审查代码')
+  if (!canSubmit.value) return ElMessage.warning(submitBlockReason.value || '请选择模型并提供待审查代码')
   submitting.value = true
   task.value = undefined
   clearInterval(timer)
@@ -119,7 +195,7 @@ function openReport() {
             <h2>提交代码</h2>
             <p>仅支持 C 语言源文件与头文件</p>
           </div>
-          <el-select v-model="selectedModel" :disabled="!auth.isAdmin" placeholder="请选择模型" class="model-select">
+          <el-select v-model="selectedModel" :disabled="!auth.isAdmin || !models.length" :placeholder="models.length ? '请选择模型' : '暂无可用模型'" class="model-select">
             <el-option v-for="model in models" :key="model.id" :value="model.id" :label="model.display_name">
               <span>{{ model.display_name }}</span>
               <small>{{ model.model_identifier }}</small>
@@ -127,6 +203,14 @@ function openReport() {
           </el-select>
         </div>
 
+        <el-alert
+          v-if="!models.length"
+          class="model-alert"
+          title="暂无可用模型，请先到后台管理中新增并启用模型。"
+          type="warning"
+          :closable="false"
+          show-icon
+        />
         <p v-if="selectedModelInfo?.description" class="model-hint">
           {{ selectedModelInfo.description }}{{ auth.isAdmin ? '' : ' 当前模型由管理员统一配置。' }}
         </p>
@@ -153,6 +237,10 @@ function openReport() {
               <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
               <div>拖入或点击选择单个 <b>.c / .h</b> 文件</div>
             </el-upload>
+            <div v-if="singleFile" class="file-preview-row">
+              <span>{{ singleFile.name }}</span>
+              <el-button size="small" plain :icon="View" @click="previewSingleFile">预览代码</el-button>
+            </div>
           </el-tab-pane>
           <el-tab-pane name="archive">
             <template #label><el-icon><FolderOpened /></el-icon> 项目压缩包</template>
@@ -165,9 +253,13 @@ function openReport() {
 
         <div class="submit-row">
           <span>提交后系统将自动排队并实时更新进度</span>
-          <el-button type="primary" size="large" :icon="Promotion" :disabled="!canSubmit" :loading="submitting" @click="submit">
-            开始智能审查
-          </el-button>
+          <el-tooltip :disabled="canSubmit" :content="submitBlockReason" placement="top">
+            <span class="submit-action-wrap">
+              <el-button class="submit-action-button" type="primary" size="large" :icon="Promotion" :disabled="!canSubmit" :loading="submitting" @click="submit">
+                开始智能审查
+              </el-button>
+            </span>
+          </el-tooltip>
         </div>
       </div>
 
@@ -212,6 +304,11 @@ function openReport() {
     <el-dialog v-model="logVisible" :title="`模型日志 · ${task?.display_name || ''}`" width="820px">
       <div class="markdown-preview"><pre>{{ task?.model_log || '暂无模型日志' }}</pre></div>
       <template #footer><el-button @click="logVisible = false">关闭</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="sourcePreviewVisible" :title="`代码预览 · ${sourcePreviewName}`" width="860px">
+      <div v-loading="sourcePreviewLoading" class="code-preview" v-html="highlightedSourcePreview"></div>
+      <template #footer><el-button @click="sourcePreviewVisible = false">关闭</el-button></template>
     </el-dialog>
   </section>
 </template>

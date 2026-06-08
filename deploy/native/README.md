@@ -89,6 +89,88 @@ sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh lo
 sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh backup
 ```
 
+## Current Zhixing Cloud Notes
+
+The current test deployment uses cloud reserved port mapping instead of public
+port 80:
+
+```text
+SSH: ssh root@223.109.239.36 -p 13920
+SSH: ssh root@180.127.11.177 -p 13920
+
+Web: http://223.109.239.36:13970/
+Web: http://180.127.11.177:13970/
+
+Mapping:
+external 13920 -> internal 22
+external 13970 -> internal 8800
+```
+
+Keep Nginx listening on the internal `WEB_PORT=8800`, and set the browser
+origin to the external web port:
+
+```dotenv
+WEB_PORT=8800
+PUBLIC_ORIGIN=http://223.109.239.36:13970
+CORS_ORIGINS='["http://223.109.239.36:13970","http://180.127.11.177:13970","http://223.109.239.36","http://180.127.11.177","http://localhost","http://127.0.0.1:18000"]'
+```
+
+Important: keep the single quotes around `CORS_ORIGINS`. The deploy script
+sources `/etc/c-check/c-check.env`; without those quotes, the JSON list can be
+misparsed before Pydantic reads it.
+
+Current local-test admin account:
+
+```text
+username: admin
+password: admin
+```
+
+For config validation, keep `ADMIN_PASSWORD` in `/etc/c-check/c-check.env` as a
+strong password. If the database admin account needs to be reset to the local
+test password, run:
+
+```bash
+cd /opt/c-check
+set -a
+source /etc/c-check/c-check.env
+set +a
+
+/opt/c-check/.venv/bin/python - <<'PY'
+from sqlalchemy import select
+from app.core.security import hash_password
+from app.db.models import User, new_uuid
+from app.db.session import SessionLocal
+
+username = "admin"
+password = "admin"
+
+with SessionLocal() as db:
+    user = db.scalar(select(User).where(User.username == username))
+    if user is None:
+        user = User(id=new_uuid(), username=username)
+        db.add(user)
+    user.password_hash = hash_password(password)
+    user.role = "admin"
+    user.is_enabled = True
+    user.token_version = (user.token_version or 0) + 1
+    db.commit()
+PY
+```
+
+Verify after deploy or reboot:
+
+```bash
+cd /opt/c-check
+DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh status
+curl -I http://127.0.0.1:8800/
+curl --noproxy "*" -I http://223.109.239.36:13970/
+curl --noproxy "*" -i http://223.109.239.36:13970/api/models
+```
+
+The unauthenticated `/api/models` check should return `401 Unauthorized`; that
+still confirms Nginx is proxying `/api/` to FastAPI.
+
 ## Register A Local VLLM Node
 
 If VLLM is already listening on the same server, set:

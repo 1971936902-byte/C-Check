@@ -1352,3 +1352,177 @@ PY
 ```
 
 如果 vLLM 安装已完成，直接写 `c-check-vllm.service` 并使用 `--tensor-parallel-size 2` 启动。
+## 19. 2026-06-09 增量部署经验
+
+本次在已有服务器上执行的是“更新代码 + 修正公网端口 + 重置测试管理员账号”，没有重装系统，也没有重建数据库。当前有效入口如下：
+
+```text
+SSH:
+ssh root@223.109.239.36 -p 13920
+ssh root@180.127.11.177 -p 13920
+
+Web:
+http://223.109.239.36:13970/
+http://180.127.11.177:13970/
+
+智星云端口映射:
+外网 13920 -> 内网 22
+外网 13970 -> 内网 8800
+```
+
+### 19.1 更新前先确认远端版本
+
+本地仓库可能落后远端，服务器也可能停在旧提交。部署前先确认 `origin/master` 最新提交，并让服务器使用远端 `master`：
+
+```bash
+cd /opt/c-check
+git fetch origin master
+git log --oneline --decorate -n 5 origin/master
+git rev-parse --short HEAD
+```
+
+本次服务器从 `b94c36f` 更新到：
+
+```text
+d338d3c docs: add dual gpu deployment notes
+```
+
+### 19.2 更新前备份
+
+脚本内置备份可先跑一次：
+
+```bash
+DEPLOY_ENV=/etc/c-check/c-check.env bash /opt/c-check/deploy/native/c-check-deploy.sh backup
+```
+
+如果 `mysqldump` 提示 `PROCESS privilege` 或 tablespace 相关错误，可以额外执行一个不导出 tablespaces 的手动备份：
+
+```bash
+source /etc/c-check/c-check.env
+backup_dir="/opt/c-check/backups/$(date '+%F-%H%M%S')-manual-no-tablespaces"
+mkdir -p "$backup_dir"
+mysqldump --no-tablespaces --single-transaction \
+  --databases -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" \
+  > "$backup_dir/mysql.sql"
+tar czf "$backup_dir/uploads.tgz" -C "$STORAGE_PATH" .
+cp /etc/c-check/c-check.env "$backup_dir/deploy.env"
+cp /opt/c-check/.env "$backup_dir/app.env"
+chmod 600 "$backup_dir"/*
+```
+
+### 19.3 按当前端口修正部署配置
+
+服务器内部 Nginx 继续监听 `8800`，公网端口以智星云控制台为准。本次公网 Web 端口是 `13970`，因此 `/etc/c-check/c-check.env` 应保持：
+
+```dotenv
+WEB_PORT=8800
+PUBLIC_ORIGIN=http://223.109.239.36:13970
+CORS_ORIGINS='["http://223.109.239.36:13970","http://180.127.11.177:13970","http://223.109.239.36","http://180.127.11.177","http://localhost","http://127.0.0.1:18000"]'
+```
+
+注意：`CORS_ORIGINS` 必须用单引号包住 JSON 数组。不要写成未加单引号的 `CORS_ORIGINS=[...]`，否则部署脚本 `source` 配置后，Pydantic 可能报：
+
+```text
+SettingsError: error parsing value for field "cors_origins"
+```
+
+### 19.4 执行更新
+
+```bash
+cd /opt/c-check
+DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh update
+```
+
+成功时应看到：
+
+```text
+c-check-vllm=active
+c-check-api=active
+c-check-worker=active
+nginx=active
+mysql=active
+redis-server=active
+LISTEN ... 0.0.0.0:8800
+LISTEN ... 127.0.0.1:8000
+```
+
+### 19.5 测试管理员账号
+
+当前测试环境约定使用：
+
+```text
+用户名：admin
+密码：admin
+```
+
+部署配置里的 `ADMIN_PASSWORD` 仍建议保留强密码，因为配置校验要求至少 12 个字符。若需要把数据库里的管理员账号重置为测试账号，可执行：
+
+```bash
+cd /opt/c-check
+set -a
+source /etc/c-check/c-check.env
+set +a
+
+/opt/c-check/.venv/bin/python - <<'PY'
+from sqlalchemy import select
+from app.core.security import hash_password
+from app.db.models import User, new_uuid
+from app.db.session import SessionLocal
+
+username = "admin"
+password = "admin"
+
+with SessionLocal() as db:
+    user = db.scalar(select(User).where(User.username == username))
+    if user is None:
+        user = User(id=new_uuid(), username=username)
+        db.add(user)
+    user.password_hash = hash_password(password)
+    user.role = "admin"
+    user.is_enabled = True
+    user.token_version = (user.token_version or 0) + 1
+    db.commit()
+PY
+```
+
+重置后验证登录接口：
+
+```bash
+curl -i -X POST http://127.0.0.1:8800/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin"}'
+```
+
+返回 `HTTP/1.1 200 OK` 且响应中包含 `access_token` 即可。
+
+### 19.6 公网验证
+
+本地 Windows 或其他外部机器验证时，建议绕过本机代理：
+
+```bash
+curl --noproxy "*" -I http://223.109.239.36:13970/
+curl --noproxy "*" -I http://180.127.11.177:13970/
+curl --noproxy "*" -i http://223.109.239.36:13970/api/models
+```
+
+预期结果：
+
+```text
+首页：HTTP/1.1 200 OK
+/api/models 未登录：HTTP/1.1 401 Unauthorized
+```
+
+`/api/models` 返回 401 是正常现象，说明 Nginx 已经把 `/api/` 代理到后端，只是当前请求没有携带登录 token。
+
+### 19.7 服务器重启后的排查顺序
+
+如果服务器刚重启，先确认智星云公网映射是否恢复，再查服务：
+
+```bash
+systemctl status c-check-api c-check-worker nginx mysql redis-server c-check-vllm --no-pager
+ss -ltnp | grep -E ':(8800|8000|8001|3306|6379) '
+curl -I http://127.0.0.1:8800/
+```
+
+如果服务器内部 `127.0.0.1:8800` 返回 200，但公网 IP:端口连接失败，通常不是 C-Check 应用问题，而是智星云预留端口映射、安全组或实例网络尚未恢复。
+
