@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False
     model_deployment_script: Path = REPOSITORY_ROOT / "deploy" / "models" / "deploy-vllm-model.sh"
+    vllm_api_key: str | None = None
     allow_insecure_defaults: bool = False
 
     @model_validator(mode="after")

@@ -37,5 +37,31 @@
     "default_served_model_name": "starcoder2-15b",
     "estimated_vram_gb": 30,
     "tags": ["c", "batch", "code"]
+  },
+  {
+    "key": "qwen2.5-coder-32b-instruct",
+    "display_name": "Qwen2.5-Coder 32B Instruct",
+    "model_identifier": "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "description": "Qwen2.5-Coder 系列旗舰代码模型，支持最高 128K 上下文，适合复杂仓库级代码审查；单卡部署显存压力较高。",
+    "recommended_source": "modelscope",
+    "huggingface_repo": "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "modelscope_repo": "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "default_port": 8104,
+    "default_served_model_name": "qwen2.5-coder-32b-instruct",
+    "estimated_vram_gb": 65,
+    "tags": ["c", "code", "128k"]
+  },
+  {
+    "key": "qwen3-coder-30b-a3b-instruct",
+    "display_name": "Qwen3-Coder 30B-A3B Instruct",
+    "model_identifier": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "description": "Qwen3-Coder MoE 代码模型，原生支持 256K 上下文并可通过 Yarn 扩展，适合仓库级代码理解与审查；需关注显存与推理框架兼容性。",
+    "recommended_source": "modelscope",
+    "huggingface_repo": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "modelscope_repo": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "default_port": 8105,
+    "default_served_model_name": "qwen3-coder-30b-a3b-instruct",
+    "estimated_vram_gb": 62,
+    "tags": ["c", "moe", "256k"]
   }
 ]

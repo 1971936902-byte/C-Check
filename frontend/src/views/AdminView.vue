@@ -25,6 +25,9 @@ const modelTableKey = ref(0)
 const userDialog = ref(false)
 const modelDialog = ref(false)
 const deploymentDialog = ref(false)
+const deploymentLogDialog = ref(false)
+const deploymentSubmitting = ref(false)
+const selectedDeployment = ref<ModelDeployment>()
 const promptDialog = ref(false)
 const editingModel = ref<string>()
 const editingPrompt = ref<string>()
@@ -33,6 +36,7 @@ const modelForm = reactive({ display_name: '', model_identifier: '', base_url: '
 const deploymentForm = reactive({ catalog_key: '', source: 'modelscope', base_url: '', auto_base_url: true, served_model_name: '', api_key: '', port: 8101, timeout_seconds: 180, auto_register: true })
 const promptBody = ref('')
 let resourceTimer: number | undefined
+let deploymentTimer: number | undefined
 
 const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const percent = (value?: number | null) => Math.max(0, Math.min(100, Number(value ?? 0)))
@@ -76,15 +80,6 @@ const resourcePeaks = computed(() => ({
   running_tasks: maxNumber(resourceSamples.value.map((item) => item.tasks.running_tasks)),
   gpu_count: maxNumber(resourceSamples.value.map((item) => item.gpus.length)),
 }))
-const gpuPeaks = (index: number) => {
-  const samples = resourceSamples.value.map((item) => item.gpus.find((gpu) => gpu.index === index)).filter(Boolean)
-  return {
-    utilization_percent: maxNumber(samples.map((gpu) => gpu?.utilization_percent)),
-    memory_percent: maxNumber(samples.map((gpu) => gpu?.memory_percent)),
-    temperature_c: maxNumber(samples.map((gpu) => gpu?.temperature_c)),
-    power_w: maxNumber(samples.map((gpu) => gpu?.power_w)),
-  }
-}
 const modelRuntimePeaks = (nodeId: string) => {
   const samples = resourceSamples.value.map((item) => item.models.find((model) => model.node_id === nodeId)).filter(Boolean)
   return {
@@ -102,11 +97,40 @@ const deploymentSourceOptions = [
   { label: 'ModelScope', value: 'modelscope' },
 ]
 const defaultModel = computed(() => models.value.find((model) => model.is_default))
+const failedDeployments = computed(() => modelDeployments.value.filter((item) => item.status === 'failed'))
+const activeDeployments = computed(() => modelDeployments.value.filter((item) => item.status === 'queued' || item.status === 'running'))
+const isDeploymentLocked = computed(() => deploymentSubmitting.value || activeDeployments.value.length > 0)
+const succeededDeploymentNodeIds = computed(() => new Set(
+  modelDeployments.value
+    .filter((item) => item.status === 'succeeded' && item.model_node_id)
+    .map((item) => item.model_node_id as string),
+))
+const deployedModelNodes = computed(() => models.value
+  .filter((model) => model.is_enabled && (model.is_default || succeededDeploymentNodeIds.value.has(model.id)))
+  .sort((a, b) => Number(b.is_default) - Number(a.is_default) || a.display_name.localeCompare(b.display_name)))
 
 const isDefaultCatalogModel = (item: ModelCatalogItem) => {
   const model = defaultModel.value
   if (!model) return false
   return model.model_identifier === item.model_identifier || model.model_identifier === item.default_served_model_name
+}
+
+const isDeployedCatalogModel = (item: ModelCatalogItem) => {
+  const identifiers = new Set([
+    item.key,
+    item.model_identifier,
+    item.default_served_model_name,
+    item.huggingface_repo,
+    item.modelscope_repo,
+  ].filter(Boolean))
+  return models.value.some((model) => (
+    (model.is_default || succeededDeploymentNodeIds.value.has(model.id))
+    && model.is_enabled
+    && (
+    identifiers.has(model.model_identifier)
+    || identifiers.has(model.display_name)
+    )
+  ))
 }
 
 const isDefaultDeployment = (row: ModelDeployment) => {
@@ -116,6 +140,42 @@ const isDefaultDeployment = (row: ModelDeployment) => {
 }
 
 const deploymentRowClassName = ({ row }: { row: ModelDeployment }) => isDefaultDeployment(row) ? 'is-default-deployment' : ''
+const deploymentStatusLabel = (status: ModelDeployment['status']) => ({
+  queued: '排队中',
+  running: '部署中',
+  succeeded: '成功',
+  failed: '失败',
+  manual_required: '需手动执行',
+}[status] || status)
+const deploymentStatusType = (status: ModelDeployment['status']) => {
+  if (status === 'failed') return 'danger'
+  if (status === 'succeeded') return 'success'
+  if (status === 'manual_required') return 'info'
+  return 'warning'
+}
+const deploymentProgressStatus = (row: ModelDeployment) => {
+  if (row.status === 'failed') return 'exception'
+  if (row.status === 'succeeded') return 'success'
+  return undefined
+}
+const deploymentFailureText = (row: ModelDeployment) => {
+  if (row.error_message) return row.error_message
+  const log = row.log || ''
+  const important = log
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /error|failed|exception|traceback|docker:/i.test(line))
+  if (important.length) return important.slice(-3).join(' / ')
+  if (row.status === 'failed') return '部署脚本执行失败，请查看完整日志。'
+  if (row.status === 'manual_required') return '自动部署未执行，请查看日志中的手动命令。'
+  return ''
+}
+const deploymentLogPreview = (row: ModelDeployment) => {
+  const failure = deploymentFailureText(row)
+  if (failure) return failure
+  const log = (row.log || '').trim().split('\n').filter(Boolean)
+  return log[log.length - 1] || '暂无日志'
+}
 
 const withSingleDefault = (items: ModelNode[], defaultId?: string) => {
   const fallback = items.find((model) => model.is_default)?.id
@@ -166,9 +226,22 @@ async function loadResources(silent = false) {
   }
 }
 
+async function loadDeployments(silent = false) {
+  try {
+    modelDeployments.value = (await adminApi.modelDeployments()).data
+  } catch (e) {
+    if (!silent) ElMessage.error(errorMessage(e))
+  }
+}
+
 function startResourceTimer() {
   if (resourceTimer) window.clearInterval(resourceTimer)
   if (autoRefresh.value) resourceTimer = window.setInterval(() => loadResources(true), 5000)
+}
+
+function startDeploymentTimer() {
+  if (deploymentTimer) window.clearInterval(deploymentTimer)
+  if (active.value === 'deployments') deploymentTimer = window.setInterval(() => loadDeployments(true), 5000)
 }
 
 async function createUser() {
@@ -234,6 +307,7 @@ async function health(id: string) {
 }
 
 function openDeployment(item?: ModelCatalogItem) {
+  if (isDeploymentLocked.value) return ElMessage.warning('已有模型正在部署，请等待本次部署完成或失败后再创建新任务')
   const target = item || modelCatalog.value[0]
   if (!target) return ElMessage.warning('请先配置模型目录')
   Object.assign(deploymentForm, {
@@ -268,8 +342,10 @@ watch(() => deploymentForm.auto_base_url, (enabled) => {
 })
 
 async function createDeployment() {
+  if (isDeploymentLocked.value) return ElMessage.warning('已有模型正在部署，请等待本次部署完成或失败后再创建新任务')
   if (!deploymentForm.catalog_key) return ElMessage.warning('请选择模型')
   if (!deploymentForm.auto_base_url && !deploymentForm.base_url.trim()) return ElMessage.warning('请输入 VLLM 服务地址')
+  deploymentSubmitting.value = true
   try {
     const { auto_base_url, ...payload } = deploymentForm
     await adminApi.createModelDeployment({
@@ -279,8 +355,18 @@ async function createDeployment() {
     })
     deploymentDialog.value = false
     await load()
+    startDeploymentTimer()
     ElMessage.success('模型部署任务已创建')
-  } catch (e) { ElMessage.error(errorMessage(e)) }
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    deploymentSubmitting.value = false
+  }
+}
+
+function openDeploymentLog(row: ModelDeployment) {
+  selectedDeployment.value = row
+  deploymentLogDialog.value = true
 }
 
 function openPrompt(row?: Prompt) {
@@ -311,10 +397,20 @@ async function removePrompt(row: Prompt) {
   try { await ElMessageBox.confirm('删除后无法恢复，确认删除此提示词版本？', '删除提示词', { type: 'warning' }); await adminApi.deletePrompt(row.id); await load(); ElMessage.success('提示词版本已删除') } catch (e) { if (e !== 'cancel') ElMessage.error(errorMessage(e)) }
 }
 
-watch(active, (value) => { if (value === 'resources') loadResources(true) })
+watch(active, (value) => {
+  if (value === 'deployments') {
+    active.value = 'models'
+    return
+  }
+  if (value === 'resources') loadResources(true)
+  startDeploymentTimer()
+})
 watch(autoRefresh, startResourceTimer)
-onMounted(async () => { await Promise.all([load(), loadResources(true)]); startResourceTimer() })
-onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
+onMounted(async () => { await Promise.all([load(), loadResources(true)]); startResourceTimer(); startDeploymentTimer() })
+onUnmounted(() => {
+  if (resourceTimer) window.clearInterval(resourceTimer)
+  if (deploymentTimer) window.clearInterval(deploymentTimer)
+})
 </script>
 
 <template>
@@ -377,7 +473,7 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
 
           <div class="resource-section">
             <div class="section-heading">
-              <div><h2>GPU 与显存</h2><p>当前 {{ resources?.gpus.length || 0 }} 张显卡，采样峰值 {{ resourcePeaks.gpu_count ?? 0 }} 张；峰值统计基于近 {{ sampleWindowMinutes }} 分钟页面采样。</p></div>
+              <div><h2>GPU 与显存</h2><p>当前 {{ resources?.gpus.length || 0 }} 张显卡，展示核心利用率与显存占用。</p></div>
             </div>
             <el-empty v-if="!resources?.gpus.length" description="当前未采集到 GPU 指标" />
             <div v-else class="gpu-grid">
@@ -387,12 +483,6 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
                 <div class="gpu-details">
                   <span>显存 {{ mb(gpu.memory_used_mb) }} / {{ mb(gpu.memory_total_mb) }}</span>
                   <span>显存占用 {{ metric(gpu.memory_percent) }}%</span>
-                  <span>温度 {{ metric(gpu.temperature_c, 0) }}°C</span>
-                  <span>功耗 {{ metric(gpu.power_w, 0) }} W</span>
-                  <span>利用率峰值 {{ metric(gpuPeaks(gpu.index).utilization_percent) }}%</span>
-                  <span>显存峰值 {{ metric(gpuPeaks(gpu.index).memory_percent) }}%</span>
-                  <span>温度峰值 {{ metric(gpuPeaks(gpu.index).temperature_c, 0) }}°C</span>
-                  <span>功耗峰值 {{ metric(gpuPeaks(gpu.index).power_w, 0) }} W</span>
                 </div>
               </article>
             </div>
@@ -440,17 +530,48 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
           </el-table>
         </el-tab-pane>
 
-        <el-tab-pane label="模型部署" name="deployments">
+        <el-tab-pane v-if="false" label="模型部署" name="deployments">
           <div class="table-tools">
             <span>从可配置目录发起模型下载与 VLLM 部署，成功后自动登记为可切换模型节点</span>
-            <el-button type="primary" :icon="Download" @click="openDeployment()">部署模型</el-button>
+          </div>
+          <div v-if="deployedModelNodes.length" class="deployed-model-section">
+            <div class="section-heading">
+              <div><h2>已部署模型节点</h2><p>这里展示当前已登记并可用于代码审查的真实模型服务。</p></div>
+            </div>
+            <div class="deployment-grid">
+              <section
+                v-for="model in deployedModelNodes"
+                :key="model.id"
+                class="deployment-card is-deployed-model"
+                :class="{ 'is-default-model': model.is_default }"
+              >
+                <div class="deployment-card-head">
+                  <div><h3>{{ model.display_name }}</h3><p>{{ model.model_identifier }}</p></div>
+                  <div class="deployment-card-tags">
+                    <el-tag v-if="model.is_default" type="success">默认</el-tag>
+                    <el-tag type="success">已部署</el-tag>
+                  </div>
+                </div>
+                <p>{{ model.description || '已登记为可切换模型节点，可直接用于代码审查。' }}</p>
+                <div class="deployed-model-meta">
+                  <span>服务地址</span>
+                  <code>{{ model.base_url }}</code>
+                </div>
+                <div class="deployment-tags">
+                  <el-tag effect="plain">{{ model.base_url.startsWith('mock://') ? 'mock' : 'vllm' }}</el-tag>
+                  <el-tag effect="plain">{{ model.timeout_seconds }}s</el-tag>
+                </div>
+                <el-button :icon="Connection" @click="health(model.id)">健康检查</el-button>
+              </section>
+            </div>
           </div>
           <div class="deployment-grid">
-            <section v-for="item in modelCatalog" :key="item.key" class="deployment-card" :class="{ 'is-default-model': isDefaultCatalogModel(item) }">
+            <section v-for="item in modelCatalog" :key="item.key" class="deployment-card" :class="{ 'is-default-model': isDefaultCatalogModel(item), 'is-deployed-model': isDeployedCatalogModel(item) }">
               <div class="deployment-card-head">
                 <div><h3>{{ item.display_name }}</h3><p>{{ item.model_identifier }}</p></div>
                 <div class="deployment-card-tags">
                   <el-tag v-if="isDefaultCatalogModel(item)" type="success">默认</el-tag>
+                  <el-tag v-else-if="isDeployedCatalogModel(item)" type="success">已部署</el-tag>
                   <el-tag>{{ item.estimated_vram_gb || '--' }} GB</el-tag>
                 </div>
               </div>
@@ -458,13 +579,33 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
               <div class="deployment-tags">
                 <el-tag v-for="tag in item.tags" :key="tag" effect="plain">{{ tag }}</el-tag>
               </div>
-              <el-button :icon="Download" @click="openDeployment(item)">下载部署</el-button>
+              <el-button v-if="isDeployedCatalogModel(item)" class="deployment-action-button" disabled>已部署</el-button>
+              <el-tooltip
+                v-else
+                :disabled="!isDeploymentLocked"
+                content="已有模型正在部署，请等待本次部署完成或失败后再操作"
+                placement="top"
+              >
+                <span class="deployment-action-wrap">
+                  <el-button :icon="Download" :disabled="isDeploymentLocked" @click="openDeployment(item)">下载部署</el-button>
+                </span>
+              </el-tooltip>
             </section>
           </div>
           <div class="resource-section">
             <div class="section-heading">
-              <div><h2>部署记录</h2><p>自动部署关闭时会返回手动执行指令；Linux GPU 服务器开启后会执行脚本并回写状态。</p></div>
+              <div><h2>部署记录</h2><p>部署页会自动刷新；失败时直接显示原因，完整输出可打开日志查看。</p></div>
+              <el-tag v-if="activeDeployments.length" type="warning">{{ activeDeployments.length }} 个任务进行中</el-tag>
             </div>
+            <el-alert
+              v-if="failedDeployments.length"
+              class="deployment-alert"
+              type="error"
+              show-icon
+              :closable="false"
+              :title="`${failedDeployments[0].display_name} 部署失败`"
+              :description="deploymentFailureText(failedDeployments[0])"
+            />
             <el-table :data="modelDeployments" :row-class-name="deploymentRowClassName">
               <el-table-column label="模型" min-width="180">
                 <template #default="{ row }">
@@ -475,10 +616,17 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
               <el-table-column prop="source" label="来源" width="110" />
               <el-table-column prop="base_url" label="服务地址" min-width="180" />
               <el-table-column label="状态" width="130">
-                <template #default="{ row }"><el-tag :type="row.status === 'failed' ? 'danger' : row.status === 'succeeded' ? 'success' : 'warning'">{{ row.status }}</el-tag></template>
+                <template #default="{ row }"><el-tag :type="deploymentStatusType(row.status)">{{ deploymentStatusLabel(row.status) }}</el-tag></template>
               </el-table-column>
-              <el-table-column label="进度" width="150"><template #default="{ row }"><el-progress :percentage="percent(row.progress)" /></template></el-table-column>
-              <el-table-column prop="log" label="日志" min-width="260" show-overflow-tooltip />
+              <el-table-column label="进度" width="150"><template #default="{ row }"><el-progress :percentage="percent(row.progress)" :status="deploymentProgressStatus(row)" /></template></el-table-column>
+              <el-table-column label="失败原因 / 最新日志" min-width="300" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span :class="{ 'deployment-log-error': row.status === 'failed' }">{{ deploymentLogPreview(row) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="日志" width="90">
+                <template #default="{ row }"><el-button link type="primary" @click="openDeploymentLog(row)">查看</el-button></template>
+              </el-table-column>
               <el-table-column label="创建时间" width="180"><template #default="{ row }">{{ date(row.created_at) }}</template></el-table-column>
             </el-table>
           </div>
@@ -541,7 +689,20 @@ onUnmounted(() => { if (resourceTimer) window.clearInterval(resourceTimer) })
         <el-form-item label="API Key（可选）"><el-input v-model="deploymentForm.api_key" type="password" show-password /></el-form-item>
         <el-form-item label="自动登记为模型节点"><el-switch v-model="deploymentForm.auto_register" /></el-form-item>
       </el-form>
-      <template #footer><el-button @click="deploymentDialog = false">取消</el-button><el-button type="primary" @click="createDeployment">创建部署任务</el-button></template>
+      <template #footer><el-button @click="deploymentDialog = false">取消</el-button><el-button type="primary" :loading="deploymentSubmitting" :disabled="isDeploymentLocked" @click="createDeployment">创建部署任务</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="deploymentLogDialog" :title="`部署日志 · ${selectedDeployment?.display_name || ''}`" width="860">
+      <el-alert
+        v-if="selectedDeployment && deploymentFailureText(selectedDeployment)"
+        class="deployment-alert"
+        :type="selectedDeployment.status === 'failed' ? 'error' : 'warning'"
+        show-icon
+        :closable="false"
+        :title="selectedDeployment.status === 'failed' ? '部署失败' : '部署提示'"
+        :description="deploymentFailureText(selectedDeployment)"
+      />
+      <div class="markdown-preview"><pre>{{ selectedDeployment?.log || '暂无日志' }}</pre></div>
+      <template #footer><el-button @click="deploymentLogDialog = false">关闭</el-button></template>
     </el-dialog>
     <el-dialog v-model="promptDialog" :title="editingPrompt ? '修改提示词版本' : '新增提示词版本'" width="680">
       <el-input v-model="promptBody" type="textarea" :rows="14" placeholder="请输入完整的 C 语言审查提示词..." />

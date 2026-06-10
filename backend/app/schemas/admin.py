@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -192,7 +192,7 @@ class ModelRuntimeMetricResponse(BaseModel):
 
 
 class ResourceSnapshotResponse(BaseModel):
-    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     system: SystemResourceResponse
     gpus: list[GpuDeviceResponse] = Field(default_factory=list)
     models: list[ModelRuntimeMetricResponse] = Field(default_factory=list)

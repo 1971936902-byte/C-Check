@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from time import monotonic
 
 from app.core.config import get_settings
@@ -18,7 +18,7 @@ def _elapsed_ms(started: float) -> int:
 
 
 def _append_model_log(current: str | None, entry: str) -> str:
-    timestamp = datetime.now(UTC).isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     combined = "\n\n".join(part for part in [current, f"[{timestamp}] {entry}"] if part)
     return truncate_model_log(combined) or ""
 
@@ -41,16 +41,14 @@ def _retry_instruction(attempt: int, exc: Exception) -> str:
     if _is_structured_output_audit_failure(exc):
         parts = [
             "The previous model output backend JSON schema audit failed.",
-            "Return exactly one complete JSON object only. Do not include Markdown, comments, prose, or extra keys.",
+            "Return exactly one smaller complete JSON object only. Do not include Markdown, comments, prose, or extra keys.",
             "The object must contain exactly: summary, score, findings. Every finding must match the required enum values and field types.",
-            "Return at most 8 findings and escape all quotes/newlines as valid JSON strings.",
+            "Return at most 3 findings. Keep descriptions, remediation, and snippets short. Escape all quotes/newlines as valid JSON strings.",
             f"Audit failure from attempt {attempt}:",
         ]
         if isinstance(exc, ModelInvocationError):
             if exc.details:
                 parts.append(f"Validation details:\n{exc.details}")
-            if exc.raw_response:
-                parts.append(f"Rejected raw response excerpt:\n{truncate_model_log(exc.raw_response, 3000)}")
         return truncate_model_log("\n\n".join(parts), 4000) or ""
     return truncate_model_log(_failure_log(attempt, exc), 4000) or ""
 
@@ -114,7 +112,7 @@ def run_review_task(task_id: str) -> None:
         task.progress = 10
         task.error_message = None
         task.model_log = None
-        task.started_at = datetime.now(UTC)
+        task.started_at = datetime.now(timezone.utc)
         if task.report is not None:
             db.delete(task.report)
         db.commit()
@@ -131,7 +129,7 @@ def run_review_task(task_id: str) -> None:
             task.finding_count = len(result.findings)
             task.error_message = None
             task.duration_ms = _elapsed_ms(started)
-            task.completed_at = datetime.now(UTC)
+            task.completed_at = datetime.now(timezone.utc)
             db.commit()
         except Exception as exc:
             db.rollback()
@@ -146,7 +144,7 @@ def run_review_task(task_id: str) -> None:
             task.finding_count = 0
             task.error_message = str(exc)[:1000] or exc.__class__.__name__
             task.duration_ms = _elapsed_ms(started)
-            task.completed_at = datetime.now(UTC)
+            task.completed_at = datetime.now(timezone.utc)
             db.commit()
 
 

@@ -24,6 +24,11 @@ TOKEN_BUDGET_PATTERN = re.compile(
     r"maximum context length is (?P<context>\d+) tokens and your request has (?P<input>\d+) input tokens",
     re.IGNORECASE,
 )
+VLLM_TOKEN_BUDGET_PATTERN = re.compile(
+    r"maximum context length is (?P<context>\d+) tokens\..*?requested (?P<requested>\d+) tokens "
+    r"\((?P<input>\d+) in the messages, (?P<completion>\d+) in the completion\)",
+    re.IGNORECASE,
+)
 RESPONSE_CONTRACT = """
 You must return exactly one JSON object and nothing else. Do not wrap it in Markdown.
 The JSON object must match this schema:
@@ -52,7 +57,7 @@ Use null for "line" only when the finding cannot be tied to a specific line.
 Use an empty findings array when no issue is found.
 All enum values must be lowercase exactly as listed.
 All strings must be valid JSON strings with escaped quotes and newlines.
-Return at most 8 findings. Prioritize high-risk and concrete C language defects.
+Return at most 5 findings. Prioritize high-risk and concrete C language defects.
 """
 
 
@@ -98,7 +103,7 @@ def _is_contract_object(value: Any) -> bool:
     return isinstance(value, dict) and RESPONSE_REQUIRED_KEYS.issubset(value)
 
 
-def _extract_json_object(content: str) -> str:
+def _strip_code_fence(content: str) -> str:
     stripped = content.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
@@ -107,6 +112,62 @@ def _extract_json_object(content: str) -> str:
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
+    return stripped
+
+
+def _find_json_array_start(content: str, key: str) -> int | None:
+    key_index = content.find(f'"{key}"')
+    if key_index < 0:
+        return None
+    colon_index = content.find(":", key_index)
+    if colon_index < 0:
+        return None
+    array_index = content.find("[", colon_index)
+    return array_index if array_index >= 0 else None
+
+
+def _recover_truncated_contract(content: str) -> str | None:
+    stripped = _strip_code_fence(content)
+    decoder = json.JSONDecoder()
+    summary_match = re.search(r'"summary"\s*:\s*', stripped)
+    score_match = re.search(r'"score"\s*:\s*', stripped)
+    findings_start = _find_json_array_start(stripped, "findings")
+    if summary_match is None or score_match is None or findings_start is None:
+        return None
+    try:
+        summary, _ = decoder.raw_decode(stripped[summary_match.end() :])
+        score, _ = decoder.raw_decode(stripped[score_match.end() :])
+    except json.JSONDecodeError:
+        return None
+
+    findings: list[dict[str, Any]] = []
+    index = findings_start + 1
+    while index < len(stripped):
+        while index < len(stripped) and stripped[index] in " \r\n\t,":
+            index += 1
+        if index >= len(stripped) or stripped[index] == "]":
+            break
+        if stripped[index] != "{":
+            index += 1
+            continue
+        try:
+            finding, end = decoder.raw_decode(stripped[index:])
+        except json.JSONDecodeError:
+            break
+        if isinstance(finding, dict):
+            findings.append(finding)
+        index += end
+
+    if not findings:
+        return None
+    return json.dumps(
+        {"summary": summary, "score": score, "findings": findings[:8]},
+        ensure_ascii=False,
+    )
+
+
+def _extract_json_object(content: str) -> str:
+    stripped = _strip_code_fence(content)
     if stripped.startswith("{") and stripped.endswith("}"):
         try:
             parsed = json.loads(stripped)
@@ -134,6 +195,9 @@ def _extract_json_object(content: str) -> str:
             if _is_contract_object(parsed):
                 return stripped[index : index + end]
     if found_partial_contract:
+        recovered = _recover_truncated_contract(stripped)
+        if recovered is not None:
+            return recovered
         raise ValueError(
             "model response contains a truncated top-level JSON object; no complete top-level JSON object with summary, score, and findings was found"
         )
@@ -159,9 +223,9 @@ def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
         ) from exc
 
 
-def _response_format(settings: Settings) -> dict[str, Any]:
+def _response_format(settings: Settings) -> dict[str, Any] | None:
     if not settings.model_structured_outputs_enabled:
-        return {"type": "json_object"}
+        return None
     return {
         "type": "json_schema",
         "json_schema": {
@@ -173,7 +237,7 @@ def _response_format(settings: Settings) -> dict[str, Any]:
 
 
 def _reduced_output_budget_from_error(error_text: str, current_max_tokens: int) -> int | None:
-    match = TOKEN_BUDGET_PATTERN.search(error_text)
+    match = TOKEN_BUDGET_PATTERN.search(error_text) or VLLM_TOKEN_BUDGET_PATTERN.search(error_text)
     if match is None:
         return None
     context_window = int(match.group("context"))
@@ -183,6 +247,14 @@ def _reduced_output_budget_from_error(error_text: str, current_max_tokens: int) 
         return None
     reduced = min(current_max_tokens - 1, available)
     return reduced if reduced >= MIN_RETRY_OUTPUT_TOKENS else None
+
+
+def _is_context_window_error(error_text: str) -> bool:
+    return bool(
+        TOKEN_BUDGET_PATTERN.search(error_text)
+        or VLLM_TOKEN_BUDGET_PATTERN.search(error_text)
+        or "maximum context length" in error_text.lower()
+    )
 
 
 async def invoke_model(
@@ -215,8 +287,10 @@ async def invoke_model(
         ],
         "temperature": 0,
         "max_tokens": settings.model_max_tokens,
-        "response_format": _response_format(settings),
     }
+    response_format = _response_format(settings)
+    if response_format is not None:
+        body["response_format"] = response_format
     try:
         async with httpx.AsyncClient(timeout=node.timeout_seconds) as client:
             for _ in range(2):
@@ -239,6 +313,8 @@ async def invoke_model(
                     details = str(exc)
                     if exc.response is not None:
                         details = f"{details}\nResponse body:\n{truncate_model_log(response_text, 4000)}"
+                    if _is_context_window_error(response_text):
+                        raise ModelInvocationError("model context window is too small for this review request", details=details) from exc
                     raise ModelInvocationError("selected model node is unavailable", details=details) from exc
                 payload = response.json()
                 break

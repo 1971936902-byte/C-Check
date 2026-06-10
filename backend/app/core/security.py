@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import jwt
 from pwdlib import PasswordHash
@@ -22,7 +22,7 @@ def create_access_token(
     secret: str,
     expires_delta: timedelta,
 ) -> str:
-    expires_at = datetime.now(UTC) + expires_delta
+    expires_at = datetime.now(timezone.utc) + expires_delta
     return jwt.encode(
         {"sub": subject, "exp": expires_at, "token_version": token_version},
         secret,

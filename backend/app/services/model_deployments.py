@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import threading
@@ -99,16 +100,17 @@ def create_model_deployment(
     source_repository = _source_repository(catalog, request)
     port = _deployment_port(catalog, request)
     base_url = _deployment_base_url(catalog, request)
+    api_key = request.api_key or settings.vllm_api_key
     node: ModelNode | None = None
     if request.auto_register:
         node = ModelNode(
             display_name=display_name,
             model_identifier=served_model_name,
             base_url=base_url,
-            api_key=request.api_key,
+            api_key=api_key,
             timeout_seconds=request.timeout_seconds,
-            is_enabled=True,
-            is_default=(db.scalar(select(ModelNode.id).where(ModelNode.is_default.is_(True))) is None),
+            is_enabled=False,
+            is_default=False,
             description=f"由模型部署任务自动登记：{source_repository}",
         )
         db.add(node)
@@ -189,8 +191,13 @@ def run_model_deployment(deployment_id: str, settings: Settings | None = None) -
 
         deployment.status = ModelDeploymentStatus.RUNNING
         deployment.progress = 20
+        deployment.error_message = None
         deployment.log = _append_log(deployment.log, "Starting model deployment script.")
         db.commit()
+
+    env = os.environ.copy()
+    if settings.vllm_api_key:
+        env["VLLM_API_KEY"] = settings.vllm_api_key
 
     process = subprocess.run(
         deployment_command(deployment, settings),
@@ -198,6 +205,7 @@ def run_model_deployment(deployment_id: str, settings: Settings | None = None) -
         capture_output=True,
         check=False,
         timeout=24 * 60 * 60,
+        env=env,
     )
 
     with SessionLocal() as db:
@@ -210,6 +218,14 @@ def run_model_deployment(deployment_id: str, settings: Settings | None = None) -
         if process.returncode == 0:
             deployment.status = ModelDeploymentStatus.SUCCEEDED
             deployment.error_message = None
+            if deployment.model_node is not None:
+                for node in db.scalars(select(ModelNode).where(ModelNode.id != deployment.model_node.id)).all():
+                    node.is_enabled = False
+                    node.is_default = False
+                if not deployment.model_node.api_key and settings.vllm_api_key:
+                    deployment.model_node.api_key = settings.vllm_api_key
+                deployment.model_node.is_enabled = True
+                deployment.model_node.is_default = True
         else:
             deployment.status = ModelDeploymentStatus.FAILED
             deployment.error_message = f"deployment script exited with {process.returncode}"

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_admin
 from app.core.security import hash_password
-from app.db.models import ModelDeployment, ModelNode, PromptVersion, ReviewTask, TaskStatus, User
+from app.db.models import ModelDeployment, ModelDeploymentStatus, ModelNode, PromptVersion, ReviewTask, TaskStatus, User
 from app.db.session import get_db
 from app.schemas.admin import (
     AdminModelNodeResponse,
@@ -265,6 +265,16 @@ def create_deployment(
     admin: Annotated[User, Depends(require_admin)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ModelDeployment:
+    active_deployment = db.scalar(
+        select(ModelDeployment.id).where(
+            ModelDeployment.status.in_([ModelDeploymentStatus.QUEUED, ModelDeploymentStatus.RUNNING])
+        )
+    )
+    if active_deployment:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="已有模型正在部署，请等待本次部署完成或失败后再创建新任务",
+        )
     try:
         deployment = create_model_deployment(db, request, admin, settings)
     except ValueError as exc:
