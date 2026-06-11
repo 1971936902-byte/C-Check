@@ -98,6 +98,47 @@ def test_parse_response_normalizes_null_snippet_line_to_finding_line():
     assert parsed.findings[0].fixed_snippet[0].line == 114
 
 
+def test_parse_response_normalizes_unknown_snippet_kind_to_context():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "存在一个说明性修复建议。",
+                                "score": 90,
+                                "findings": [
+                                    {
+                                        "severity": "low",
+                                        "category": "logic",
+                                        "title": "补充说明",
+                                        "description": "模型把注释行标记成 comment。",
+                                        "file_path": "src/misc.c",
+                                        "line": 114,
+                                        "remediation": "将说明性行按上下文展示。",
+                                        "code_snippet": [],
+                                        "fixed_snippet": [
+                                            {
+                                                "line": 114,
+                                                "content": "/* 初始化变量 */",
+                                                "kind": "comment",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    assert parsed.findings[0].fixed_snippet[0].kind.value == "context"
+
+
 def test_parse_response_rejects_nested_finding_from_truncated_response():
     content = """
 {

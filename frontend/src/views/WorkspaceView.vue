@@ -17,6 +17,8 @@ const source = ref('')
 const singleFile = ref<File>()
 const archiveFile = ref<File>()
 const folderFiles = ref<File[]>([])
+const singleFileInput = ref<HTMLInputElement>()
+const archiveFileInput = ref<HTMLInputElement>()
 const folderInput = ref<HTMLInputElement>()
 const tasks = ref<ReviewTask[]>([])
 const selectedTaskId = ref('')
@@ -154,16 +156,45 @@ function ensurePolling() {
   if (activeTasks.value.length) timer = window.setInterval(poll, 1400)
 }
 
-function setFile(target: 'file' | 'archive', file: { raw: File }) {
-  if (target === 'file') singleFile.value = file.raw
-  else archiveFile.value = file.raw
-}
 function clearFile(target: 'file' | 'archive') {
-  if (target === 'file') singleFile.value = undefined
-  else archiveFile.value = undefined
+  if (target === 'file') {
+    singleFile.value = undefined
+    if (singleFileInput.value) singleFileInput.value.value = ''
+  } else {
+    archiveFile.value = undefined
+    if (archiveFileInput.value) archiveFileInput.value.value = ''
+  }
 }
-function setSingleFile(file: { raw: File }) { setFile('file', file) }
-function setArchiveFile(file: { raw: File }) { setFile('archive', file) }
+function chooseSingleFile() { singleFileInput.value?.click() }
+function chooseArchiveFile() { archiveFileInput.value?.click() }
+function setNativeFile(target: 'file' | 'archive', event: Event) {
+  const input = event.target as HTMLInputElement
+  const selected = input.files?.[0]
+  if (!selected) return
+  setSelectedFile(target, selected)
+  input.value = ''
+}
+function setDroppedFile(target: 'file' | 'archive', event: DragEvent) {
+  const selected = event.dataTransfer?.files?.[0]
+  if (!selected) return
+  setSelectedFile(target, selected)
+}
+function setSelectedFile(target: 'file' | 'archive', selected: File) {
+  const name = selected.name.toLowerCase()
+  if (target === 'file' && !name.endsWith('.c') && !name.endsWith('.h')) {
+    ElMessage.warning('请选择 .c / .h 文件')
+    return
+  }
+  if (target === 'archive' && !name.endsWith('.zip')) {
+    ElMessage.warning('请选择 .zip 压缩包')
+    return
+  }
+  if (target === 'file') {
+    singleFile.value = selected
+  } else {
+    archiveFile.value = selected
+  }
+}
 function toggleAllChecks(value: boolean) { checkTypes.value = value ? ALL_CHECK_TYPES.map((item) => item.value) : [] }
 function isCSourceFile(file: File) {
   const name = (file.webkitRelativePath || file.name).toLowerCase()
@@ -368,21 +399,44 @@ async function pinTask(target: ReviewTask) {
           </el-tab-pane>
           <el-tab-pane name="file">
             <template #label><el-icon><UploadFilled /></el-icon> 单文件</template>
-            <el-upload drag :auto-upload="false" :limit="1" accept=".c,.h" :on-change="setSingleFile" :on-remove="() => clearFile('file')">
-              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
-              <div>拖入或点击选择单个 <b>.c / .h</b> 文件</div>
-            </el-upload>
+            <input
+              ref="singleFileInput"
+              class="folder-native-input"
+              type="file"
+              accept=".c,.h"
+              @change="setNativeFile('file', $event)"
+            />
+            <button type="button" class="folder-picker" @dragover.prevent @drop.prevent="setDroppedFile('file', $event)" @click="chooseSingleFile">
+              <el-icon><UploadFilled /></el-icon>
+              <strong>拖入或点击选择单个 .c / .h 文件</strong>
+              <span>选择后可继续提交为新的排队任务</span>
+            </button>
             <div v-if="singleFile" class="file-preview-row">
               <span>{{ singleFile.name }}</span>
-              <el-button size="small" plain :icon="View" @click="previewSingleFile">预览代码</el-button>
+              <div>
+                <el-button size="small" plain :icon="View" @click="previewSingleFile">预览代码</el-button>
+                <el-button size="small" plain @click="clearFile('file')">清空</el-button>
+              </div>
             </div>
           </el-tab-pane>
           <el-tab-pane name="archive">
             <template #label><el-icon><FolderOpened /></el-icon> 项目压缩包</template>
-            <el-upload drag :auto-upload="false" :limit="1" accept=".zip" :on-change="setArchiveFile" :on-remove="() => clearFile('archive')">
-              <el-icon class="el-icon--upload"><FolderOpened /></el-icon>
-              <div>拖入或点击选择 <b>.zip</b> 项目压缩包</div>
-            </el-upload>
+            <input
+              ref="archiveFileInput"
+              class="folder-native-input"
+              type="file"
+              accept=".zip"
+              @change="setNativeFile('archive', $event)"
+            />
+            <button type="button" class="folder-picker" @dragover.prevent @drop.prevent="setDroppedFile('archive', $event)" @click="chooseArchiveFile">
+              <el-icon><FolderOpened /></el-icon>
+              <strong>拖入或点击选择 .zip 项目压缩包</strong>
+              <span>选择后可继续提交为新的排队任务</span>
+            </button>
+            <div v-if="archiveFile" class="file-preview-row">
+              <span>{{ archiveFile.name }}</span>
+              <el-button size="small" plain @click="clearFile('archive')">清空</el-button>
+            </div>
           </el-tab-pane>
           <el-tab-pane name="folder">
             <template #label><el-icon><FolderOpened /></el-icon> 项目文件夹</template>

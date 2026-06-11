@@ -376,6 +376,8 @@ def _normalize_model_contract(value: Any) -> Any:
             for line in snippet:
                 if not isinstance(line, dict):
                     continue
+                if line.get("kind") not in {"context", "removed", "added"}:
+                    line = {**line, "kind": "context"}
                 if line.get("line") is None:
                     if fallback_line is None:
                         continue
