@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -20,6 +21,8 @@ RESPONSE_REQUIRED_KEYS = {"summary", "score", "findings"}
 STRUCTURED_RESPONSE_SCHEMA_NAME = "c_review_response"
 TOKEN_BUDGET_SAFETY_MARGIN = 128
 MIN_RETRY_OUTPUT_TOKENS = 128
+CHUNK_LINE_PREFIX_WIDTH = 6
+SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "suggestion": 3}
 TOKEN_BUDGET_PATTERN = re.compile(
     r"maximum context length is (?P<context>\d+) tokens and your request has (?P<input>\d+) input tokens",
     re.IGNORECASE,
@@ -76,6 +79,15 @@ class ModelInvocationError(RuntimeError):
         self.details = details
 
 
+@dataclass(frozen=True)
+class ChunkedReviewFile:
+    relative_path: str
+    source_text: str
+    size_bytes: int
+    start_line: int
+    end_line: int
+
+
 def _mock_response(files: Sequence[ReviewFile]) -> ModelReviewResponse:
     return ModelReviewResponse(
         summary=f"Mock review completed for {len(files)} source file(s).",
@@ -89,6 +101,142 @@ def _source_message(files: Sequence[ReviewFile]) -> str:
     for source in files:
         sections.append(f"===== FILE: {source.relative_path} =====\n{source.source_text}")
     return "\n\n".join(sections)
+
+
+def _numbered_chunk_source(source_text: str, start_line: int, end_line: int) -> str:
+    lines = source_text.splitlines()
+    selected = lines[start_line - 1 : end_line]
+    return "\n".join(
+        f"{line_number:0{CHUNK_LINE_PREFIX_WIDTH}d}: {line}"
+        for line_number, line in enumerate(selected, start=start_line)
+    )
+
+
+def _chunk_file(source: ReviewFile, max_chars: int) -> list[ChunkedReviewFile]:
+    lines = source.source_text.splitlines()
+    if not lines:
+        return [
+            ChunkedReviewFile(
+                relative_path=source.relative_path,
+                source_text=source.source_text,
+                size_bytes=source.size_bytes,
+                start_line=1,
+                end_line=1,
+            )
+        ]
+
+    chunks: list[ChunkedReviewFile] = []
+    current_lines: list[str] = []
+    current_chars = 0
+    start_line = 1
+    end_line = 1
+    payload_budget = max(1, max_chars - CHUNK_LINE_PREFIX_WIDTH - 3)
+
+    def flush() -> None:
+        nonlocal current_lines, current_chars, start_line, end_line
+        if not current_lines:
+            return
+        chunks.append(
+            ChunkedReviewFile(
+                relative_path=source.relative_path,
+                source_text="\n".join(current_lines),
+                size_bytes=0,
+                start_line=start_line,
+                end_line=end_line,
+            )
+        )
+        current_lines = []
+        current_chars = 0
+
+    for line_number, line in enumerate(lines, start=1):
+        segments = [line[index : index + payload_budget] for index in range(0, len(line), payload_budget)] or [""]
+        for segment in segments:
+            rendered = f"{line_number:0{CHUNK_LINE_PREFIX_WIDTH}d}: {segment}"
+            rendered_chars = len(rendered) + 1
+            if current_lines and current_chars + rendered_chars > max_chars:
+                flush()
+            if not current_lines:
+                start_line = line_number
+            current_lines.append(rendered)
+            current_chars += rendered_chars
+            end_line = line_number
+
+    flush()
+    return chunks
+
+
+def _chunk_review_files(files: Sequence[ReviewFile], settings: Settings) -> list[ChunkedReviewFile]:
+    chunks: list[ChunkedReviewFile] = []
+    for source in files:
+        chunks.extend(_chunk_file(source, settings.model_chunk_max_chars))
+    return chunks
+
+
+def _should_chunk(files: Sequence[ReviewFile], settings: Settings) -> bool:
+    return len(_source_message(files)) > settings.model_chunk_max_chars
+
+
+def _chunk_prompt(prompt: str, chunk_index: int, chunk_count: int, chunk: ChunkedReviewFile) -> str:
+    return (
+        f"{prompt}\n\n"
+        "The submitted code is being reviewed in chunks because it is too large for one model "
+        "context window. Review only this chunk and report concrete issues visible in this "
+        "chunk. Each source line is prefixed as `000123: code`; use the numeric prefix as the "
+        "`line` value and keep `file_path` as the original file path.\n"
+        f"Chunk {chunk_index} of {chunk_count}: {chunk.relative_path}, lines "
+        f"{chunk.start_line}-{chunk.end_line}."
+    )
+
+
+def _merged_score(results: Sequence[ModelReviewResponse]) -> float:
+    if not results:
+        return 100
+    if any(result.findings for result in results):
+        return max(0, min(result.score for result in results))
+    return round(sum(result.score for result in results) / len(results), 2)
+
+
+def _merge_chunk_results(results: Sequence[ModelReviewResponse]) -> ModelReviewResponse:
+    findings = [finding for result in results for finding in result.findings]
+    findings.sort(
+        key=lambda finding: (
+            SEVERITY_RANK.get(finding.severity.value, 99),
+            finding.file_path,
+            finding.line or 10**9,
+        )
+    )
+    kept = findings[:8]
+    if kept:
+        summary = f"分片审查完成，共发现 {len(findings)} 个问题，报告展示优先级最高的 {len(kept)} 个。"
+    else:
+        summary = "分片审查完成，未发现明确问题。"
+    return ModelReviewResponse(summary=summary, score=_merged_score(results), findings=kept)
+
+
+async def _invoke_chunked_review(
+    *,
+    node: ModelNode,
+    files: Sequence[ReviewFile],
+    prompt: str,
+    settings: Settings,
+    retry_instruction: str | None = None,
+    chunk_max_chars: int | None = None,
+) -> ModelReviewResponse:
+    if chunk_max_chars is not None:
+        settings = settings.model_copy(update={"model_chunk_max_chars": chunk_max_chars})
+    chunks = _chunk_review_files(files, settings)
+    results = []
+    for index, chunk in enumerate(chunks, start=1):
+        results.append(
+            await invoke_model(
+                node=node,
+                files=[chunk],  # type: ignore[list-item]
+                prompt=_chunk_prompt(prompt, index, len(chunks), chunk),
+                retry_instruction=retry_instruction,
+                settings=settings,
+            )
+        )
+    return _merge_chunk_results(results)
 
 
 def truncate_model_log(value: str | None, limit: int = MAX_MODEL_LOG_CHARS) -> str | None:
@@ -338,12 +486,34 @@ async def invoke_selected_model(
         raise ModelInvocationError("review task does not exist")
     prompt = get_active_prompt(db)
     scoped_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
-    return await invoke_model(
-        node=task.model_node,
-        files=task.files,
-        prompt=scoped_prompt,
-        retry_instruction=retry_instruction,
-    )
+    settings = get_settings()
+    if _should_chunk(task.files, settings):
+        return await _invoke_chunked_review(
+            node=task.model_node,
+            files=task.files,
+            prompt=scoped_prompt,
+            retry_instruction=retry_instruction,
+            settings=settings,
+        )
+    try:
+        return await invoke_model(
+            node=task.model_node,
+            files=task.files,
+            prompt=scoped_prompt,
+            retry_instruction=retry_instruction,
+            settings=settings,
+        )
+    except ModelInvocationError as exc:
+        if "context window is too small" not in str(exc):
+            raise
+        return await _invoke_chunked_review(
+            node=task.model_node,
+            files=task.files,
+            prompt=scoped_prompt,
+            retry_instruction=retry_instruction,
+            settings=settings,
+            chunk_max_chars=max(1000, settings.model_chunk_max_chars // 2),
+        )
 
 
 async def check_model_health(node: ModelNode, settings: Settings | None = None) -> dict[str, Any]:

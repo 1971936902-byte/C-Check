@@ -5,8 +5,17 @@ import httpx
 import pytest
 
 from app.db.models import ModelNode, ReviewFile
-from app.schemas.model_response import FindingCategory
-from app.services.model_router import ModelInvocationError, _parse_response, invoke_model
+from app.core.config import Settings
+from app.schemas.model_response import FindingCategory, ModelReviewResponse
+from app.services.model_router import (
+    ModelInvocationError,
+    _chunk_file,
+    _chunk_review_files,
+    _merge_chunk_results,
+    _parse_response,
+    invoke_selected_model,
+    invoke_model,
+)
 
 
 def test_parse_response_accepts_json_inside_markdown_fence():
@@ -183,6 +192,7 @@ def test_invoke_model_requests_json_schema_structured_output(monkeypatch):
                 )
             ],
             prompt="review",
+            settings=Settings(model_structured_outputs_enabled=True, allow_insecure_defaults=True),
         )
     )
 
@@ -338,3 +348,131 @@ def test_finding_category_accepts_frontend_check_type_values():
     assert FindingCategory.BUFFER_OVERFLOW.value == "buffer_overflow"
     assert FindingCategory.INTEGER_SAFETY.value == "integer_safety"
     assert FindingCategory.MAINTAINABILITY.value == "maintainability"
+
+
+def test_chunk_file_preserves_original_line_numbers():
+    chunks = _chunk_file(
+        ReviewFile(
+            relative_path="large.c",
+            source_text="\n".join(f"int value_{index};" for index in range(1, 8)),
+            size_bytes=120,
+        ),
+        max_chars=45,
+    )
+
+    assert len(chunks) > 1
+    assert chunks[0].source_text.startswith("000001: int value_1;")
+    assert chunks[1].source_text.startswith(f"{chunks[1].start_line:06d}:")
+    assert chunks[-1].end_line == 7
+
+
+def test_chunk_review_files_does_not_reject_large_batches():
+    files = [
+        ReviewFile(
+            relative_path=f"file_{index}.c",
+            source_text="int main(void) { return 0; }\n" * 4,
+            size_bytes=120,
+        )
+        for index in range(12)
+    ]
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        model_chunk_max_chars=60,
+        model_chunk_max_count=2,
+    )
+
+    chunks = _chunk_review_files(files, settings)
+
+    assert len(chunks) > settings.model_chunk_max_count
+    assert {chunk.relative_path for chunk in chunks} == {file.relative_path for file in files}
+
+
+def test_merge_chunk_results_keeps_highest_priority_findings():
+    finding = {
+        "category": "memory_safety",
+        "description": "description",
+        "file_path": "main.c",
+        "line": 1,
+        "remediation": "remediation",
+        "code_snippet": [],
+        "fixed_snippet": [],
+    }
+    low_result = ModelReviewResponse.model_validate(
+        {
+            "summary": "low",
+            "score": 90,
+            "findings": [
+                {**finding, "severity": "low", "title": f"low-{index}", "line": index}
+                for index in range(1, 9)
+            ],
+        }
+    )
+    high_result = ModelReviewResponse.model_validate(
+        {
+            "summary": "high",
+            "score": 40,
+            "findings": [{**finding, "severity": "high", "title": "high", "line": 99}],
+        }
+    )
+
+    merged = _merge_chunk_results([low_result, high_result])
+
+    assert merged.score == 40
+    assert len(merged.findings) == 8
+    assert merged.findings[0].severity.value == "high"
+    assert merged.findings[0].title == "high"
+
+
+def test_invoke_selected_model_keeps_chunking_on_retry_instruction(monkeypatch, db_session_factory):
+    from app.core.security import hash_password
+    from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+
+    calls: list[tuple[int, str | None]] = []
+
+    async def fake_invoke_model(*, files, retry_instruction=None, **_kwargs):
+        calls.append((len(files), retry_instruction))
+        return ModelReviewResponse(summary="ok", score=100, findings=[])
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr("app.services.model_router.get_settings", lambda: Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        model_chunk_max_chars=80,
+        model_chunk_max_count=20,
+    ))
+
+    with db_session_factory() as db:
+        user = User(username="chunker", password_hash=hash_password("chunker-password"))
+        node = ModelNode(
+            display_name="Review node",
+            model_identifier="review-model",
+            base_url="http://model-node",
+            is_enabled=True,
+        )
+        task = ReviewTask(
+            owner=user,
+            model_node=node,
+            input_mode="text",
+            display_name="large.c",
+            file_count=1,
+            check_types=["logic"],
+        )
+        task.files.append(
+            ReviewFile(
+                relative_path="large.c",
+                source_text="\n".join(f"int value_{index};" for index in range(20)),
+                size_bytes=320,
+            )
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    with db_session_factory() as db:
+        result = asyncio.run(invoke_selected_model(db, task_id, retry_instruction="previous chunk failed"))
+
+    assert result.summary.startswith("分片审查完成")
+    assert len(calls) > 1
+    assert all(file_count == 1 for file_count, _ in calls)
+    assert all(retry_instruction == "previous chunk failed" for _, retry_instruction in calls)
