@@ -55,6 +55,14 @@ export const reviewApi = {
     const body = new FormData(); body.append('model_node_id', modelNodeId); body.append('file', file); body.append('check_types', JSON.stringify(checkTypes))
     return api.post<ReviewTask>(`/reviews/${mode}`, body)
   },
+  submitFolder: (modelNodeId: string, files: File[], checkTypes: string[]) => {
+    if (MOCK_API_ENABLED) return mockApi.reviews.submitFile('archive', modelNodeId, files[0], checkTypes)
+    const body = new FormData()
+    body.append('model_node_id', modelNodeId)
+    body.append('check_types', JSON.stringify(checkTypes))
+    files.forEach((file) => body.append('files', file, file.webkitRelativePath || file.name))
+    return api.post<ReviewTask>('/reviews/folder', body)
+  },
   submitDemoArchive: (checkTypes: string[]) => mockApi.reviews.submitDemoArchive(checkTypes),
   list: (params?: Record<string, unknown>) => MOCK_API_ENABLED ? mockApi.reviews.list(params) : api.get<ReviewTaskPage>('/reviews', { params }),
   get: (id: string) => MOCK_API_ENABLED ? mockApi.reviews.get(id) : api.get<ReviewTask>(`/reviews/${id}`),

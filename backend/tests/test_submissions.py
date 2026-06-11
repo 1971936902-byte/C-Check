@@ -236,12 +236,34 @@ def test_collect_archive_rejects_only_empty_source_files():
         collect_archive_submission("sources.zip", archive, Settings(_env_file=None))
 
 
-def test_collect_archive_maps_invalid_utf8_source_to_submission_error():
+def test_collect_archive_accepts_gbk_encoded_source():
+    from app.services.submissions import collect_archive_submission
+
+    gbk_source = b"int \xd6\xb5 = 1;"
+    archive = make_zip([("src/gbk.c", gbk_source, None)])
+
+    submission = collect_archive_submission("sources.zip", archive, Settings(_env_file=None))
+
+    assert submission.files[0].source_text == gbk_source.decode("gbk")
+
+
+def test_collect_archive_accepts_big5_encoded_source():
+    from app.services.submissions import collect_archive_submission
+
+    big5_source = "/* 繁體中文測試 */\nint main(void) { return 0; }".encode("big5")
+    archive = make_zip([("src/big5.c", big5_source, None)])
+
+    submission = collect_archive_submission("sources.zip", archive, Settings(_env_file=None))
+
+    assert "繁體中文測試" in submission.files[0].source_text
+
+
+def test_collect_archive_rejects_unknown_text_encoding():
     from app.services.submissions import SubmissionError, collect_archive_submission
 
-    archive = make_zip([("invalid.c", b"\xff", None)])
+    archive = make_zip([("invalid.c", b"\xff\xff\xff", None)])
 
-    with pytest.raises(SubmissionError, match="UTF-8"):
+    with pytest.raises(SubmissionError, match="text encoding"):
         collect_archive_submission("sources.zip", archive, Settings(_env_file=None))
 
 
@@ -326,6 +348,31 @@ def test_file_and_archive_endpoints_accept_valid_uploads(db_session_factory):
 
     assert file_response.status_code == 201
     assert archive_response.status_code == 201
+
+
+def test_folder_endpoint_accepts_nested_c_files(db_session_factory):
+    from app.main import app
+
+    user_id, _, node_id = add_user_and_node(db_session_factory)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/reviews/folder",
+            headers=auth_headers(user_id),
+            data={"model_node_id": node_id, "check_types": '["logic"]'},
+            files=[
+                ("files", ("project/src/main.c", b"int main(void) {}", "text/plain")),
+                ("files", ("project/include/main.h", b"#pragma once", "text/plain")),
+                ("files", ("project/README.md", b"notes", "text/plain")),
+            ],
+        )
+
+    assert response.status_code == 201
+    assert response.json()["input_mode"] == "folder"
+    assert response.json()["file_count"] == 2
+    with db_session_factory() as db:
+        files = db.scalars(select(ReviewFile).where(ReviewFile.task_id == response.json()["id"])).all()
+    assert [source.relative_path for source in files] == ["project/src/main.c", "project/include/main.h"]
 
 
 def test_submission_rejects_missing_or_disabled_model_node(db_session_factory):

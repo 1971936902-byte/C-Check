@@ -17,6 +17,7 @@ from app.services.submissions import (
     SubmissionError,
     collect_archive_submission,
     collect_file_submission,
+    collect_folder_submission,
     collect_text_submission,
     create_review_task,
 )
@@ -111,6 +112,26 @@ async def submit_archive(
         if len(content) > settings.upload_max_archive_bytes:
             raise SubmissionError("zip archive exceeds upload size limit")
         submission = collect_archive_submission(file.filename or "", content, settings)
+    except SubmissionError as exc:
+        raise _unprocessable(exc) from exc
+    return _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+
+
+@router.post("/folder", response_model=ReviewTaskResponse, status_code=status.HTTP_201_CREATED)
+async def submit_folder(
+    model_node_id: Annotated[str, Form(min_length=1, max_length=36)],
+    check_types: Annotated[str, Form()],
+    files: Annotated[list[UploadFile], File()],
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ReviewTask:
+    try:
+        submitted = []
+        for file in files:
+            content = await file.read(settings.upload_max_file_bytes + 1)
+            submitted.append((file.filename or "", content))
+        submission = collect_folder_submission(submitted, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
     return _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))

@@ -14,6 +14,14 @@ from app.services.check_types import validate_check_types
 
 
 ALLOWED_SOURCE_EXTENSIONS = {".c", ".h"}
+SOURCE_TEXT_ENCODINGS = ("gb18030", "gbk", "big5", "cp950", "cp1252", "latin-1")
+TEXT_BOMS: tuple[tuple[bytes, str], ...] = (
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xff\xfe\x00\x00", "utf-32-le"),
+    (b"\x00\x00\xfe\xff", "utf-32-be"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+)
 
 
 class SubmissionError(ValueError):
@@ -52,11 +60,86 @@ def dispatch_review(task_id: str) -> None:
             db.commit()
 
 
-def _decode_source(content: bytes) -> str:
+def _cjk_score(value: str) -> int:
+    return sum(1 for char in value if "\u4e00" <= char <= "\u9fff")
+
+
+def _suspicious_mojibake_score(value: str) -> int:
+    return sum(1 for char in value if "\u0300" <= char <= "\u05ff" or char == "\ufffd")
+
+
+def _kana_score(value: str) -> int:
+    return sum(1 for char in value if "\u3040" <= char <= "\u30ff")
+
+
+def _decoded_text_score(value: str) -> tuple[int, int, int, int]:
+    return (
+        -value.count("\x00"),
+        -_suspicious_mojibake_score(value),
+        -_kana_score(value),
+        _cjk_score(value),
+    )
+
+
+def _decode_without_loss(content: bytes, encoding: str) -> str | None:
     try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise SubmissionError("source files must use UTF-8 encoding") from exc
+        return content.decode(encoding)
+    except (UnicodeDecodeError, UnicodeError):
+        return None
+
+
+def _charset_normalizer_guess(content: bytes) -> str | None:
+    try:
+        from charset_normalizer import from_bytes
+    except ImportError:
+        return None
+
+    match = from_bytes(content).best()
+    if match is None or match.encoding is None:
+        return None
+    return _decode_without_loss(content, match.encoding)
+
+
+def _looks_like_utf16(content: bytes, *, little_endian: bool) -> bool:
+    if len(content) < 4:
+        return False
+    nul_bytes = content[1::2] if little_endian else content[0::2]
+    return nul_bytes.count(0) > max(2, len(content) // 8)
+
+
+def _decode_source(content: bytes) -> str:
+    for marker, encoding in TEXT_BOMS:
+        if content.startswith(marker):
+            decoded = _decode_without_loss(content, encoding)
+            if decoded is not None:
+                return decoded
+
+    decoded = _decode_without_loss(content, "utf-8")
+    if decoded is not None:
+        return decoded
+
+    if _looks_like_utf16(content, little_endian=True):
+        decoded = _decode_without_loss(content, "utf-16-le")
+        if decoded is not None:
+            return decoded
+    if _looks_like_utf16(content, little_endian=False):
+        decoded = _decode_without_loss(content, "utf-16-be")
+        if decoded is not None:
+            return decoded
+
+    decoded = _charset_normalizer_guess(content)
+    if decoded is not None:
+        return decoded
+
+    candidates: list[tuple[tuple[int, int, int, int], int, str]] = []
+    for index, encoding in enumerate(SOURCE_TEXT_ENCODINGS):
+        decoded = _decode_without_loss(content, encoding)
+        if decoded is None:
+            continue
+        candidates.append((_decoded_text_score(decoded), -index, decoded))
+    if candidates:
+        return max(candidates)[2]
+    raise SubmissionError("source files must use a supported text encoding")
 
 
 def _require_source_extension(filename: str) -> None:
@@ -179,6 +262,50 @@ def collect_archive_submission(filename: str, content: bytes, settings: Settings
     if not has_source_content:
         raise SubmissionError("archive source files must not all be empty")
     return Submission(input_mode="archive", display_name=filename, files=submitted_files)
+
+
+def collect_folder_submission(files: list[tuple[str, bytes]], settings: Settings) -> Submission:
+    if not files:
+        raise SubmissionError("folder submission contains no files")
+
+    submitted_files: list[SubmittedFile] = []
+    total_size = 0
+    seen_paths: set[str] = set()
+    has_source_content = False
+    root_name = "selected-folder"
+
+    for index, (filename, content) in enumerate(files, start=1):
+        if index > settings.upload_max_archive_entries:
+            raise SubmissionError("folder contains too many entries")
+        relative_path = _safe_archive_path(filename, settings)
+        if relative_path in seen_paths:
+            raise SubmissionError("folder contains duplicate paths")
+        seen_paths.add(relative_path)
+        if PurePosixPath(relative_path).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
+            continue
+        if "/" in relative_path:
+            root_name = relative_path.split("/", 1)[0] or root_name
+        _require_size_limit(len(content), settings)
+        total_size += len(content)
+        if total_size > settings.upload_max_extracted_bytes:
+            raise SubmissionError("folder total source size exceeds limit")
+        if len(submitted_files) >= settings.upload_max_files:
+            raise SubmissionError("folder contains too many source files")
+        source_text = _decode_source(content)
+        has_source_content = has_source_content or bool(source_text.strip())
+        submitted_files.append(
+            SubmittedFile(
+                relative_path=relative_path,
+                source_text=source_text,
+                size_bytes=len(content),
+            )
+        )
+
+    if not submitted_files:
+        raise SubmissionError("folder contains no C source files")
+    if not has_source_content:
+        raise SubmissionError("folder source files must not all be empty")
+    return Submission(input_mode="folder", display_name=root_name, files=submitted_files)
 
 
 def create_review_task(

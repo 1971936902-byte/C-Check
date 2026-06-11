@@ -1,4 +1,4 @@
-export type InputMode = 'text' | 'file' | 'archive'
+export type InputMode = 'text' | 'file' | 'archive' | 'folder'
 
 export function activeUpload(mode: InputMode, singleFile?: File, archiveFile?: File) {
   if (mode === 'file') return singleFile
@@ -11,8 +11,11 @@ export function hasReviewInput(
   sourceText: string,
   singleFile?: File,
   archiveFile?: File,
+  folderFiles: File[] = [],
 ) {
-  return mode === 'text' ? Boolean(sourceText.trim()) : Boolean(activeUpload(mode, singleFile, archiveFile))
+  if (mode === 'text') return Boolean(sourceText.trim())
+  if (mode === 'folder') return folderFiles.length > 0
+  return Boolean(activeUpload(mode, singleFile, archiveFile))
 }
 
 export function canSubmitReview(input: {
@@ -21,11 +24,12 @@ export function canSubmitReview(input: {
   sourceText: string
   singleFile?: File
   archiveFile?: File
+  folderFiles?: File[]
   checkTypes: string[]
 }) {
   return Boolean(
     input.selectedModel
     && input.checkTypes.length
-    && hasReviewInput(input.mode, input.sourceText, input.singleFile, input.archiveFile),
+    && hasReviewInput(input.mode, input.sourceText, input.singleFile, input.archiveFile, input.folderFiles || []),
   )
 }

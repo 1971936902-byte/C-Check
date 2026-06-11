@@ -16,7 +16,9 @@ describe('activeUpload', () => {
     expect(hasReviewInput('text', '   ', single, archive)).toBe(false)
     expect(hasReviewInput('file', '', single, archive)).toBe(true)
     expect(hasReviewInput('archive', '', single, archive)).toBe(true)
+    expect(hasReviewInput('folder', '', single, archive, [single])).toBe(true)
     expect(hasReviewInput('file', '', undefined, archive)).toBe(false)
+    expect(hasReviewInput('folder', '', single, archive, [])).toBe(false)
   })
 
   it('requires a model, check type, and content before submission', () => {

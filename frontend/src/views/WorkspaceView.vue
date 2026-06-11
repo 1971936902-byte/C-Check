@@ -16,6 +16,8 @@ const mode = ref<InputMode>('text')
 const source = ref('')
 const singleFile = ref<File>()
 const archiveFile = ref<File>()
+const folderFiles = ref<File[]>([])
+const folderInput = ref<HTMLInputElement>()
 const task = ref<ReviewTask>()
 const submitting = ref(false)
 const logVisible = ref(false)
@@ -29,6 +31,8 @@ const checkTypes = ref<string[]>(ALL_CHECK_TYPES.map((item) => item.value))
 let timer: number | undefined
 
 const upload = computed(() => activeUpload(mode.value, singleFile.value, archiveFile.value))
+const folderSourceFiles = computed(() => folderFiles.value.filter(isCSourceFile))
+const folderTotalBytes = computed(() => folderSourceFiles.value.reduce((total, file) => total + file.size, 0))
 const highlightedSourcePreview = computed(() => sourcePreviewText.value
   ? sourcePreviewText.value.split('\n').map((line, index) => (
     `<div class="code-preview-line"><span class="code-preview-line-number">${index + 1}</span><code>${highlightCLine(line)}</code></div>`
@@ -40,14 +44,17 @@ const canSubmit = computed(() => canSubmitReview({
   sourceText: source.value,
   singleFile: singleFile.value,
   archiveFile: archiveFile.value,
+  folderFiles: folderSourceFiles.value,
   checkTypes: checkTypes.value,
 }))
 const submitBlockReason = computed(() => {
   if (!models.value.length) return '暂无可用模型，请先在后台配置并启用模型'
   if (!selectedModel.value) return '请选择模型'
   if (!checkTypes.value.length) return '请至少选择一种检查类型'
-  if (!hasReviewInput(mode.value, source.value, singleFile.value, archiveFile.value)) {
-    return mode.value === 'text' ? '请粘贴待审查代码' : '请先选择或拖入文件'
+  if (!hasReviewInput(mode.value, source.value, singleFile.value, archiveFile.value, folderSourceFiles.value)) {
+    if (mode.value === 'text') return '请粘贴待审查代码'
+    if (mode.value === 'folder') return '请选择包含 .c / .h 文件的项目文件夹'
+    return '请先选择或拖入文件'
   }
   return ''
 })
@@ -76,6 +83,23 @@ function clearFile(target: 'file' | 'archive') {
 function setSingleFile(file: { raw: File }) { setFile('file', file) }
 function setArchiveFile(file: { raw: File }) { setFile('archive', file) }
 function toggleAllChecks(value: boolean) { checkTypes.value = value ? ALL_CHECK_TYPES.map((item) => item.value) : [] }
+function isCSourceFile(file: File) {
+  const name = (file.webkitRelativePath || file.name).toLowerCase()
+  return name.endsWith('.c') || name.endsWith('.h')
+}
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+function chooseFolder() { folderInput.value?.click() }
+function setFolderFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  folderFiles.value = Array.from(input.files || []).filter(isCSourceFile)
+  if (!folderFiles.value.length) ElMessage.warning('所选文件夹中未找到 .c / .h 文件')
+  input.value = ''
+}
+function clearFolder() { folderFiles.value = [] }
 
 const cKeywords = new Set([
   'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else',
@@ -135,9 +159,13 @@ async function submit() {
   task.value = undefined
   clearInterval(timer)
   try {
-    task.value = mode.value === 'text'
-      ? (await reviewApi.submitText(selectedModel.value, source.value, checkTypes.value)).data
-      : (await reviewApi.submitFile(mode.value, selectedModel.value, upload.value!, checkTypes.value)).data
+    if (mode.value === 'text') {
+      task.value = (await reviewApi.submitText(selectedModel.value, source.value, checkTypes.value)).data
+    } else if (mode.value === 'folder') {
+      task.value = (await reviewApi.submitFolder(selectedModel.value, folderSourceFiles.value, checkTypes.value)).data
+    } else {
+      task.value = (await reviewApi.submitFile(mode.value, selectedModel.value, upload.value!, checkTypes.value)).data
+    }
     timer = window.setInterval(poll, 1400)
     await poll()
   } catch (e) {
@@ -193,7 +221,7 @@ function openReport() {
         <div class="section-heading">
           <div>
             <h2>提交代码</h2>
-            <p>仅支持 C 语言源文件与头文件</p>
+            <p>支持文本、单文件、压缩包和项目文件夹。</p>
           </div>
           <el-select v-model="selectedModel" :disabled="!auth.isAdmin || !models.length" :placeholder="models.length ? '请选择模型' : '暂无可用模型'" class="model-select">
             <el-option v-for="model in models" :key="model.id" :value="model.id" :label="model.display_name">
@@ -218,7 +246,7 @@ function openReport() {
         <div class="check-type-row">
           <div>
             <strong>检查类型</strong>
-            <small>可按审查目标选择重点维度</small>
+            <small>按审查目标选择重点维度</small>
           </div>
           <el-checkbox :model-value="allChecksSelected" @change="toggleAllChecks">全选</el-checkbox>
           <el-select v-model="checkTypes" multiple collapse-tags collapse-tags-tooltip placeholder="请至少选择一种检查类型" class="check-type-select">
@@ -249,10 +277,44 @@ function openReport() {
               <div>拖入或点击选择 <b>.zip</b> 项目压缩包</div>
             </el-upload>
           </el-tab-pane>
+          <el-tab-pane name="folder">
+            <template #label><el-icon><FolderOpened /></el-icon> 项目文件夹</template>
+            <input
+              ref="folderInput"
+              class="folder-native-input"
+              type="file"
+              multiple
+              webkitdirectory
+              directory
+              @change="setFolderFiles"
+            />
+            <button type="button" class="folder-picker" @click="chooseFolder">
+              <el-icon><FolderOpened /></el-icon>
+              <strong>选择项目文件夹</strong>
+              <span>自动递归收集 .c / .h 文件并保留子目录路径</span>
+            </button>
+            <div v-if="folderSourceFiles.length" class="folder-summary">
+              <div>
+                <strong>{{ folderSourceFiles.length }}</strong>
+                <small>个源文件</small>
+              </div>
+              <div>
+                <strong>{{ formatBytes(folderTotalBytes) }}</strong>
+                <small>源码大小</small>
+              </div>
+              <el-button size="small" plain @click="clearFolder">清空</el-button>
+            </div>
+            <div v-if="folderSourceFiles.length" class="folder-file-list">
+              <code v-for="file in folderSourceFiles.slice(0, 8)" :key="file.webkitRelativePath || file.name">
+                {{ file.webkitRelativePath || file.name }}
+              </code>
+              <small v-if="folderSourceFiles.length > 8">还有 {{ folderSourceFiles.length - 8 }} 个文件</small>
+            </div>
+          </el-tab-pane>
         </el-tabs>
 
         <div class="submit-row">
-          <span>提交后系统将自动排队并实时更新进度</span>
+          <span>提交后系统将自动排队并实时更新进度。</span>
           <el-tooltip :disabled="canSubmit" :content="submitBlockReason" placement="top">
             <span class="submit-action-wrap">
               <el-button class="submit-action-button" type="primary" size="large" :icon="Promotion" :disabled="!canSubmit" :loading="submitting" @click="submit">
