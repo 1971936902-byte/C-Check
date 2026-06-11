@@ -104,48 +104,54 @@ def _invoke_with_retries(db, task_id: str, max_attempts: int) -> ModelReviewResp
 def run_review_task(task_id: str) -> None:
     started = monotonic()
     settings = get_settings()
-    with SessionLocal() as db:
-        task = db.get(ReviewTask, task_id)
-        if task is None:
-            return
-        task.status = TaskStatus.RUNNING
-        task.progress = 10
-        task.error_message = None
-        task.model_log = None
-        task.started_at = datetime.now(timezone.utc)
-        if task.report is not None:
-            db.delete(task.report)
-        db.commit()
-
-        try:
-            result = _invoke_with_retries(db, task_id, settings.model_max_attempts)
+    try:
+        with SessionLocal() as db:
             task = db.get(ReviewTask, task_id)
             if task is None:
                 return
-            report = build_report(task, result)
-            db.add(report)
-            task.status = TaskStatus.COMPLETED
-            task.progress = 100
-            task.finding_count = len(result.findings)
+            task.status = TaskStatus.RUNNING
+            task.progress = 10
             task.error_message = None
-            task.duration_ms = _elapsed_ms(started)
-            task.completed_at = datetime.now(timezone.utc)
+            task.model_log = None
+            task.started_at = datetime.now(timezone.utc)
+            if task.report is not None:
+                db.delete(task.report)
             db.commit()
-        except Exception as exc:
-            db.rollback()
-            task = db.get(ReviewTask, task_id)
-            if task is None:
-                return
-            stale_report = db.get(Report, task.report.id) if task.report is not None else None
-            if stale_report is not None:
-                db.delete(stale_report)
-            task.status = TaskStatus.FAILED
-            task.progress = 100
-            task.finding_count = 0
-            task.error_message = str(exc)[:1000] or exc.__class__.__name__
-            task.duration_ms = _elapsed_ms(started)
-            task.completed_at = datetime.now(timezone.utc)
-            db.commit()
+
+            try:
+                result = _invoke_with_retries(db, task_id, settings.model_max_attempts)
+                task = db.get(ReviewTask, task_id)
+                if task is None:
+                    return
+                report = build_report(task, result)
+                db.add(report)
+                task.status = TaskStatus.COMPLETED
+                task.progress = 100
+                task.finding_count = len(result.findings)
+                task.error_message = None
+                task.duration_ms = _elapsed_ms(started)
+                task.completed_at = datetime.now(timezone.utc)
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                task = db.get(ReviewTask, task_id)
+                if task is None:
+                    return
+                stale_report = db.get(Report, task.report.id) if task.report is not None else None
+                if stale_report is not None:
+                    db.delete(stale_report)
+                task.status = TaskStatus.FAILED
+                task.progress = 100
+                task.finding_count = 0
+                task.error_message = str(exc)[:1000] or exc.__class__.__name__
+                task.duration_ms = _elapsed_ms(started)
+                task.completed_at = datetime.now(timezone.utc)
+                db.commit()
+    finally:
+        from app.services.review_queue import dispatch_next_review
+
+        with SessionLocal() as db:
+            dispatch_next_review(db)
 
 
 @celery_app.task(name="app.tasks.reviews.dispatch_review")

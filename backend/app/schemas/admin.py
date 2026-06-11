@@ -138,6 +138,8 @@ class AdminTaskResponse(BaseModel):
     display_name: str
     status: TaskStatus
     progress: int
+    queue_priority: int
+    queued_ahead_count: int | None = None
     finding_count: int
     error_message: str | None
     model_log: str | None

@@ -302,6 +302,30 @@ async function removeModel(id: string) {
   try { await ElMessageBox.confirm('确认删除此模型节点？', '删除模型', { type: 'warning' }); await adminApi.deleteModel(id); await load(); await loadResources(true) } catch (e) { if (e !== 'cancel') ElMessage.error(errorMessage(e)) }
 }
 
+async function removeTask(row: AdminTask) {
+  const action = row.status === 'queued' || row.status === 'running' ? '停止并删除' : '删除'
+  try {
+    await ElMessageBox.confirm(`确认${action}任务“${row.display_name}”？`, action, { type: 'warning' })
+    await adminApi.removeTask(row.id)
+    await load()
+    await loadResources(true)
+    ElMessage.success('任务已删除')
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(errorMessage(e))
+  }
+}
+
+async function pinTask(row: AdminTask) {
+  try {
+    await adminApi.pinTask(row.id)
+    await load()
+    await loadResources(true)
+    ElMessage.success('任务已置顶')
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  }
+}
+
 async function health(id: string) {
   try { await adminApi.modelHealth(id); ElMessage.success('模型服务健康检查通过') } catch (e) { ElMessage.error(errorMessage(e)) }
 }
@@ -650,8 +674,25 @@ onUnmounted(() => {
             <el-table-column prop="owner_id" label="用户 ID" min-width="170" />
             <el-table-column label="状态" width="110"><template #default="{ row }"><StatusBadge :status="row.status" /></template></el-table-column>
             <el-table-column prop="progress" label="进度" width="80" />
+            <el-table-column label="排队" width="130">
+              <template #default="{ row }">
+                <span v-if="row.status === 'queued'">
+                  前方 {{ row.queued_ahead_count ?? 0 }} 个
+                  <small v-if="row.queue_priority">置顶</small>
+                </span>
+                <span v-else>--</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="finding_count" label="问题" width="80" />
             <el-table-column label="创建时间" width="180"><template #default="{ row }">{{ date(row.created_at) }}</template></el-table-column>
+            <el-table-column label="操作" width="190">
+              <template #default="{ row }">
+                <el-button link type="primary" :disabled="row.status !== 'queued'" @click="pinTask(row)">置顶</el-button>
+                <el-button link type="danger" @click="removeTask(row)">
+                  {{ row.status === 'queued' || row.status === 'running' ? '停止/删除' : '删除' }}
+                </el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </el-tab-pane>
       </el-tabs>

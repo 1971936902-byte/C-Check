@@ -66,6 +66,7 @@ export const reviewApi = {
   submitDemoArchive: (checkTypes: string[]) => mockApi.reviews.submitDemoArchive(checkTypes),
   list: (params?: Record<string, unknown>) => MOCK_API_ENABLED ? mockApi.reviews.list(params) : api.get<ReviewTaskPage>('/reviews', { params }),
   get: (id: string) => MOCK_API_ENABLED ? mockApi.reviews.get(id) : api.get<ReviewTask>(`/reviews/${id}`),
+  pin: (id: string) => MOCK_API_ENABLED ? mockApi.reviews.pin(id) : api.post<ReviewTask>(`/reviews/${id}/pin`),
   remove: (id: string) => MOCK_API_ENABLED ? mockApi.reviews.remove(id) : api.delete(`/reviews/${id}`),
 }
 export const reportApi = {
@@ -94,4 +95,6 @@ export const adminApi = {
   deletePrompt: (id: string) => MOCK_API_ENABLED ? mockApi.admin.deletePrompt(id) : api.delete(`/admin/prompts/${id}`),
   activatePrompt: (id: string) => MOCK_API_ENABLED ? mockApi.admin.activatePrompt(id) : api.post(`/admin/prompts/${id}/activate`),
   tasks: (status?: TaskStatus | '') => MOCK_API_ENABLED ? mockApi.admin.tasks(status) : api.get<AdminTask[]>('/admin/tasks', { params: { status: status || undefined } }),
+  pinTask: (id: string) => MOCK_API_ENABLED ? mockApi.reviews.pin(id) : api.post<AdminTask>(`/reviews/${id}/pin`),
+  removeTask: (id: string) => MOCK_API_ENABLED ? mockApi.reviews.remove(id) : api.delete(`/reviews/${id}`),
 }

@@ -134,6 +134,7 @@ class ReviewTask(TimestampMixin, Base):
         index=True,
     )
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    queue_priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)
     model_log: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
@@ -155,6 +156,14 @@ class ReviewTask(TimestampMixin, Base):
     @property
     def tester_name(self) -> str:
         return self.owner.username
+
+    @property
+    def queued_ahead_count(self) -> int | None:
+        return getattr(self, "_queued_ahead_count", None)
+
+    @queued_ahead_count.setter
+    def queued_ahead_count(self, value: int | None) -> None:
+        self._queued_ahead_count = value
 
 
 class ReviewFile(TimestampMixin, Base):

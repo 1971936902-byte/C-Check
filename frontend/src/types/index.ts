@@ -7,7 +7,7 @@ export interface ReviewFile { id: string; relative_path: string; size_bytes: num
 export interface ReviewTask {
   id: string; owner_id: string; model_node_id: string; input_mode: string; display_name: string
   tester_name?: string
-  status: TaskStatus; progress: number; error_message?: string | null; duration_ms?: number | null
+  status: TaskStatus; progress: number; queue_priority?: number; queued_ahead_count?: number | null; error_message?: string | null; duration_ms?: number | null
   model_log?: string | null
   file_count: number; finding_count: number; started_at?: string | null; completed_at?: string | null
   created_at: string; updated_at: string; files?: ReviewFile[]; report_id?: string | null; check_types?: string[]
@@ -23,7 +23,7 @@ export interface ModelRuntimeMetric { node_id: string; display_name: string; bas
 export interface ResourceSnapshot { captured_at: string; system: SystemResource; gpus: GpuDevice[]; models: ModelRuntimeMetric[]; tasks: Dashboard }
 export interface AdminUser extends User { created_at: string }
 export interface Prompt { id: string; version: number; body: string; is_active: boolean; creator_id?: string | null; created_at: string }
-export interface AdminTask { id: string; owner_id: string; model_node_id: string; display_name: string; status: TaskStatus; progress: number; finding_count: number; error_message?: string | null; created_at: string }
+export interface AdminTask { id: string; owner_id: string; model_node_id: string; display_name: string; status: TaskStatus; progress: number; queue_priority?: number; queued_ahead_count?: number | null; finding_count: number; error_message?: string | null; created_at: string }
 export interface ReviewTaskPage { items: ReviewTask[]; total: number }
 export type ModelDeploymentStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'manual_required'
 export interface ModelCatalogItem {

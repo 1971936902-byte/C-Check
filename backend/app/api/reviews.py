@@ -21,6 +21,7 @@ from app.services.submissions import (
     collect_text_submission,
     create_review_task,
 )
+from app.services.review_queue import attach_queue_positions, dispatch_next_review, pin_queued_task
 
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
@@ -50,6 +51,11 @@ def _create_task(
         raise _unprocessable(exc) from exc
 
 
+def _with_queue_position(db: Session, task: ReviewTask) -> ReviewTask:
+    attach_queue_positions(db, [task])
+    return task
+
+
 def _visible_task_query(current_user: User):
     query = select(ReviewTask).options(selectinload(ReviewTask.owner))
     if current_user.role != "admin":
@@ -68,7 +74,8 @@ def submit_text(
         submission = collect_text_submission(request.source_text, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    return _create_task(db, current_user, request.model_node_id, submission, request.check_types)
+    task = _create_task(db, current_user, request.model_node_id, submission, request.check_types)
+    return _with_queue_position(db, task)
 
 
 def _parse_check_types(value: str) -> list[str]:
@@ -95,7 +102,8 @@ async def submit_file(
         submission = collect_file_submission(file.filename or "", content, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    return _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    return _with_queue_position(db, task)
 
 
 @router.post("/archive", response_model=ReviewTaskResponse, status_code=status.HTTP_201_CREATED)
@@ -114,7 +122,8 @@ async def submit_archive(
         submission = collect_archive_submission(file.filename or "", content, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    return _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    return _with_queue_position(db, task)
 
 
 @router.post("/folder", response_model=ReviewTaskResponse, status_code=status.HTTP_201_CREATED)
@@ -134,7 +143,8 @@ async def submit_folder(
         submission = collect_folder_submission(submitted, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    return _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    return _with_queue_position(db, task)
 
 
 @router.get("", response_model=ReviewTaskPageResponse)
@@ -194,6 +204,7 @@ def list_reviews(
     total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
     order = sort_column.asc() if sort_dir == "asc" else sort_column.desc()
     items = list(db.scalars(query.order_by(order, ReviewTask.id.desc()).offset(offset).limit(limit)).all())
+    attach_queue_positions(db, items)
     return ReviewTaskPageResponse(items=items, total=total)
 
 
@@ -213,7 +224,23 @@ def get_review(
     task = db.scalar(query.where(ReviewTask.id == task_id))
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="review task not found")
+    attach_queue_positions(db, [task])
     return task
+
+
+@router.post("/{task_id}/pin", response_model=ReviewTaskResponse)
+def pin_review(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ReviewTask:
+    task = db.scalar(_visible_task_query(current_user).where(ReviewTask.id == task_id))
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="review task not found")
+    try:
+        return pin_queued_task(db, task)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -227,4 +254,5 @@ def delete_review(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="review task not found")
     db.delete(task)
     db.commit()
+    dispatch_next_review(db)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

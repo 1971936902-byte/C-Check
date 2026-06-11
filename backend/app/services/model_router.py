@@ -356,13 +356,44 @@ def _extract_json_object(content: str) -> str:
     return stripped
 
 
+def _normalize_model_contract(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    findings = value.get("findings")
+    if not isinstance(findings, list):
+        return value
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        fallback_line = finding.get("line")
+        if not isinstance(fallback_line, int):
+            fallback_line = None
+        for snippet_key in ("code_snippet", "fixed_snippet"):
+            snippet = finding.get(snippet_key)
+            if not isinstance(snippet, list):
+                continue
+            normalized_lines = []
+            for line in snippet:
+                if not isinstance(line, dict):
+                    continue
+                if line.get("line") is None:
+                    if fallback_line is None:
+                        continue
+                    line = {**line, "line": fallback_line}
+                normalized_lines.append(line)
+            finding[snippet_key] = normalized_lines
+    return value
+
+
 def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
     content: str | None = None
     try:
         content = payload["choices"][0]["message"]["content"]
         if not isinstance(content, str):
             raise TypeError("assistant content is not text")
-        return ModelReviewResponse.model_validate_json(_extract_json_object(content))
+        return ModelReviewResponse.model_validate(
+            _normalize_model_contract(json.loads(_extract_json_object(content)))
+        )
     except (KeyError, IndexError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
         raise ModelInvocationError(
             "model returned an invalid structured response",

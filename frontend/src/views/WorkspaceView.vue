@@ -1,7 +1,7 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, FolderOpened, Promotion, UploadFilled, View } from '@element-plus/icons-vue'
 import { errorMessage, MOCK_API_ENABLED, reviewApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -18,7 +18,8 @@ const singleFile = ref<File>()
 const archiveFile = ref<File>()
 const folderFiles = ref<File[]>([])
 const folderInput = ref<HTMLInputElement>()
-const task = ref<ReviewTask>()
+const tasks = ref<ReviewTask[]>([])
+const selectedTaskId = ref('')
 const submitting = ref(false)
 const logVisible = ref(false)
 const sourcePreviewVisible = ref(false)
@@ -29,6 +30,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const checkTypes = ref<string[]>(ALL_CHECK_TYPES.map((item) => item.value))
 let timer: number | undefined
+const WORKSPACE_TASK_IDS_KEY = 'c-check-workspace-task-ids'
 
 const upload = computed(() => activeUpload(mode.value, singleFile.value, archiveFile.value))
 const folderSourceFiles = computed(() => folderFiles.value.filter(isCSourceFile))
@@ -60,17 +62,97 @@ const submitBlockReason = computed(() => {
 })
 const selectedModelInfo = computed(() => models.value.find((model) => model.id === selectedModel.value))
 const allChecksSelected = computed(() => checkTypes.value.length === ALL_CHECK_TYPES.length)
+const task = computed(() => tasks.value.find((item) => item.id === selectedTaskId.value) || tasks.value[0])
 const progressSummary = computed(() => task.value ? deriveReviewProgressSummary(task.value) : undefined)
+const activeTasks = computed(() => tasks.value.filter(isActiveTask))
 
 onMounted(async () => {
   try {
-    models.value = (await reviewApi.models()).data
-    selectedModel.value = models.value.find((model) => model.is_default)?.id || models.value[0]?.id || ''
+    await Promise.all([loadModels(), loadWorkspaceTasks()])
   } catch (e) {
     ElMessage.error(errorMessage(e))
   }
 })
 onUnmounted(() => clearInterval(timer))
+
+async function loadModels() {
+  models.value = (await reviewApi.models()).data
+  selectedModel.value = models.value.find((model) => model.is_default)?.id || models.value[0]?.id || ''
+}
+
+function isActiveTask(item: ReviewTask) {
+  return item.status === 'queued' || item.status === 'running'
+}
+
+function readRememberedTaskIds() {
+  try {
+    const ids = JSON.parse(sessionStorage.getItem(WORKSPACE_TASK_IDS_KEY) || '[]')
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function rememberTask(id: string) {
+  const ids = [id, ...readRememberedTaskIds().filter((item) => item !== id)].slice(0, 20)
+  sessionStorage.setItem(WORKSPACE_TASK_IDS_KEY, JSON.stringify(ids))
+}
+
+function forgetTask(id: string) {
+  const ids = readRememberedTaskIds().filter((item) => item !== id)
+  sessionStorage.setItem(WORKSPACE_TASK_IDS_KEY, JSON.stringify(ids))
+}
+
+function mergeTasks(items: ReviewTask[]) {
+  const merged = new Map(tasks.value.map((item) => [item.id, item]))
+  for (const item of items) merged.set(item.id, item)
+  tasks.value = Array.from(merged.values()).sort((left, right) => {
+    if (left.status === 'running' && right.status !== 'running') return -1
+    if (right.status === 'running' && left.status !== 'running') return 1
+    if (left.status === 'queued' && right.status === 'queued') {
+      return (left.queued_ahead_count ?? 0) - (right.queued_ahead_count ?? 0)
+    }
+    if (left.status === 'queued' && right.status !== 'queued') return -1
+    if (right.status === 'queued' && left.status !== 'queued') return 1
+    return new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+  })
+  if (!selectedTaskId.value || !tasks.value.some((item) => item.id === selectedTaskId.value)) {
+    selectedTaskId.value = tasks.value[0]?.id || ''
+  }
+}
+
+function upsertTask(item: ReviewTask) {
+  rememberTask(item.id)
+  mergeTasks([item])
+  selectedTaskId.value = item.id
+  ensurePolling()
+}
+
+function removeLocalTask(id: string) {
+  forgetTask(id)
+  tasks.value = tasks.value.filter((item) => item.id !== id)
+  if (selectedTaskId.value === id) selectedTaskId.value = tasks.value[0]?.id || ''
+  ensurePolling()
+}
+
+async function loadWorkspaceTasks() {
+  const [queued, running, remembered] = await Promise.all([
+    reviewApi.list({ status: 'queued', limit: 50 }),
+    reviewApi.list({ status: 'running', limit: 50 }),
+    Promise.allSettled(readRememberedTaskIds().map((id) => reviewApi.get(id))),
+  ])
+  const rememberedTasks = remembered
+    .filter((result): result is PromiseFulfilledResult<{ data: ReviewTask }> => result.status === 'fulfilled')
+    .map((result) => result.value.data)
+  mergeTasks([...queued.data.items, ...running.data.items, ...rememberedTasks])
+  ensurePolling()
+}
+
+function ensurePolling() {
+  clearInterval(timer)
+  timer = undefined
+  if (activeTasks.value.length) timer = window.setInterval(poll, 1400)
+}
 
 function setFile(target: 'file' | 'archive', file: { raw: File }) {
   if (target === 'file') singleFile.value = file.raw
@@ -156,17 +238,16 @@ async function submit() {
   if (!checkTypes.value.length) return ElMessage.warning('请至少选择一种检查类型')
   if (!canSubmit.value) return ElMessage.warning(submitBlockReason.value || '请选择模型并提供待审查代码')
   submitting.value = true
-  task.value = undefined
-  clearInterval(timer)
+  let created: ReviewTask
   try {
     if (mode.value === 'text') {
-      task.value = (await reviewApi.submitText(selectedModel.value, source.value, checkTypes.value)).data
+      created = (await reviewApi.submitText(selectedModel.value, source.value, checkTypes.value)).data
     } else if (mode.value === 'folder') {
-      task.value = (await reviewApi.submitFolder(selectedModel.value, folderSourceFiles.value, checkTypes.value)).data
+      created = (await reviewApi.submitFolder(selectedModel.value, folderSourceFiles.value, checkTypes.value)).data
     } else {
-      task.value = (await reviewApi.submitFile(mode.value, selectedModel.value, upload.value!, checkTypes.value)).data
+      created = (await reviewApi.submitFile(mode.value, selectedModel.value, upload.value!, checkTypes.value)).data
     }
-    timer = window.setInterval(poll, 1400)
+    upsertTask(created)
     await poll()
   } catch (e) {
     ElMessage.error(errorMessage(e))
@@ -177,11 +258,8 @@ async function submit() {
 
 async function runDemo() {
   submitting.value = true
-  task.value = undefined
-  clearInterval(timer)
   try {
-    task.value = (await reviewApi.submitDemoArchive(checkTypes.value)).data
-    timer = window.setInterval(poll, 1400)
+    upsertTask((await reviewApi.submitDemoArchive(checkTypes.value)).data)
     await poll()
   } catch (e) {
     ElMessage.error(errorMessage(e))
@@ -191,12 +269,18 @@ async function runDemo() {
 }
 
 async function poll() {
-  if (!task.value) return
+  const pollingTasks = activeTasks.value
+  if (!pollingTasks.length) {
+    ensurePolling()
+    return
+  }
   try {
-    task.value = (await reviewApi.get(task.value.id)).data
-    if (['completed', 'failed'].includes(task.value.status)) clearInterval(timer)
+    const updates = await Promise.all(pollingTasks.map((item) => reviewApi.get(item.id)))
+    mergeTasks(updates.map((item) => item.data))
+    ensurePolling()
   } catch (e) {
     clearInterval(timer)
+    timer = undefined
     ElMessage.error(errorMessage(e))
   }
 }
@@ -204,6 +288,29 @@ async function poll() {
 function openReport() {
   if (task.value?.report_id) router.push(`/reports/${task.value.report_id}`)
   else ElMessage.warning('报告暂不可用，请稍后刷新任务状态')
+}
+
+async function removeTask(target: ReviewTask) {
+  const action = target.status === 'queued' || target.status === 'running' ? '停止并删除' : '删除'
+  try {
+    await ElMessageBox.confirm(`确认${action}任务“${taskDisplayName(target)}”？`, action, { type: 'warning' })
+    await reviewApi.remove(target.id)
+    removeLocalTask(target.id)
+    ElMessage.success('任务已删除')
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(errorMessage(e))
+  }
+}
+
+async function pinTask(target: ReviewTask) {
+  try {
+    const { data } = await reviewApi.pin(target.id)
+    upsertTask(data)
+    await loadWorkspaceTasks()
+    ElMessage.success('任务已置顶')
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  }
 }
 </script>
 
@@ -329,9 +436,33 @@ function openReport() {
         <div class="task-panel-header">
           <div>
             <h2>任务状态</h2>
-            <p v-if="!task">提交代码后，可在此查看审查进度与结果。</p>
+            <p v-if="!tasks.length">提交代码后，可在此查看审查进度与结果。</p>
           </div>
-          <el-button v-if="MOCK_API_ENABLED && !task" plain @click="runDemo">加载多文件演示</el-button>
+          <el-button v-if="MOCK_API_ENABLED && !tasks.length" plain @click="runDemo">加载多文件演示</el-button>
+        </div>
+
+        <div v-if="tasks.length" class="task-list">
+          <button
+            v-for="item in tasks"
+            :key="item.id"
+            type="button"
+            class="task-list-item"
+            :class="{ 'task-list-item-active': item.id === selectedTaskId }"
+            @click="selectedTaskId = item.id"
+          >
+            <span class="task-list-title">
+              <strong>{{ taskDisplayName(item) }}</strong>
+              <StatusBadge :status="item.status" />
+            </span>
+            <small v-if="item.status === 'queued'" class="task-queue-note">
+              前方还有 {{ item.queued_ahead_count ?? 0 }} 个任务
+              <b v-if="item.queue_priority">已置顶</b>
+            </small>
+            <el-progress
+              :percentage="item.progress"
+              :status="item.status === 'failed' ? 'exception' : item.status === 'completed' ? 'success' : undefined"
+            />
+          </button>
         </div>
 
         <template v-if="task && progressSummary">
@@ -359,6 +490,10 @@ function openReport() {
           <el-alert v-if="task.error_message" :title="task.error_message" type="error" :closable="false" show-icon />
           <el-button v-if="task.model_log" plain :icon="View" class="report-button" @click="logVisible = true">查看模型日志</el-button>
           <el-button v-if="task.status === 'completed'" type="primary" class="report-button" @click="openReport">查看审查报告</el-button>
+          <el-button v-if="task.status === 'queued'" plain type="primary" class="report-button" @click="pinTask(task)">置顶任务</el-button>
+          <el-button plain type="danger" class="report-button" @click="removeTask(task)">
+            {{ task.status === 'queued' || task.status === 'running' ? '停止并删除任务' : '删除任务' }}
+          </el-button>
         </template>
       </aside>
     </div>
@@ -374,3 +509,4 @@ function openReport() {
     </el-dialog>
   </section>
 </template>
+

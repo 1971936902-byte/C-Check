@@ -30,6 +30,8 @@ class ReviewTaskSummaryResponse(BaseModel):
     display_name: str
     status: TaskStatus
     progress: int
+    queue_priority: int
+    queued_ahead_count: int | None = None
     error_message: str | None
     model_log: str | None
     duration_ms: int | None

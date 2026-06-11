@@ -36,6 +36,7 @@ from app.services.model_deployments import (
 )
 from app.services.prompts import activate_prompt, create_prompt_version
 from app.services.resources import collect_resource_snapshot
+from app.services.review_queue import attach_queue_positions
 
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -305,6 +306,6 @@ def list_tasks(
         query = query.where(ReviewTask.created_at >= start_time)
     if end_time:
         query = query.where(ReviewTask.created_at <= end_time)
-    return list(
-        db.scalars(query.order_by(ReviewTask.created_at.desc()).offset(offset).limit(limit)).all()
-    )
+    items = list(db.scalars(query.order_by(ReviewTask.created_at.desc()).offset(offset).limit(limit)).all())
+    attach_queue_positions(db, items)
+    return items

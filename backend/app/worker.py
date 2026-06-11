@@ -15,4 +15,8 @@ celery_app.conf.update(
     accept_content=["json"],
     result_serializer="json",
     timezone="UTC",
+    worker_concurrency=1,
+    worker_prefetch_multiplier=1,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
 )

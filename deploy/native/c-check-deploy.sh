@@ -360,7 +360,7 @@ Wants=redis-server.service mysql.service
 [Service]
 Type=simple
 WorkingDirectory=${APP_DIR}/backend
-ExecStart=${APP_DIR}/.venv/bin/celery -A app.worker.celery_app worker --loglevel=INFO
+ExecStart=${APP_DIR}/.venv/bin/celery -A app.worker.celery_app worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1
 Restart=always
 RestartSec=5
 User=root

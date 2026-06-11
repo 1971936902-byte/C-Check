@@ -237,6 +237,15 @@ export const mockApi = {
       save(state)
       return response({ ok: true })
     },
+    pin: async (taskId: string) => {
+      const state = load()
+      const task = visibleTasks(state).find((item) => item.id === taskId)
+      if (!task) throw new Error('审查任务不存在')
+      if (task.status !== 'queued') throw new Error('只有排队中的任务可以置顶')
+      task.queue_priority = Math.max(0, ...state.tasks.map((item) => item.queue_priority || 0)) + 1
+      save(state)
+      return response(task)
+    },
   },
   reports: {
     get: async (reportId: string) => {

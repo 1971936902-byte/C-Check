@@ -51,6 +51,53 @@ def test_parse_response_error_keeps_raw_model_content():
     assert raised.value.details
 
 
+def test_parse_response_normalizes_null_snippet_line_to_finding_line():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "存在一个可维护性问题。",
+                                "score": 90,
+                                "findings": [
+                                    {
+                                        "severity": "low",
+                                        "category": "logic",
+                                        "title": "补充注释",
+                                        "description": "模型给出的修复片段包含新增注释行。",
+                                        "file_path": "src/misc.c",
+                                        "line": 114,
+                                        "remediation": "保留新增注释并使用发现行号兜底。",
+                                        "code_snippet": [
+                                            {
+                                                "line": 114,
+                                                "content": "uint32_t tmppriority = 0;",
+                                                "kind": "context",
+                                            }
+                                        ],
+                                        "fixed_snippet": [
+                                            {
+                                                "line": None,
+                                                "content": "/* 初始化变量 */",
+                                                "kind": "added",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    assert parsed.findings[0].fixed_snippet[0].line == 114
+
+
 def test_parse_response_rejects_nested_finding_from_truncated_response():
     content = """
 {

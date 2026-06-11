@@ -44,20 +44,10 @@ class Submission:
 
 def dispatch_review(task_id: str) -> None:
     from app.db.session import SessionLocal
-    from app.db.models import TaskStatus
-    from app.tasks.reviews import dispatch_review as celery_dispatch_review
+    from app.services.review_queue import dispatch_next_review
 
-    try:
-        celery_dispatch_review.delay(task_id)
-    except Exception as exc:
-        with SessionLocal() as db:
-            task = db.get(ReviewTask, task_id)
-            if task is None:
-                return
-            task.status = TaskStatus.FAILED
-            task.progress = 100
-            task.error_message = f"failed to dispatch review worker: {exc}"[:1000]
-            db.commit()
+    with SessionLocal() as db:
+        dispatch_next_review(db)
 
 
 def _cjk_score(value: str) -> int:
