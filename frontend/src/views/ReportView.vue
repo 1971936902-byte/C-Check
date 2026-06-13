@@ -5,7 +5,6 @@ import { Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { errorMessage, reportApi } from '../api/client'
 import ReportChart from '../components/ReportChart.vue'
-import SeverityBadge from '../components/SeverityBadge.vue'
 import type { Finding, Report, Severity } from '../types'
 import { scoreTone } from './report-metrics'
 
@@ -15,6 +14,12 @@ const severityTabs: Array<{ key: Severity; label: string; empty: string }> = [
   { key: 'low', label: '低危', empty: '暂无低危问题' },
   { key: 'suggestion', label: '建议', empty: '暂无建议项' },
 ]
+const severityLabels: Record<Severity, string> = {
+  high: '高危',
+  medium: '中危',
+  low: '低危',
+  suggestion: '建议',
+}
 
 const route = useRoute()
 const report = ref<Report>()
@@ -159,7 +164,12 @@ function locationText(finding: Finding) {
                   >
                     <template #title>
                       <div class="finding-title">
-                        <SeverityBadge :severity="finding.severity" />
+                        <span
+                          class="severity-marker"
+                          :class="`severity-marker-${finding.severity}`"
+                          :title="severityLabels[finding.severity]"
+                          :aria-label="severityLabels[finding.severity]"
+                        />
                         <strong>{{ finding.title }}</strong>
                         <code>{{ locationText(finding) }}</code>
                       </div>
@@ -320,6 +330,34 @@ function locationText(finding: Finding) {
 
 .finding-tabs {
   margin-top: 12px;
+}
+
+.severity-marker {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 4px rgba(116, 133, 154, 0.1);
+}
+
+.severity-marker-high {
+  background: #d35e68;
+  box-shadow: 0 0 0 4px rgba(211, 94, 104, 0.13);
+}
+
+.severity-marker-medium {
+  background: #ce843d;
+  box-shadow: 0 0 0 4px rgba(206, 132, 61, 0.14);
+}
+
+.severity-marker-low {
+  background: #af8b27;
+  box-shadow: 0 0 0 4px rgba(175, 139, 39, 0.14);
+}
+
+.severity-marker-suggestion {
+  background: #4383ba;
+  box-shadow: 0 0 0 4px rgba(67, 131, 186, 0.13);
 }
 
 .finding-pagination {
