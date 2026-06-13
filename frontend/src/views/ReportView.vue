@@ -96,28 +96,46 @@ function locationText(finding: Finding) {
     </header>
 
     <template v-if="report">
-      <div class="metric-row">
-        <div class="metric-card glass score">
-          <span>综合评分</span>
-          <strong :class="`metric-${scoreTone(report.score)}`">{{ report.score }}</strong>
-          <small>/ 100</small>
-        </div>
-        <div class="metric-card glass">
-          <span>高危问题</span>
-          <strong class="metric-danger">{{ report.high_count }}</strong>
-        </div>
-        <div class="metric-card glass">
-          <span>中危问题</span>
-          <strong class="metric-warning">{{ report.medium_count }}</strong>
-        </div>
-        <div class="metric-card glass">
-          <span>全部发现</span>
-          <strong class="metric-info">{{ allFindings.length }}</strong>
-        </div>
-      </div>
+      <div class="report-grid report-layout">
+        <aside class="report-sidebar">
+          <article class="panel glass report-overview">
+            <h2>审查总览</h2>
+            <div class="overview-score">
+              <span>综合评分</span>
+              <strong :class="`metric-${scoreTone(report.score)}`">{{ report.score }}</strong>
+              <small>/ 100</small>
+            </div>
+            <div class="overview-stats">
+              <div>
+                <span>高危</span>
+                <b class="metric-danger">{{ report.high_count }}</b>
+              </div>
+              <div>
+                <span>中危</span>
+                <b class="metric-warning">{{ report.medium_count }}</b>
+              </div>
+              <div>
+                <span>低危</span>
+                <b>{{ report.low_count }}</b>
+              </div>
+              <div>
+                <span>全部</span>
+                <b class="metric-info">{{ allFindings.length }}</b>
+              </div>
+            </div>
+          </article>
 
-      <div class="report-grid">
-        <div>
+          <article class="panel glass">
+            <h2>风险分布</h2>
+            <ReportChart :counts="severityCounts" />
+          </article>
+          <article class="panel glass">
+            <h2>问题分类</h2>
+            <ReportChart :counts="report.category_counts" mode="category" />
+          </article>
+        </aside>
+
+        <main class="findings-column">
           <article class="panel glass findings">
             <div class="section-heading">
               <div>
@@ -205,26 +223,97 @@ function locationText(finding: Finding) {
               />
             </div>
           </article>
-        </div>
-
-        <aside>
-          <article class="panel glass">
-            <h2>风险分布</h2>
-            <ReportChart :counts="severityCounts" />
-          </article>
-          <article class="panel glass">
-            <h2>问题分类</h2>
-            <ReportChart :counts="report.category_counts" mode="category" />
-          </article>
-        </aside>
+        </main>
       </div>
     </template>
   </section>
 </template>
 
 <style scoped>
+.report-layout {
+  grid-template-columns: 320px minmax(0, 1fr);
+  align-items: start;
+}
+
+.report-sidebar {
+  display: grid;
+  gap: 20px;
+  align-content: start;
+}
+
+.findings-column {
+  min-width: 0;
+}
+
+.report-overview {
+  display: grid;
+  gap: 18px;
+}
+
+.overview-score span,
+.overview-score small,
+.overview-stats span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.overview-score strong {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--primary);
+  font-size: 42px;
+  line-height: 1;
+}
+
+.overview-score small {
+  display: inline;
+  margin-left: 4px;
+}
+
+.overview-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.overview-stats div {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(238, 245, 250, 0.72);
+}
+
+.overview-stats b {
+  display: block;
+  margin-top: 5px;
+  color: #365979;
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.overview-score strong.metric-good,
+.overview-stats b.metric-good {
+  color: #4b9a71;
+}
+
+.overview-score strong.metric-warning,
+.overview-stats b.metric-warning {
+  color: #ce843d;
+}
+
+.overview-score strong.metric-danger,
+.overview-stats b.metric-danger {
+  color: #d35e68;
+}
+
+.overview-score strong.metric-info,
+.overview-stats b.metric-info {
+  color: #4383ba;
+}
+
 .finding-total {
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 13px;
   white-space: nowrap;
 }
@@ -240,6 +329,10 @@ function locationText(finding: Finding) {
 }
 
 @media (max-width: 720px) {
+  .report-layout {
+    grid-template-columns: 1fr;
+  }
+
   .finding-pagination {
     justify-content: flex-start;
     overflow-x: auto;
