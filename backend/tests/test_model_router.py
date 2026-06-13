@@ -227,11 +227,6 @@ def test_invoke_model_sends_output_token_budget(monkeypatch):
                 )
             ],
             prompt="review",
-            settings=Settings(
-                _env_file=None,
-                allow_insecure_defaults=True,
-                model_max_tokens=2048,
-            ),
         )
     )
 
@@ -433,6 +428,11 @@ def test_invoke_model_retries_with_smaller_output_budget_when_context_is_tight(m
                 )
             ],
             prompt="review",
+            settings=Settings(
+                _env_file=None,
+                allow_insecure_defaults=True,
+                model_max_tokens=2048,
+            ),
         )
     )
 
