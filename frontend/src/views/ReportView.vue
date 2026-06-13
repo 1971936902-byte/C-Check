@@ -332,6 +332,10 @@ function locationText(finding: Finding) {
   margin-top: 12px;
 }
 
+.finding-title {
+  padding-left: 8px;
+}
+
 .severity-marker {
   flex: 0 0 auto;
   width: 10px;
