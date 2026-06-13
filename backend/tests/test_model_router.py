@@ -10,6 +10,7 @@ from app.schemas.model_response import FindingCategory, ModelReviewResponse
 from app.services.model_router import (
     ModelInvocationError,
     _chunk_file,
+    _chunk_review_batches,
     _chunk_review_files,
     _merge_chunk_results,
     _parse_response,
@@ -288,7 +289,7 @@ def test_invoke_model_requests_json_schema_structured_output(monkeypatch):
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["name"] == "c_review_response"
     assert response_format["json_schema"]["strict"] is True
-    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 8
+    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 5
 
 
 def test_parse_response_rejects_too_many_findings_for_audit():
@@ -306,7 +307,7 @@ def test_parse_response_rejects_too_many_findings_for_audit():
     content = {
         "summary": "too many findings",
         "score": 60,
-        "findings": [finding for _ in range(9)],
+        "findings": [finding for _ in range(6)],
     }
 
     with pytest.raises(ModelInvocationError) as raised:
@@ -476,6 +477,29 @@ def test_chunk_review_files_does_not_reject_large_batches():
     assert {chunk.relative_path for chunk in chunks} == {file.relative_path for file in files}
 
 
+def test_chunk_review_batches_groups_small_files():
+    files = [
+        ReviewFile(
+            relative_path=f"small_{index}.c",
+            source_text="int value;\n" * 8,
+            size_bytes=88,
+        )
+        for index in range(4)
+    ]
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        model_chunk_max_chars=260,
+    )
+
+    batches = _chunk_review_batches(files, settings)
+
+    assert len(batches) < len(_chunk_review_files(files, settings))
+    assert [chunk.relative_path for batch in batches for chunk in batch] == [
+        file.relative_path for file in files
+    ]
+
+
 def test_merge_chunk_results_keeps_highest_priority_findings():
     finding = {
         "category": "memory_safety",
@@ -492,7 +516,7 @@ def test_merge_chunk_results_keeps_highest_priority_findings():
             "score": 90,
             "findings": [
                 {**finding, "severity": "low", "title": f"low-{index}", "line": index}
-                for index in range(1, 9)
+                for index in range(1, 6)
             ],
         }
     )
@@ -507,7 +531,7 @@ def test_merge_chunk_results_keeps_highest_priority_findings():
     merged = _merge_chunk_results([low_result, high_result])
 
     assert merged.score == 40
-    assert len(merged.findings) == 8
+    assert len(merged.findings) == 5
     assert merged.findings[0].severity.value == "high"
     assert merged.findings[0].title == "high"
 

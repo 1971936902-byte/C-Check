@@ -48,18 +48,18 @@ class ReviewFinding(BaseModel):
 
     severity: FindingSeverity
     category: FindingCategory
-    title: str = Field(min_length=1, max_length=255)
-    description: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=360)
     file_path: str = Field(min_length=1, max_length=512)
     line: int | None = Field(default=None, ge=1)
-    remediation: str = Field(min_length=1)
-    code_snippet: list[CodeLine] = Field(default_factory=list)
-    fixed_snippet: list[CodeLine] = Field(default_factory=list)
+    remediation: str = Field(min_length=1, max_length=360)
+    code_snippet: list[CodeLine] = Field(default_factory=list, max_length=2)
+    fixed_snippet: list[CodeLine] = Field(default_factory=list, max_length=2)
 
 
 class ModelReviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    summary: str = Field(min_length=1)
+    summary: str = Field(min_length=1, max_length=240)
     score: float = Field(ge=0, le=100)
-    findings: list[ReviewFinding] = Field(default_factory=list, max_length=8)
+    findings: list[ReviewFinding] = Field(default_factory=list, max_length=5)

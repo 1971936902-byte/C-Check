@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     model_max_tokens: int = Field(default=2048, ge=256, le=16384)
     model_chunk_max_chars: int = Field(default=5000, ge=1000, le=200000)
     model_chunk_max_count: int = Field(default=2500, ge=1, le=10000)
+    model_chunk_concurrency: int = Field(default=1, ge=1, le=8)
     model_structured_outputs_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False

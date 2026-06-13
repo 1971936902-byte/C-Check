@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,34 +34,14 @@ VLLM_TOKEN_BUDGET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 RESPONSE_CONTRACT = """
-You must return exactly one JSON object and nothing else. Do not wrap it in Markdown.
-The JSON object must match this schema:
-{
-  "summary": "string, concise Chinese review summary",
-  "score": 0-100,
-  "findings": [
-    {
-      "severity": "high | medium | low | suggestion",
-      "category": "memory_safety | buffer_overflow | pointer_safety | resource_leak | logic | security | input_validation | integer_safety | concurrency | performance | style | maintainability | compatibility | portability",
-      "title": "string",
-      "description": "string",
-      "file_path": "relative file path from the input",
-      "line": 1,
-      "remediation": "string",
-      "code_snippet": [
-        { "line": 1, "content": "original code line", "kind": "context | removed" }
-      ],
-      "fixed_snippet": [
-        { "line": 1, "content": "fixed code line", "kind": "context | added" }
-      ]
-    }
-  ]
-}
-Use null for "line" only when the finding cannot be tied to a specific line.
-Use an empty findings array when no issue is found.
-All enum values must be lowercase exactly as listed.
-All strings must be valid JSON strings with escaped quotes and newlines.
-Return at most 5 findings. Prioritize high-risk and concrete C language defects.
+Return exactly one compact JSON object. No Markdown.
+Top-level keys: summary, score, findings.
+Use Chinese. Keep summary under 80 Chinese chars.
+Return at most 3 findings for this request, only concrete C defects.
+Each finding uses: severity, category, title, description, file_path, line, remediation, code_snippet, fixed_snippet.
+Keep title under 40 chars. Keep description and remediation under 120 Chinese chars each.
+Use code_snippet/fixed_snippet as [] unless one line is essential; then include at most one line.
+Use lowercase enum values exactly. Use null for line only when no precise line exists.
 """
 
 
@@ -172,19 +153,51 @@ def _chunk_review_files(files: Sequence[ReviewFile], settings: Settings) -> list
     return chunks
 
 
+def _chunk_payload_chars(chunk: ChunkedReviewFile) -> int:
+    return len(f"===== FILE: {chunk.relative_path} =====\n{chunk.source_text}\n\n")
+
+
+def _chunk_review_batches(files: Sequence[ReviewFile], settings: Settings) -> list[list[ChunkedReviewFile]]:
+    batches: list[list[ChunkedReviewFile]] = []
+    current_batch: list[ChunkedReviewFile] = []
+    current_chars = 0
+
+    for chunk in _chunk_review_files(files, settings):
+        chunk_chars = _chunk_payload_chars(chunk)
+        if current_batch and current_chars + chunk_chars > settings.model_chunk_max_chars:
+            batches.append(current_batch)
+            current_batch = []
+            current_chars = 0
+        current_batch.append(chunk)
+        current_chars += chunk_chars
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
 def _should_chunk(files: Sequence[ReviewFile], settings: Settings) -> bool:
     return len(_source_message(files)) > settings.model_chunk_max_chars
 
 
-def _chunk_prompt(prompt: str, chunk_index: int, chunk_count: int, chunk: ChunkedReviewFile) -> str:
+def _batch_prompt(
+    prompt: str,
+    batch_index: int,
+    batch_count: int,
+    batch: Sequence[ChunkedReviewFile],
+) -> str:
+    chunk_lines = "\n".join(
+        f"- {chunk.relative_path}, lines {chunk.start_line}-{chunk.end_line}"
+        for chunk in batch
+    )
     return (
         f"{prompt}\n\n"
         "The submitted code is being reviewed in chunks because it is too large for one model "
-        "context window. Review only this chunk and report concrete issues visible in this "
-        "chunk. Each source line is prefixed as `000123: code`; use the numeric prefix as the "
+        "context window. Review only this batch and report concrete issues visible in this "
+        "batch. Each source line is prefixed as `000123: code`; use the numeric prefix as the "
         "`line` value and keep `file_path` as the original file path.\n"
-        f"Chunk {chunk_index} of {chunk_count}: {chunk.relative_path}, lines "
-        f"{chunk.start_line}-{chunk.end_line}."
+        f"Batch {batch_index} of {batch_count}, containing {len(batch)} source chunk(s):\n"
+        f"{chunk_lines}"
     )
 
 
@@ -205,7 +218,7 @@ def _merge_chunk_results(results: Sequence[ModelReviewResponse]) -> ModelReviewR
             finding.line or 10**9,
         )
     )
-    kept = findings[:8]
+    kept = findings[:5]
     if kept:
         summary = f"分片审查完成，共发现 {len(findings)} 个问题，报告展示优先级最高的 {len(kept)} 个。"
     else:
@@ -221,22 +234,37 @@ async def _invoke_chunked_review(
     settings: Settings,
     retry_instruction: str | None = None,
     chunk_max_chars: int | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> ModelReviewResponse:
     if chunk_max_chars is not None:
         settings = settings.model_copy(update={"model_chunk_max_chars": chunk_max_chars})
-    chunks = _chunk_review_files(files, settings)
-    results = []
-    for index, chunk in enumerate(chunks, start=1):
-        results.append(
-            await invoke_model(
+    batches = _chunk_review_batches(files, settings)
+    indexed_results: list[tuple[int, ModelReviewResponse]] = []
+    semaphore = asyncio.Semaphore(settings.model_chunk_concurrency)
+
+    async def invoke_batch(index: int, batch: Sequence[ChunkedReviewFile]) -> tuple[int, ModelReviewResponse]:
+        async with semaphore:
+            result = await invoke_model(
                 node=node,
-                files=[chunk],  # type: ignore[list-item]
-                prompt=_chunk_prompt(prompt, index, len(chunks), chunk),
+                files=list(batch),  # type: ignore[list-item]
+                prompt=_batch_prompt(prompt, index, len(batches), batch),
                 retry_instruction=retry_instruction,
                 settings=settings,
             )
-        )
-    return _merge_chunk_results(results)
+            return index, result
+
+    pending = [
+        asyncio.create_task(invoke_batch(index, batch))
+        for index, batch in enumerate(batches, start=1)
+    ]
+    for completed_count, task in enumerate(asyncio.as_completed(pending), start=1):
+        indexed_results.append(await task)
+        if progress_callback is not None:
+            progress_callback(completed_count, len(batches))
+    indexed_results.sort(key=lambda item: item[0])
+    return _merge_chunk_results(
+        [result for _, result in indexed_results]
+    )
 
 
 def truncate_model_log(value: str | None, limit: int = MAX_MODEL_LOG_CHARS) -> str | None:
@@ -520,6 +548,17 @@ async def invoke_selected_model(
     prompt = get_active_prompt(db)
     scoped_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
     settings = get_settings()
+
+    def update_chunk_progress(completed_chunks: int, total_chunks: int) -> None:
+        if total_chunks <= 0:
+            return
+        current_task = db.get(ReviewTask, task_id)
+        if current_task is None:
+            return
+        chunk_progress = 10 + int((completed_chunks / total_chunks) * 85)
+        current_task.progress = max(current_task.progress, min(95, chunk_progress))
+        db.commit()
+
     if _should_chunk(task.files, settings):
         return await _invoke_chunked_review(
             node=task.model_node,
@@ -527,6 +566,7 @@ async def invoke_selected_model(
             prompt=scoped_prompt,
             retry_instruction=retry_instruction,
             settings=settings,
+            progress_callback=update_chunk_progress,
         )
     try:
         return await invoke_model(
@@ -546,6 +586,7 @@ async def invoke_selected_model(
             retry_instruction=retry_instruction,
             settings=settings,
             chunk_max_chars=max(1000, settings.model_chunk_max_chars // 2),
+            progress_callback=update_chunk_progress,
         )
 
 

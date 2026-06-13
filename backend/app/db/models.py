@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -174,7 +175,7 @@ class ReviewFile(TimestampMixin, Base):
         ForeignKey("review_tasks.id", ondelete="CASCADE"), nullable=False, index=True
     )
     relative_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    source_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_text: Mapped[str] = mapped_column(Text().with_variant(mysql.LONGTEXT(), "mysql"), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
 
     task: Mapped[ReviewTask] = relationship(back_populates="files")
