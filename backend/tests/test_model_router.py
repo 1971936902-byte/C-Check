@@ -227,6 +227,11 @@ def test_invoke_model_sends_output_token_budget(monkeypatch):
                 )
             ],
             prompt="review",
+            settings=Settings(
+                _env_file=None,
+                allow_insecure_defaults=True,
+                model_max_tokens=2048,
+            ),
         )
     )
 
@@ -469,7 +474,7 @@ def test_chunk_review_files_does_not_reject_large_batches():
     settings = Settings(
         _env_file=None,
         allow_insecure_defaults=True,
-        model_chunk_max_chars=60,
+        model_chunk_max_chars=1000,
         model_chunk_max_count=2,
     )
 
@@ -491,7 +496,7 @@ def test_chunk_review_batches_groups_small_files():
     settings = Settings(
         _env_file=None,
         allow_insecure_defaults=True,
-        model_chunk_max_chars=260,
+        model_chunk_max_chars=1000,
     )
 
     batches = _chunk_review_batches(files, settings)
@@ -563,7 +568,8 @@ def test_chunked_review_halves_chunk_size_after_context_error(monkeypatch):
         )
     )
 
-    assert result.summary.startswith("鍒嗙墖瀹℃煡瀹屾垚")
+    assert result.score == 100
+    assert result.findings == []
     assert 12000 in seen_chunk_sizes
     assert 6000 in seen_chunk_sizes
 
@@ -618,7 +624,7 @@ def test_invoke_selected_model_keeps_chunking_on_retry_instruction(monkeypatch, 
     monkeypatch.setattr("app.services.model_router.get_settings", lambda: Settings(
         _env_file=None,
         allow_insecure_defaults=True,
-        model_chunk_max_chars=80,
+        model_chunk_max_chars=1000,
         model_chunk_max_count=20,
     ))
 
@@ -641,8 +647,8 @@ def test_invoke_selected_model_keeps_chunking_on_retry_instruction(monkeypatch, 
         task.files.append(
             ReviewFile(
                 relative_path="large.c",
-                source_text="\n".join(f"int value_{index};" for index in range(20)),
-                size_bytes=320,
+                source_text="\n".join(f"int value_{index};" for index in range(100)),
+                size_bytes=1600,
             )
         )
         db.add(task)
