@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, FolderOpened, Promotion, UploadFilled, View } from '@element-plus/icons-vue'
+import { Document, FolderOpened, Plus, Promotion, UploadFilled, View } from '@element-plus/icons-vue'
 import { errorMessage, MOCK_API_ENABLED, reviewApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
 import type { ModelNode, ReviewTask } from '../types'
@@ -12,6 +12,8 @@ import { ALL_CHECK_TYPES, deriveReviewProgressSummary, taskDisplayName, taskSubm
 
 const models = ref<ModelNode[]>([])
 const selectedModel = ref('')
+const taskDraftStarted = ref(false)
+const taskName = ref('')
 const mode = ref<InputMode>('text')
 const source = ref('')
 const singleFile = ref<File>()
@@ -37,12 +39,13 @@ const WORKSPACE_TASK_IDS_KEY = 'c-check-workspace-task-ids'
 const upload = computed(() => activeUpload(mode.value, singleFile.value, archiveFile.value))
 const folderSourceFiles = computed(() => folderFiles.value.filter(isCSourceFile))
 const folderTotalBytes = computed(() => folderSourceFiles.value.reduce((total, file) => total + file.size, 0))
+const trimmedTaskName = computed(() => taskName.value.trim())
 const highlightedSourcePreview = computed(() => sourcePreviewText.value
   ? sourcePreviewText.value.split('\n').map((line, index) => (
     `<div class="code-preview-line"><span class="code-preview-line-number">${index + 1}</span><code>${highlightCLine(line)}</code></div>`
   )).join('')
   : '<div class="code-preview-empty">暂无可预览内容</div>')
-const canSubmit = computed(() => canSubmitReview({
+const canSubmit = computed(() => taskDraftStarted.value && Boolean(trimmedTaskName.value) && canSubmitReview({
   mode: mode.value,
   selectedModel: selectedModel.value,
   sourceText: source.value,
@@ -52,6 +55,8 @@ const canSubmit = computed(() => canSubmitReview({
   checkTypes: checkTypes.value,
 }))
 const submitBlockReason = computed(() => {
+  if (!taskDraftStarted.value) return '请先创建新任务'
+  if (!trimmedTaskName.value) return '请输入任务名称'
   if (!models.value.length) return '暂无可用模型，请先在后台配置并启用模型'
   if (!selectedModel.value) return '请选择模型'
   if (!checkTypes.value.length) return '请至少选择一种检查类型'
@@ -67,6 +72,7 @@ const allChecksSelected = computed(() => checkTypes.value.length === ALL_CHECK_T
 const task = computed(() => tasks.value.find((item) => item.id === selectedTaskId.value) || tasks.value[0])
 const progressSummary = computed(() => task.value ? deriveReviewProgressSummary(task.value) : undefined)
 const activeTasks = computed(() => tasks.value.filter(isActiveTask))
+const checkTypeLabelMap = new Map<string, string>(ALL_CHECK_TYPES.map((item) => [item.value, item.label]))
 
 onMounted(async () => {
   try {
@@ -156,6 +162,26 @@ function ensurePolling() {
   if (activeTasks.value.length) timer = window.setInterval(poll, 1400)
 }
 
+function startTaskDraft() {
+  taskDraftStarted.value = true
+}
+
+function resetDraftInputs() {
+  taskDraftStarted.value = false
+  taskName.value = ''
+  source.value = ''
+  singleFile.value = undefined
+  archiveFile.value = undefined
+  folderFiles.value = []
+  if (singleFileInput.value) singleFileInput.value.value = ''
+  if (archiveFileInput.value) archiveFileInput.value.value = ''
+  if (folderInput.value) folderInput.value.value = ''
+}
+
+function cancelTaskDraft() {
+  resetDraftInputs()
+}
+
 function clearFile(target: 'file' | 'archive') {
   if (target === 'file') {
     singleFile.value = undefined
@@ -190,9 +216,17 @@ function setSelectedFile(target: 'file' | 'archive', selected: File) {
     return
   }
   if (target === 'file') {
+    mode.value = 'file'
     singleFile.value = selected
+    archiveFile.value = undefined
+    folderFiles.value = []
+    taskName.value = selected.name
   } else {
+    mode.value = 'archive'
     archiveFile.value = selected
+    singleFile.value = undefined
+    folderFiles.value = []
+    taskName.value = selected.name
   }
 }
 function toggleAllChecks(value: boolean) { checkTypes.value = value ? ALL_CHECK_TYPES.map((item) => item.value) : [] }
@@ -205,6 +239,11 @@ function formatBytes(value: number) {
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
+function taskCheckTypesLabel(target: ReviewTask) {
+  return (target.check_types || [])
+    .map((item) => checkTypeLabelMap.get(item) || item)
+    .join('、')
+}
 function modelDescriptionText(value: string | null | undefined) {
   if (!value) return ''
   if (value === 'Registered by manual deploy verification') return '由手动部署验证登记，可直接用于代码审查。'
@@ -216,6 +255,13 @@ function setFolderFiles(event: Event) {
   const input = event.target as HTMLInputElement
   folderFiles.value = Array.from(input.files || []).filter(isCSourceFile)
   if (!folderFiles.value.length) ElMessage.warning('所选文件夹中未找到 .c / .h 文件')
+  if (folderFiles.value.length) {
+    mode.value = 'folder'
+    singleFile.value = undefined
+    archiveFile.value = undefined
+    const firstPath = folderFiles.value[0].webkitRelativePath || folderFiles.value[0].name
+    taskName.value = firstPath.includes('/') ? firstPath.split('/')[0] : '项目文件夹审查'
+  }
   input.value = ''
 }
 function clearFolder() { folderFiles.value = [] }
@@ -271,6 +317,8 @@ async function previewSingleFile() {
 }
 
 async function submit() {
+  if (!taskDraftStarted.value) return ElMessage.warning('请先创建新任务')
+  if (!trimmedTaskName.value) return ElMessage.warning('请输入任务名称')
   if (!models.value.length) return ElMessage.warning('暂无可用模型，请先在后台配置并启用模型')
   if (!checkTypes.value.length) return ElMessage.warning('请至少选择一种检查类型')
   if (!canSubmit.value) return ElMessage.warning(submitBlockReason.value || '请选择模型并提供待审查代码')
@@ -278,13 +326,14 @@ async function submit() {
   let created: ReviewTask
   try {
     if (mode.value === 'text') {
-      created = (await reviewApi.submitText(selectedModel.value, source.value, checkTypes.value)).data
+      created = (await reviewApi.submitText(selectedModel.value, source.value, checkTypes.value, trimmedTaskName.value)).data
     } else if (mode.value === 'folder') {
-      created = (await reviewApi.submitFolder(selectedModel.value, folderSourceFiles.value, checkTypes.value)).data
+      created = (await reviewApi.submitFolder(selectedModel.value, folderSourceFiles.value, checkTypes.value, trimmedTaskName.value)).data
     } else {
-      created = (await reviewApi.submitFile(mode.value, selectedModel.value, upload.value!, checkTypes.value)).data
+      created = (await reviewApi.submitFile(mode.value, selectedModel.value, upload.value!, checkTypes.value, trimmedTaskName.value)).data
     }
     upsertTask(created)
+    resetDraftInputs()
     await poll()
   } catch (e) {
     ElMessage.error(errorMessage(e))
@@ -355,24 +404,62 @@ async function pinTask(target: ReviewTask) {
   <section>
     <header class="page-header">
       <div>
-        <h1>新建代码审查</h1>
-        <p>提交 C 语言源码，系统将按所选检查维度识别风险并生成审查报告。</p>
+        <h1>代码审查任务</h1>
+        <p>先创建任务并设置名称与检查维度，再导入 C 源码生成审查报告。</p>
       </div>
     </header>
 
     <div class="workspace-grid">
       <div class="panel glass">
+        <div v-if="!taskDraftStarted" class="task-setup-empty">
+          <button type="button" class="task-setup-plus" aria-label="创建新任务" @click="startTaskDraft">
+            <el-icon><Plus /></el-icon>
+          </button>
+          <strong>创建新任务</strong>
+          <span>创建后填写任务名称、检查类型，再导入 C 源码、压缩包或项目文件夹。</span>
+        </div>
+
+        <template v-else>
         <div class="section-heading">
           <div>
-            <h2>提交代码</h2>
-            <p>支持文本、单文件、压缩包和项目文件夹。</p>
+            <h2>任务信息</h2>
+            <p>填写任务名称并选择本次审查的模型与检查维度。</p>
           </div>
-          <el-select v-model="selectedModel" :disabled="!auth.isAdmin || !models.length" :placeholder="models.length ? '请选择模型' : '暂无可用模型'" class="model-select">
-            <el-option v-for="model in models" :key="model.id" :value="model.id" :label="model.display_name">
-              <span>{{ model.display_name }}</span>
-              <small>{{ model.model_identifier }}</small>
-            </el-option>
-          </el-select>
+          <el-button plain @click="cancelTaskDraft">取消创建</el-button>
+        </div>
+
+        <div class="task-config-list">
+          <div class="task-config-row">
+            <div>
+              <strong>任务名称</strong>
+              <small>最多 128 个字符</small>
+            </div>
+            <el-input v-model="taskName" class="task-name-input" maxlength="128" show-word-limit placeholder="请输入任务名称" />
+          </div>
+
+          <div class="task-config-row">
+            <div>
+              <strong>检查类型</strong>
+              <small>按审查目标选择重点维度</small>
+            </div>
+            <el-checkbox :model-value="allChecksSelected" @change="toggleAllChecks">全选</el-checkbox>
+            <el-select v-model="checkTypes" multiple collapse-tags collapse-tags-tooltip placeholder="请至少选择一种检查类型" class="check-type-select">
+              <el-option v-for="item in ALL_CHECK_TYPES" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </div>
+
+          <div class="task-config-row">
+            <div>
+              <strong>模型名称</strong>
+              <small>选择本次审查使用的推理模式</small>
+            </div>
+            <el-select v-model="selectedModel" :disabled="!auth.isAdmin || !models.length" :placeholder="models.length ? '请选择模型' : '暂无可用模型'" class="model-select">
+              <el-option v-for="model in models" :key="model.id" :value="model.id" :label="model.display_name">
+                <span>{{ model.display_name }}</span>
+                <small>{{ model.model_identifier }}</small>
+              </el-option>
+            </el-select>
+          </div>
         </div>
 
         <el-alert
@@ -386,17 +473,6 @@ async function pinTask(target: ReviewTask) {
         <p v-if="selectedModelInfo?.description" class="model-hint">
           {{ modelDescriptionText(selectedModelInfo.description) }}{{ auth.isAdmin ? '' : ' 当前模型由管理员统一配置。' }}
         </p>
-
-        <div class="check-type-row">
-          <div>
-            <strong>检查类型</strong>
-            <small>按审查目标选择重点维度</small>
-          </div>
-          <el-checkbox :model-value="allChecksSelected" @change="toggleAllChecks">全选</el-checkbox>
-          <el-select v-model="checkTypes" multiple collapse-tags collapse-tags-tooltip placeholder="请至少选择一种检查类型" class="check-type-select">
-            <el-option v-for="item in ALL_CHECK_TYPES" :key="item.value" :label="item.label" :value="item.value" />
-          </el-select>
-        </div>
 
         <el-tabs v-model="mode" class="input-tabs">
           <el-tab-pane name="text">
@@ -490,6 +566,7 @@ async function pinTask(target: ReviewTask) {
             </span>
           </el-tooltip>
         </div>
+        </template>
       </div>
 
       <aside class="panel glass task-panel">
@@ -525,12 +602,15 @@ async function pinTask(target: ReviewTask) {
           <div class="task-title">
             <div>
               <strong>{{ taskDisplayName(task) }}</strong>
-              <small>{{ taskSubmissionCountLabel(task) }} · {{ task.check_types?.length || 0 }} 项检查</small>
+              <small>
+                {{ taskSubmissionCountLabel(task) }} · {{ task.check_types?.length || 0 }} 项检查
+                <template v-if="taskCheckTypesLabel(task)">（{{ taskCheckTypesLabel(task) }}）</template>
+              </small>
             </div>
             <StatusBadge :status="task.status" />
           </div>
-          <el-progress :percentage="task.progress" :status="task.status === 'failed' ? 'exception' : task.status === 'completed' ? 'success' : undefined" />
-          <div class="task-focus-row">
+          <el-progress v-if="task.status === 'running'" :percentage="task.progress" />
+          <div v-if="task.status === 'running'" class="task-focus-row">
             <div class="task-focus-main">
               <i :class="`file-state file-state-${progressSummary.state}`"></i>
               <div>

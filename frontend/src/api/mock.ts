@@ -186,8 +186,8 @@ export const mockApi = {
     return response(requireUser(state).role === 'admin' ? models : models.filter((model) => model.is_default))
   },
   reviews: {
-    submitText: async (model_node_id: string, source_text: string, check_types: string[]) => createReview(model_node_id, 'text', 'snippet.c', source_text ? 1 : 0, check_types),
-    submitFile: async (mode: 'file' | 'archive', model_node_id: string, file: File, check_types: string[]) => createReview(model_node_id, mode, file.name, mode === 'archive' ? 6 : 1, check_types),
+    submitText: async (model_node_id: string, source_text: string, check_types: string[], display_name?: string) => createReview(model_node_id, 'text', display_name || 'snippet.c', source_text ? 1 : 0, check_types),
+    submitFile: async (mode: 'file' | 'archive', model_node_id: string, file: File, check_types: string[], display_name?: string) => createReview(model_node_id, mode, display_name || file.name, mode === 'archive' ? 6 : 1, check_types),
     submitDemoArchive: async (check_types: string[]) => createReview('model-qwen', 'archive', 'embedded-gateway-live-demo.zip', 6, check_types),
     list: async (params?: Record<string, unknown>) => {
       const state = load()

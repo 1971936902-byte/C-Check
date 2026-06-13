@@ -305,6 +305,7 @@ def create_review_task(
     model_node_id: str,
     submission: Submission,
     check_types: list[str],
+    display_name: str | None = None,
 ) -> ReviewTask:
     model_node = db.get(ModelNode, model_node_id)
     if model_node is None or not model_node.is_enabled:
@@ -319,7 +320,7 @@ def create_review_task(
         owner=owner,
         model_node=model_node,
         input_mode=submission.input_mode,
-        display_name=submission.display_name,
+        display_name=(display_name or "").strip() or submission.display_name,
         file_count=len(submission.files),
         check_types=normalized_check_types,
     )

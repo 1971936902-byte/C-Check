@@ -49,17 +49,18 @@ export const authApi = {
 }
 export const reviewApi = {
   models: () => MOCK_API_ENABLED ? mockApi.models() : api.get<ModelNode[]>('/models'),
-  submitText: (model_node_id: string, source_text: string, check_types: string[]) => MOCK_API_ENABLED ? mockApi.reviews.submitText(model_node_id, source_text, check_types) : api.post<ReviewTask>('/reviews/text', { model_node_id, source_text, check_types }),
-  submitFile: (mode: 'file' | 'archive', modelNodeId: string, file: File, checkTypes: string[]) => {
-    if (MOCK_API_ENABLED) return mockApi.reviews.submitFile(mode, modelNodeId, file, checkTypes)
-    const body = new FormData(); body.append('model_node_id', modelNodeId); body.append('file', file); body.append('check_types', JSON.stringify(checkTypes))
+  submitText: (model_node_id: string, source_text: string, check_types: string[], display_name?: string) => MOCK_API_ENABLED ? mockApi.reviews.submitText(model_node_id, source_text, check_types, display_name) : api.post<ReviewTask>('/reviews/text', { model_node_id, source_text, check_types, display_name }),
+  submitFile: (mode: 'file' | 'archive', modelNodeId: string, file: File, checkTypes: string[], displayName?: string) => {
+    if (MOCK_API_ENABLED) return mockApi.reviews.submitFile(mode, modelNodeId, file, checkTypes, displayName)
+    const body = new FormData(); body.append('model_node_id', modelNodeId); body.append('file', file); body.append('check_types', JSON.stringify(checkTypes)); if (displayName) body.append('display_name', displayName)
     return api.post<ReviewTask>(`/reviews/${mode}`, body)
   },
-  submitFolder: (modelNodeId: string, files: File[], checkTypes: string[]) => {
-    if (MOCK_API_ENABLED) return mockApi.reviews.submitFile('archive', modelNodeId, files[0], checkTypes)
+  submitFolder: (modelNodeId: string, files: File[], checkTypes: string[], displayName?: string) => {
+    if (MOCK_API_ENABLED) return mockApi.reviews.submitFile('archive', modelNodeId, files[0], checkTypes, displayName)
     const body = new FormData()
     body.append('model_node_id', modelNodeId)
     body.append('check_types', JSON.stringify(checkTypes))
+    if (displayName) body.append('display_name', displayName)
     files.forEach((file) => body.append('files', file, file.webkitRelativePath || file.name))
     return api.post<ReviewTask>('/reviews/folder', body)
   },

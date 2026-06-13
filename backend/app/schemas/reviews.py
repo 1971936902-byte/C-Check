@@ -9,6 +9,7 @@ class TextReviewRequest(BaseModel):
     model_node_id: str = Field(min_length=1, max_length=36)
     source_text: str
     check_types: list[str] = Field(min_length=1)
+    display_name: str | None = Field(default=None, max_length=128)
 
 
 class ReviewFileResponse(BaseModel):

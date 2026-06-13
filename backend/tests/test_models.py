@@ -1,6 +1,8 @@
 from sqlalchemy import func, select, text
 
 from app.db.models import ModelNode, Report, ReviewFile, ReviewTask, User
+from app.core.config import Settings
+from app.api.models import ensure_mock_model_node
 
 
 def test_sqlite_fixture_enables_foreign_keys(db_session):
@@ -33,3 +35,14 @@ def test_deleting_user_removes_owned_review_data(db_session):
     assert db_session.scalar(select(func.count()).select_from(ReviewTask)) == 0
     assert db_session.scalar(select(func.count()).select_from(ReviewFile)) == 0
     assert db_session.scalar(select(func.count()).select_from(Report)) == 0
+
+
+def test_enabled_mock_mode_registers_mock_model_node(db_session):
+    settings = Settings(_env_file=None, allow_insecure_defaults=True, mock_model_enabled=True)
+
+    ensure_mock_model_node(db_session, settings)
+
+    node = db_session.scalar(select(ModelNode).where(ModelNode.base_url == "mock://local"))
+    assert node is not None
+    assert node.display_name == "Mock 模式"
+    assert node.is_enabled is True

@@ -38,6 +38,7 @@ def _create_task(
     model_node_id: str,
     submission: Submission,
     check_types: list[str],
+    display_name: str | None = None,
 ) -> ReviewTask:
     try:
         return create_review_task(
@@ -46,6 +47,7 @@ def _create_task(
             model_node_id=model_node_id,
             submission=submission,
             check_types=check_types,
+            display_name=display_name,
         )
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
@@ -74,7 +76,7 @@ def submit_text(
         submission = collect_text_submission(request.source_text, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    task = _create_task(db, current_user, request.model_node_id, submission, request.check_types)
+    task = _create_task(db, current_user, request.model_node_id, submission, request.check_types, request.display_name)
     return _with_queue_position(db, task)
 
 
@@ -96,13 +98,14 @@ async def submit_file(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
+    display_name: Annotated[str | None, Form(max_length=128)] = None,
 ) -> ReviewTask:
     try:
         content = await file.read(settings.upload_max_file_bytes + 1)
         submission = collect_file_submission(file.filename or "", content, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types), display_name)
     return _with_queue_position(db, task)
 
 
@@ -114,6 +117,7 @@ async def submit_archive(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
+    display_name: Annotated[str | None, Form(max_length=128)] = None,
 ) -> ReviewTask:
     try:
         content = await file.read(settings.upload_max_archive_bytes + 1)
@@ -122,7 +126,7 @@ async def submit_archive(
         submission = collect_archive_submission(file.filename or "", content, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types), display_name)
     return _with_queue_position(db, task)
 
 
@@ -134,6 +138,7 @@ async def submit_folder(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
+    display_name: Annotated[str | None, Form(max_length=128)] = None,
 ) -> ReviewTask:
     try:
         submitted = []
@@ -143,7 +148,7 @@ async def submit_folder(
         submission = collect_folder_submission(submitted, settings)
     except SubmissionError as exc:
         raise _unprocessable(exc) from exc
-    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types))
+    task = _create_task(db, current_user, model_node_id, submission, _parse_check_types(check_types), display_name)
     return _with_queue_position(db, task)
 
 

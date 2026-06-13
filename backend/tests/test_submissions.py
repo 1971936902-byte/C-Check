@@ -312,6 +312,7 @@ def test_text_submission_persists_task_and_file(db_session_factory):
                 "model_node_id": node_id,
                 "source_text": "int main(void) { return 0; }",
                 "check_types": ["logic"],
+                "display_name": "manual text task",
             },
         )
 
@@ -322,6 +323,7 @@ def test_text_submission_persists_task_and_file(db_session_factory):
     assert task.owner_id == user_id
     assert task.model_node_id == node_id
     assert task.input_mode == "text"
+    assert task.display_name == "manual text task"
     assert task.file_count == 1
     assert files[0].relative_path == "snippet.c"
 
@@ -336,7 +338,7 @@ def test_file_and_archive_endpoints_accept_valid_uploads(db_session_factory):
         file_response = client.post(
             "/api/reviews/file",
             headers=auth_headers(user_id),
-            data={"model_node_id": node_id, "check_types": '["maintainability"]'},
+            data={"model_node_id": node_id, "check_types": '["maintainability"]', "display_name": "header task"},
             files={"file": ("main.h", b"#pragma once", "text/plain")},
         )
         archive_response = client.post(
@@ -348,6 +350,7 @@ def test_file_and_archive_endpoints_accept_valid_uploads(db_session_factory):
 
     assert file_response.status_code == 201
     assert archive_response.status_code == 201
+    assert file_response.json()["display_name"] == "header task"
 
 
 def test_folder_endpoint_accepts_nested_c_files(db_session_factory):
@@ -359,7 +362,7 @@ def test_folder_endpoint_accepts_nested_c_files(db_session_factory):
         response = client.post(
             "/api/reviews/folder",
             headers=auth_headers(user_id),
-            data={"model_node_id": node_id, "check_types": '["logic"]'},
+            data={"model_node_id": node_id, "check_types": '["logic"]', "display_name": "folder task"},
             files=[
                 ("files", ("project/src/main.c", b"int main(void) {}", "text/plain")),
                 ("files", ("project/include/main.h", b"#pragma once", "text/plain")),
@@ -369,6 +372,7 @@ def test_folder_endpoint_accepts_nested_c_files(db_session_factory):
 
     assert response.status_code == 201
     assert response.json()["input_mode"] == "folder"
+    assert response.json()["display_name"] == "folder task"
     assert response.json()["file_count"] == 2
     with db_session_factory() as db:
         files = db.scalars(select(ReviewFile).where(ReviewFile.task_id == response.json()["id"])).all()

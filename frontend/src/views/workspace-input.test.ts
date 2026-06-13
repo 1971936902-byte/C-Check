@@ -49,4 +49,17 @@ describe('activeUpload', () => {
       checkTypes: [],
     })).toBe(false)
   })
+
+  it('uses folder content when folder mode is active after another upload was selected', () => {
+    expect(activeUpload('folder', single, archive)).toBeUndefined()
+    expect(canSubmitReview({
+      mode: 'folder',
+      selectedModel: 'model-1',
+      sourceText: '',
+      singleFile: single,
+      archiveFile: archive,
+      folderFiles: [single],
+      checkTypes: ['logic'],
+    })).toBe(true)
+  })
 })
