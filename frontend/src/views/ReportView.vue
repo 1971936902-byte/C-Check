@@ -92,7 +92,7 @@ function locationText(finding: Finding) {
     <header class="page-header">
       <div>
         <h1>审查报告</h1>
-        <p>结构化呈现代码风险、问题定位与修复建议。</p>
+        <p>结构化呈现代码风险、问题定位与相关代码片段。</p>
       </div>
       <div>
         <el-button :icon="Download" @click="download('markdown')">下载 Markdown</el-button>
@@ -176,10 +176,6 @@ function locationText(finding: Finding) {
                     </template>
 
                     <div class="finding-body">
-                      <p>{{ finding.description }}</p>
-                      <h4>修复建议</h4>
-                      <p>{{ finding.remediation }}</p>
-
                       <div v-if="finding.code_snippet?.length || finding.fixed_snippet?.length" class="diff-grid">
                         <section v-if="finding.code_snippet?.length" class="code-panel">
                           <header>
@@ -213,6 +209,7 @@ function locationText(finding: Finding) {
                           </div>
                         </section>
                       </div>
+                      <p v-else class="finding-empty-code">模型未返回代码片段，请根据文件位置定位。</p>
 
                       <small>分类：{{ finding.category }}</small>
                     </div>
@@ -330,6 +327,10 @@ function locationText(finding: Finding) {
 
 .finding-tabs {
   margin-top: 12px;
+}
+
+.finding-empty-code {
+  margin: 4px 0 10px;
 }
 
 .finding-title {
