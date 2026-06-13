@@ -512,10 +512,6 @@ async function pinTask(target: ReviewTask) {
               前方还有 {{ item.queued_ahead_count ?? 0 }} 个任务
               <b v-if="item.queue_priority">已置顶</b>
             </small>
-            <el-progress
-              :percentage="item.progress"
-              :status="item.status === 'failed' ? 'exception' : item.status === 'completed' ? 'success' : undefined"
-            />
           </button>
         </div>
 
