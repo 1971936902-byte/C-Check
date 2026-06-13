@@ -22,6 +22,8 @@ RESPONSE_REQUIRED_KEYS = {"summary", "score", "findings"}
 STRUCTURED_RESPONSE_SCHEMA_NAME = "c_review_response"
 TOKEN_BUDGET_SAFETY_MARGIN = 128
 MIN_RETRY_OUTPUT_TOKENS = 128
+CHUNK_CONTEXT_CHAR_RATIO = 0.45
+MIN_CHUNK_CONTEXT_CHARS = 1000
 CHUNK_LINE_PREFIX_WIDTH = 6
 SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "suggestion": 3}
 TOKEN_BUDGET_PATTERN = re.compile(
@@ -148,8 +150,9 @@ def _chunk_file(source: ReviewFile, max_chars: int) -> list[ChunkedReviewFile]:
 
 def _chunk_review_files(files: Sequence[ReviewFile], settings: Settings) -> list[ChunkedReviewFile]:
     chunks: list[ChunkedReviewFile] = []
+    max_chars = _effective_chunk_max_chars(settings)
     for source in files:
-        chunks.extend(_chunk_file(source, settings.model_chunk_max_chars))
+        chunks.extend(_chunk_file(source, max_chars))
     return chunks
 
 
@@ -157,14 +160,22 @@ def _chunk_payload_chars(chunk: ChunkedReviewFile) -> int:
     return len(f"===== FILE: {chunk.relative_path} =====\n{chunk.source_text}\n\n")
 
 
+def _effective_chunk_max_chars(settings: Settings) -> int:
+    conservative_budget = int(settings.model_chunk_max_chars * CHUNK_CONTEXT_CHAR_RATIO)
+    if settings.model_chunk_max_chars >= MIN_CHUNK_CONTEXT_CHARS:
+        conservative_budget = max(MIN_CHUNK_CONTEXT_CHARS, conservative_budget)
+    return max(1, min(settings.model_chunk_max_chars, conservative_budget))
+
+
 def _chunk_review_batches(files: Sequence[ReviewFile], settings: Settings) -> list[list[ChunkedReviewFile]]:
     batches: list[list[ChunkedReviewFile]] = []
     current_batch: list[ChunkedReviewFile] = []
     current_chars = 0
+    max_chars = _effective_chunk_max_chars(settings)
 
     for chunk in _chunk_review_files(files, settings):
         chunk_chars = _chunk_payload_chars(chunk)
-        if current_batch and current_chars + chunk_chars > settings.model_chunk_max_chars:
+        if current_batch and current_chars + chunk_chars > max_chars:
             batches.append(current_batch)
             current_batch = []
             current_chars = 0
@@ -177,7 +188,7 @@ def _chunk_review_batches(files: Sequence[ReviewFile], settings: Settings) -> li
 
 
 def _should_chunk(files: Sequence[ReviewFile], settings: Settings) -> bool:
-    return len(_source_message(files)) > settings.model_chunk_max_chars
+    return len(_source_message(files)) > _effective_chunk_max_chars(settings)
 
 
 def _batch_prompt(
@@ -238,33 +249,46 @@ async def _invoke_chunked_review(
 ) -> ModelReviewResponse:
     if chunk_max_chars is not None:
         settings = settings.model_copy(update={"model_chunk_max_chars": chunk_max_chars})
-    batches = _chunk_review_batches(files, settings)
-    indexed_results: list[tuple[int, ModelReviewResponse]] = []
-    semaphore = asyncio.Semaphore(settings.model_chunk_concurrency)
+    while True:
+        batches = _chunk_review_batches(files, settings)
+        indexed_results: list[tuple[int, ModelReviewResponse]] = []
+        semaphore = asyncio.Semaphore(settings.model_chunk_concurrency)
 
-    async def invoke_batch(index: int, batch: Sequence[ChunkedReviewFile]) -> tuple[int, ModelReviewResponse]:
-        async with semaphore:
-            result = await invoke_model(
-                node=node,
-                files=list(batch),  # type: ignore[list-item]
-                prompt=_batch_prompt(prompt, index, len(batches), batch),
-                retry_instruction=retry_instruction,
-                settings=settings,
-            )
-            return index, result
+        async def invoke_batch(index: int, batch: Sequence[ChunkedReviewFile]) -> tuple[int, ModelReviewResponse]:
+            async with semaphore:
+                result = await invoke_model(
+                    node=node,
+                    files=list(batch),  # type: ignore[list-item]
+                    prompt=_batch_prompt(prompt, index, len(batches), batch),
+                    retry_instruction=retry_instruction,
+                    settings=settings,
+                )
+                return index, result
 
-    pending = [
-        asyncio.create_task(invoke_batch(index, batch))
-        for index, batch in enumerate(batches, start=1)
-    ]
-    for completed_count, task in enumerate(asyncio.as_completed(pending), start=1):
-        indexed_results.append(await task)
-        if progress_callback is not None:
-            progress_callback(completed_count, len(batches))
-    indexed_results.sort(key=lambda item: item[0])
-    return _merge_chunk_results(
-        [result for _, result in indexed_results]
-    )
+        pending = [
+            asyncio.create_task(invoke_batch(index, batch))
+            for index, batch in enumerate(batches, start=1)
+        ]
+        try:
+            for completed_count, task in enumerate(asyncio.as_completed(pending), start=1):
+                indexed_results.append(await task)
+                if progress_callback is not None:
+                    progress_callback(completed_count, len(batches))
+        except ModelInvocationError as exc:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if "context window is too small" not in str(exc):
+                raise
+            next_chunk_max_chars = settings.model_chunk_max_chars // 2
+            if next_chunk_max_chars < MIN_CHUNK_CONTEXT_CHARS or next_chunk_max_chars == settings.model_chunk_max_chars:
+                raise
+            settings = settings.model_copy(update={"model_chunk_max_chars": next_chunk_max_chars})
+            continue
+        indexed_results.sort(key=lambda item: item[0])
+        return _merge_chunk_results(
+            [result for _, result in indexed_results]
+        )
 
 
 def truncate_model_log(value: str | None, limit: int = MAX_MODEL_LOG_CHARS) -> str | None:
@@ -337,7 +361,7 @@ def _recover_truncated_contract(content: str) -> str | None:
     if not findings:
         return None
     return json.dumps(
-        {"summary": summary, "score": score, "findings": findings[:8]},
+        {"summary": summary, "score": score, "findings": findings[:5]},
         ensure_ascii=False,
     )
 

@@ -10,6 +10,8 @@ from app.schemas.model_response import FindingCategory, ModelReviewResponse
 from app.services.model_router import (
     ModelInvocationError,
     _chunk_file,
+    _effective_chunk_max_chars,
+    _invoke_chunked_review,
     _chunk_review_batches,
     _chunk_review_files,
     _merge_chunk_results,
@@ -314,7 +316,7 @@ def test_parse_response_rejects_too_many_findings_for_audit():
         _parse_response({"choices": [{"message": {"content": json.dumps(content)}}]})
 
     assert "invalid structured response" in str(raised.value)
-    assert "at most 8 items" in (raised.value.details or "")
+    assert "at most 5 items" in (raised.value.details or "")
 
 
 def test_invoke_model_keeps_http_error_response_body(monkeypatch):
@@ -498,6 +500,72 @@ def test_chunk_review_batches_groups_small_files():
     assert [chunk.relative_path for batch in batches for chunk in batch] == [
         file.relative_path for file in files
     ]
+
+
+def test_chunk_review_batches_uses_conservative_context_budget():
+    files = [
+        ReviewFile(
+            relative_path=f"small_{index}.c",
+            source_text="int value;\n" * 80,
+            size_bytes=880,
+        )
+        for index in range(3)
+    ]
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        model_chunk_max_chars=12000,
+    )
+
+    batches = _chunk_review_batches(files, settings)
+    effective_budget = _effective_chunk_max_chars(settings)
+
+    assert effective_budget == 5400
+    assert all(
+        sum(len(f"===== FILE: {chunk.relative_path} =====\n{chunk.source_text}\n\n") for chunk in batch)
+        <= effective_budget
+        for batch in batches
+    )
+
+
+def test_chunked_review_halves_chunk_size_after_context_error(monkeypatch):
+    seen_chunk_sizes: list[int] = []
+
+    async def fake_invoke_model(*, files, settings, **_kwargs):
+        seen_chunk_sizes.append(settings.model_chunk_max_chars)
+        if settings.model_chunk_max_chars == 12000:
+            raise ModelInvocationError("model context window is too small for this review request")
+        return ModelReviewResponse(summary="ok", score=100, findings=[])
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+
+    result = asyncio.run(
+        _invoke_chunked_review(
+            node=ModelNode(
+                display_name="test",
+                model_identifier="qwen-test",
+                base_url="http://model.local",
+                is_enabled=True,
+            ),
+            files=[
+                ReviewFile(
+                    relative_path="large.c",
+                    source_text="int value;\n" * 300,
+                    size_bytes=3000,
+                )
+            ],
+            prompt="review",
+            settings=Settings(
+                _env_file=None,
+                allow_insecure_defaults=True,
+                model_chunk_max_chars=12000,
+            ),
+        )
+    )
+
+    assert result.summary.startswith("鍒嗙墖瀹℃煡瀹屾垚")
+    assert 12000 in seen_chunk_sizes
+    assert 6000 in seen_chunk_sizes
 
 
 def test_merge_chunk_results_keeps_highest_priority_findings():
