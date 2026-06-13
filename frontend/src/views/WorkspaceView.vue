@@ -384,15 +384,15 @@ async function pinTask(target: ReviewTask) {
             <el-input v-model="taskName" class="task-name-input" maxlength="128" show-word-limit placeholder="请输入任务名称" />
           </div>
 
-          <div class="task-config-row">
+          <div class="task-config-row task-check-config-row">
             <div>
               <strong>检查类型</strong>
               <small>按审查目标选择重点维度</small>
             </div>
-            <el-checkbox :model-value="allChecksSelected" @change="toggleAllChecks">全选</el-checkbox>
             <el-select v-model="checkTypes" multiple collapse-tags collapse-tags-tooltip placeholder="请至少选择一种检查类型" class="check-type-select">
               <el-option v-for="item in ALL_CHECK_TYPES" :key="item.value" :label="item.label" :value="item.value" />
             </el-select>
+            <el-checkbox class="check-all-checkbox" :model-value="allChecksSelected" @change="toggleAllChecks">全选</el-checkbox>
           </div>
 
           <div class="task-config-row">
