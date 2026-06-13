@@ -20,7 +20,7 @@ const route = useRoute()
 const report = ref<Report>()
 const loading = ref(true)
 const activeSeverity = ref<Severity>('high')
-const pageSize = ref(20)
+const pageSize = ref(15)
 const pages = reactive<Record<Severity, number>>({
   high: 1,
   medium: 1,
@@ -217,7 +217,7 @@ function locationText(finding: Finding) {
               <el-pagination
                 v-model:current-page="pages[activeSeverity]"
                 v-model:page-size="pageSize"
-                :page-sizes="[10, 20, 50, 100]"
+                :page-sizes="[15, 30, 50, 100]"
                 :total="activeTotal"
                 layout="total, sizes, prev, pager, next"
               />
