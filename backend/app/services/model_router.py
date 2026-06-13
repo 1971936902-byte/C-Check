@@ -229,12 +229,11 @@ def _merge_chunk_results(results: Sequence[ModelReviewResponse]) -> ModelReviewR
             finding.line or 10**9,
         )
     )
-    kept = findings[:5]
-    if kept:
-        summary = f"分片审查完成，共发现 {len(findings)} 个问题，报告展示优先级最高的 {len(kept)} 个。"
+    if findings:
+        summary = f"分片审查完成，共发现 {len(findings)} 个问题，已保存全部问题并按风险等级排序。"
     else:
         summary = "分片审查完成，未发现明确问题。"
-    return ModelReviewResponse(summary=summary, score=_merged_score(results), findings=kept)
+    return ModelReviewResponse(summary=summary, score=_merged_score(results), findings=findings)
 
 
 async def _invoke_chunked_review(
@@ -361,7 +360,7 @@ def _recover_truncated_contract(content: str) -> str | None:
     if not findings:
         return None
     return json.dumps(
-        {"summary": summary, "score": score, "findings": findings[:5]},
+        {"summary": summary, "score": score, "findings": findings[:2000]},
         ensure_ascii=False,
     )
 

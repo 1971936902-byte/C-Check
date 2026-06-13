@@ -291,7 +291,7 @@ def test_invoke_model_requests_json_schema_structured_output(monkeypatch):
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["name"] == "c_review_response"
     assert response_format["json_schema"]["strict"] is True
-    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 5
+    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 2000
 
 
 def test_parse_response_rejects_too_many_findings_for_audit():
@@ -309,14 +309,14 @@ def test_parse_response_rejects_too_many_findings_for_audit():
     content = {
         "summary": "too many findings",
         "score": 60,
-        "findings": [finding for _ in range(6)],
+        "findings": [finding for _ in range(2001)],
     }
 
     with pytest.raises(ModelInvocationError) as raised:
         _parse_response({"choices": [{"message": {"content": json.dumps(content)}}]})
 
     assert "invalid structured response" in str(raised.value)
-    assert "at most 5 items" in (raised.value.details or "")
+    assert "at most 2000 items" in (raised.value.details or "")
 
 
 def test_invoke_model_keeps_http_error_response_body(monkeypatch):
@@ -574,7 +574,7 @@ def test_chunked_review_halves_chunk_size_after_context_error(monkeypatch):
     assert 6000 in seen_chunk_sizes
 
 
-def test_merge_chunk_results_keeps_highest_priority_findings():
+def test_merge_chunk_results_keeps_all_sorted_findings():
     finding = {
         "category": "memory_safety",
         "description": "description",
@@ -605,9 +605,10 @@ def test_merge_chunk_results_keeps_highest_priority_findings():
     merged = _merge_chunk_results([low_result, high_result])
 
     assert merged.score == 40
-    assert len(merged.findings) == 5
+    assert len(merged.findings) == 6
     assert merged.findings[0].severity.value == "high"
     assert merged.findings[0].title == "high"
+    assert [finding.title for finding in merged.findings[1:]] == [f"low-{index}" for index in range(1, 6)]
 
 
 def test_invoke_selected_model_keeps_chunking_on_retry_instruction(monkeypatch, db_session_factory):

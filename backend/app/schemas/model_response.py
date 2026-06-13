@@ -62,4 +62,4 @@ class ModelReviewResponse(BaseModel):
 
     summary: str = Field(min_length=1, max_length=240)
     score: float = Field(ge=0, le=100)
-    findings: list[ReviewFinding] = Field(default_factory=list, max_length=5)
+    findings: list[ReviewFinding] = Field(default_factory=list, max_length=2000)
