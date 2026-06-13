@@ -426,7 +426,7 @@ with SessionLocal() as db:
     node.timeout_seconds = int(os.environ.get("VLLM_TIMEOUT_SECONDS", "600"))
     node.is_enabled = True
     node.is_default = True
-    node.description = "Registered by deploy/native/c-check-deploy.sh"
+    node.description = "由部署脚本自动登记，可直接用于代码审查。"
     for mock in db.scalars(select(ModelNode).where(ModelNode.base_url.like("mock://%"))):
         mock.is_enabled = False
         mock.is_default = False

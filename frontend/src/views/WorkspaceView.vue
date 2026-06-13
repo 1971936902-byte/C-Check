@@ -205,6 +205,12 @@ function formatBytes(value: number) {
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
+function modelDescriptionText(value: string | null | undefined) {
+  if (!value) return ''
+  if (value === 'Registered by manual deploy verification') return '由手动部署验证登记，可直接用于代码审查。'
+  if (value === 'Registered by deploy/native/c-check-deploy.sh') return '由部署脚本自动登记，可直接用于代码审查。'
+  return value
+}
 function chooseFolder() { folderInput.value?.click() }
 function setFolderFiles(event: Event) {
   const input = event.target as HTMLInputElement
@@ -378,7 +384,7 @@ async function pinTask(target: ReviewTask) {
           show-icon
         />
         <p v-if="selectedModelInfo?.description" class="model-hint">
-          {{ selectedModelInfo.description }}{{ auth.isAdmin ? '' : ' 当前模型由管理员统一配置。' }}
+          {{ modelDescriptionText(selectedModelInfo.description) }}{{ auth.isAdmin ? '' : ' 当前模型由管理员统一配置。' }}
         </p>
 
         <div class="check-type-row">
