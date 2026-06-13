@@ -118,11 +118,6 @@ function locationText(finding: Finding) {
 
       <div class="report-grid">
         <div>
-          <article class="panel glass summary">
-            <h2>审查概览</h2>
-            <p>{{ report.summary }}</p>
-          </article>
-
           <article class="panel glass findings">
             <div class="section-heading">
               <div>
