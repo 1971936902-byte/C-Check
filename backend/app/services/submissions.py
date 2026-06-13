@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import stat
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath, PureWindowsPath
 
 from sqlalchemy.orm import Session
@@ -40,6 +40,51 @@ class Submission:
     input_mode: str
     display_name: str
     files: list[SubmittedFile]
+
+
+@dataclass
+class _SourceCollection:
+    label: str
+    settings: Settings
+    files: list[SubmittedFile] = field(default_factory=list)
+    seen_paths: set[str] = field(default_factory=set)
+    total_source_bytes: int = 0
+    has_source_content: bool = False
+
+    def remember_path(self, relative_path: str) -> None:
+        if relative_path in self.seen_paths:
+            raise SubmissionError(f"{self.label} contains duplicate paths")
+        self.seen_paths.add(relative_path)
+
+    def add_source_file(self, relative_path: str, content: bytes, declared_size: int | None = None) -> None:
+        if PurePosixPath(relative_path).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
+            return
+
+        size_bytes = declared_size if declared_size is not None else len(content)
+        _require_size_limit(size_bytes, self.settings)
+        self.total_source_bytes += size_bytes
+        if self.total_source_bytes > self.settings.upload_max_extracted_bytes:
+            raise SubmissionError(f"{self.label} total source size exceeds limit")
+        if len(self.files) >= self.settings.upload_max_files:
+            raise SubmissionError(f"{self.label} contains too many source files")
+
+        _require_size_limit(len(content), self.settings)
+        source_text = _decode_source(content)
+        self.has_source_content = self.has_source_content or bool(source_text.strip())
+        self.files.append(
+            SubmittedFile(
+                relative_path=relative_path,
+                source_text=source_text,
+                size_bytes=len(content),
+            )
+        )
+
+    def to_submission(self, input_mode: str, display_name: str) -> Submission:
+        if not self.files:
+            raise SubmissionError(f"{self.label} contains no C source files")
+        if not self.has_source_content:
+            raise SubmissionError(f"{self.label} source files must not all be empty")
+        return Submission(input_mode=input_mode, display_name=display_name, files=self.files)
 
 
 def dispatch_review(task_id: str) -> None:
@@ -199,10 +244,7 @@ def collect_archive_submission(filename: str, content: bytes, settings: Settings
     if len(content) > settings.upload_max_archive_bytes:
         raise SubmissionError("zip archive exceeds upload size limit")
 
-    submitted_files: list[SubmittedFile] = []
-    total_size = 0
-    seen_paths: set[str] = set()
-    has_source_content = False
+    collection = _SourceCollection("archive", settings)
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             for entry_count, info in enumerate(archive.infolist(), start=1):
@@ -213,29 +255,11 @@ def collect_archive_submission(filename: str, content: bytes, settings: Settings
                     raise SubmissionError("archive symbolic links are not allowed")
                 if info.is_dir():
                     continue
-                if relative_path in seen_paths:
-                    raise SubmissionError("archive contains duplicate paths")
-                seen_paths.add(relative_path)
+                collection.remember_path(relative_path)
                 if PurePosixPath(relative_path).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
                     continue
-                _require_size_limit(info.file_size, settings)
-                total_size += info.file_size
-                if total_size > settings.upload_max_extracted_bytes:
-                    raise SubmissionError("archive total extracted size exceeds limit")
-                if len(submitted_files) >= settings.upload_max_files:
-                    raise SubmissionError("archive contains too many source files")
-
                 extracted = archive.read(info)
-                _require_size_limit(len(extracted), settings)
-                source_text = _decode_source(extracted)
-                has_source_content = has_source_content or bool(source_text.strip())
-                submitted_files.append(
-                    SubmittedFile(
-                        relative_path=relative_path,
-                        source_text=source_text,
-                        size_bytes=len(extracted),
-                    )
-                )
+                collection.add_source_file(relative_path, extracted, declared_size=info.file_size)
     except (
         zipfile.BadZipFile,
         zipfile.LargeZipFile,
@@ -247,55 +271,28 @@ def collect_archive_submission(filename: str, content: bytes, settings: Settings
     ) as exc:
         raise SubmissionError("invalid zip archive") from exc
 
-    if not submitted_files:
-        raise SubmissionError("archive contains no C source files")
-    if not has_source_content:
-        raise SubmissionError("archive source files must not all be empty")
-    return Submission(input_mode="archive", display_name=filename, files=submitted_files)
+    return collection.to_submission("archive", filename)
 
 
 def collect_folder_submission(files: list[tuple[str, bytes]], settings: Settings) -> Submission:
     if not files:
         raise SubmissionError("folder submission contains no files")
 
-    submitted_files: list[SubmittedFile] = []
-    total_size = 0
-    seen_paths: set[str] = set()
-    has_source_content = False
+    collection = _SourceCollection("folder", settings)
     root_name = "selected-folder"
 
     for index, (filename, content) in enumerate(files, start=1):
         if index > settings.upload_max_archive_entries:
             raise SubmissionError("folder contains too many entries")
         relative_path = _safe_archive_path(filename, settings)
-        if relative_path in seen_paths:
-            raise SubmissionError("folder contains duplicate paths")
-        seen_paths.add(relative_path)
+        collection.remember_path(relative_path)
         if PurePosixPath(relative_path).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
             continue
         if "/" in relative_path:
             root_name = relative_path.split("/", 1)[0] or root_name
-        _require_size_limit(len(content), settings)
-        total_size += len(content)
-        if total_size > settings.upload_max_extracted_bytes:
-            raise SubmissionError("folder total source size exceeds limit")
-        if len(submitted_files) >= settings.upload_max_files:
-            raise SubmissionError("folder contains too many source files")
-        source_text = _decode_source(content)
-        has_source_content = has_source_content or bool(source_text.strip())
-        submitted_files.append(
-            SubmittedFile(
-                relative_path=relative_path,
-                source_text=source_text,
-                size_bytes=len(content),
-            )
-        )
+        collection.add_source_file(relative_path, content)
 
-    if not submitted_files:
-        raise SubmissionError("folder contains no C source files")
-    if not has_source_content:
-        raise SubmissionError("folder source files must not all be empty")
-    return Submission(input_mode="folder", display_name=root_name, files=submitted_files)
+    return collection.to_submission("folder", root_name)
 
 
 def create_review_task(

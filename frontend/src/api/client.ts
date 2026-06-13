@@ -42,6 +42,15 @@ export const errorMessage = (error: unknown) => {
   if (axios.isAxiosError(error)) return formatErrorDetail(error.response?.data?.detail) || error.message || '请求失败，请稍后重试'
   return error instanceof Error ? error.message : '请求失败，请稍后重试'
 }
+
+const reviewFormData = (modelNodeId: string, checkTypes: string[], displayName?: string) => {
+  const body = new FormData()
+  body.append('model_node_id', modelNodeId)
+  body.append('check_types', JSON.stringify(checkTypes))
+  if (displayName) body.append('display_name', displayName)
+  return body
+}
+
 export const authApi = {
   login: (username: string, password: string) => MOCK_API_ENABLED ? mockApi.auth.login(username, password) : api.post<{ access_token: string }>('/auth/login', { username, password }),
   me: () => MOCK_API_ENABLED ? mockApi.auth.me() : api.get<User>('/auth/me'),
@@ -52,15 +61,13 @@ export const reviewApi = {
   submitText: (model_node_id: string, source_text: string, check_types: string[], display_name?: string) => MOCK_API_ENABLED ? mockApi.reviews.submitText(model_node_id, source_text, check_types, display_name) : api.post<ReviewTask>('/reviews/text', { model_node_id, source_text, check_types, display_name }),
   submitFile: (mode: 'file' | 'archive', modelNodeId: string, file: File, checkTypes: string[], displayName?: string) => {
     if (MOCK_API_ENABLED) return mockApi.reviews.submitFile(mode, modelNodeId, file, checkTypes, displayName)
-    const body = new FormData(); body.append('model_node_id', modelNodeId); body.append('file', file); body.append('check_types', JSON.stringify(checkTypes)); if (displayName) body.append('display_name', displayName)
+    const body = reviewFormData(modelNodeId, checkTypes, displayName)
+    body.append('file', file)
     return api.post<ReviewTask>(`/reviews/${mode}`, body)
   },
   submitFolder: (modelNodeId: string, files: File[], checkTypes: string[], displayName?: string) => {
     if (MOCK_API_ENABLED) return mockApi.reviews.submitFile('archive', modelNodeId, files[0], checkTypes, displayName)
-    const body = new FormData()
-    body.append('model_node_id', modelNodeId)
-    body.append('check_types', JSON.stringify(checkTypes))
-    if (displayName) body.append('display_name', displayName)
+    const body = reviewFormData(modelNodeId, checkTypes, displayName)
     files.forEach((file) => body.append('files', file, file.webkitRelativePath || file.name))
     return api.post<ReviewTask>('/reviews/folder', body)
   },

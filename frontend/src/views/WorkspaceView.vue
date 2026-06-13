@@ -8,6 +8,8 @@ import StatusBadge from '../components/StatusBadge.vue'
 import type { ModelNode, ReviewTask } from '../types'
 import { useAuthStore } from '../stores/auth'
 import { activeUpload, canSubmitReview, hasReviewInput, type InputMode } from './workspace-input'
+import { renderHighlightedCSource } from './c-highlight'
+import { displayNameFromFolder, formatBytes, isCSourceFile, modelDescriptionText } from './workspace-files'
 import { ALL_CHECK_TYPES, deriveReviewProgressSummary, taskDisplayName, taskSubmissionCountLabel } from './task-progress'
 
 const models = ref<ModelNode[]>([])
@@ -40,11 +42,7 @@ const upload = computed(() => activeUpload(mode.value, singleFile.value, archive
 const folderSourceFiles = computed(() => folderFiles.value.filter(isCSourceFile))
 const folderTotalBytes = computed(() => folderSourceFiles.value.reduce((total, file) => total + file.size, 0))
 const trimmedTaskName = computed(() => taskName.value.trim())
-const highlightedSourcePreview = computed(() => sourcePreviewText.value
-  ? sourcePreviewText.value.split('\n').map((line, index) => (
-    `<div class="code-preview-line"><span class="code-preview-line-number">${index + 1}</span><code>${highlightCLine(line)}</code></div>`
-  )).join('')
-  : '<div class="code-preview-empty">暂无可预览内容</div>')
+const highlightedSourcePreview = computed(() => renderHighlightedCSource(sourcePreviewText.value))
 const canSubmit = computed(() => taskDraftStarted.value && Boolean(trimmedTaskName.value) && canSubmitReview({
   mode: mode.value,
   selectedModel: selectedModel.value,
@@ -230,25 +228,10 @@ function setSelectedFile(target: 'file' | 'archive', selected: File) {
   }
 }
 function toggleAllChecks(value: boolean) { checkTypes.value = value ? ALL_CHECK_TYPES.map((item) => item.value) : [] }
-function isCSourceFile(file: File) {
-  const name = (file.webkitRelativePath || file.name).toLowerCase()
-  return name.endsWith('.c') || name.endsWith('.h')
-}
-function formatBytes(value: number) {
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
-  return `${(value / 1024 / 1024).toFixed(1)} MB`
-}
 function taskCheckTypesLabel(target: ReviewTask) {
   return (target.check_types || [])
     .map((item) => checkTypeLabelMap.get(item) || item)
     .join('、')
-}
-function modelDescriptionText(value: string | null | undefined) {
-  if (!value) return ''
-  if (value === 'Registered by manual deploy verification') return '由手动部署验证登记，可直接用于代码审查。'
-  if (value === 'Registered by deploy/native/c-check-deploy.sh') return '由部署脚本自动登记，可直接用于代码审查。'
-  return value
 }
 function chooseFolder() { folderInput.value?.click() }
 function setFolderFiles(event: Event) {
@@ -259,47 +242,11 @@ function setFolderFiles(event: Event) {
     mode.value = 'folder'
     singleFile.value = undefined
     archiveFile.value = undefined
-    const firstPath = folderFiles.value[0].webkitRelativePath || folderFiles.value[0].name
-    taskName.value = firstPath.includes('/') ? firstPath.split('/')[0] : '项目文件夹审查'
+    taskName.value = displayNameFromFolder(folderFiles.value)
   }
   input.value = ''
 }
 function clearFolder() { folderFiles.value = [] }
-
-const cKeywords = new Set([
-  'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else',
-  'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register',
-  'restrict', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef',
-  'union', 'unsigned', 'void', 'volatile', 'while', 'NULL',
-])
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
-function highlightCLine(line: string) {
-  if (line.trimStart().startsWith('#')) {
-    return `<span class="code-token-preprocessor">${escapeHtml(line)}</span>`
-  }
-  const commentIndex = line.indexOf('//')
-  const codePart = commentIndex >= 0 ? line.slice(0, commentIndex) : line
-  const commentPart = commentIndex >= 0 ? line.slice(commentIndex) : ''
-  const highlighted = codePart.replace(
-    /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b([A-Za-z_][A-Za-z0-9_]*)\b|\b(\d+(?:\.\d+)?)\b/g,
-    (match, stringToken, wordToken, numberToken) => {
-      if (stringToken) return `<span class="code-token-string">${escapeHtml(stringToken)}</span>`
-      if (numberToken) return `<span class="code-token-number">${escapeHtml(numberToken)}</span>`
-      if (cKeywords.has(wordToken)) return `<span class="code-token-keyword">${escapeHtml(wordToken)}</span>`
-      return escapeHtml(match)
-    },
-  )
-  return highlighted + (commentPart ? `<span class="code-token-comment">${escapeHtml(commentPart)}</span>` : '')
-}
 
 async function previewSingleFile() {
   if (!singleFile.value) return ElMessage.warning('请先选择单个 .c / .h 文件')
