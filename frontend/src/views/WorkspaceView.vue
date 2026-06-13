@@ -36,7 +36,9 @@ const router = useRouter()
 const auth = useAuthStore()
 const checkTypes = ref<string[]>(ALL_CHECK_TYPES.map((item) => item.value))
 let timer: number | undefined
+let syncInFlight = false
 const WORKSPACE_TASK_IDS_KEY = 'c-check-workspace-task-ids'
+const WORKSPACE_SYNC_INTERVAL_MS = 1400
 
 const upload = computed(() => activeUpload(mode.value, singleFile.value, archiveFile.value))
 const folderSourceFiles = computed(() => folderFiles.value.filter(isCSourceFile))
@@ -69,7 +71,6 @@ const selectedModelInfo = computed(() => models.value.find((model) => model.id =
 const allChecksSelected = computed(() => checkTypes.value.length === ALL_CHECK_TYPES.length)
 const task = computed(() => tasks.value.find((item) => item.id === selectedTaskId.value) || tasks.value[0])
 const progressSummary = computed(() => task.value ? deriveReviewProgressSummary(task.value) : undefined)
-const activeTasks = computed(() => tasks.value.filter(isActiveTask))
 const checkTypeLabelMap = new Map<string, string>(ALL_CHECK_TYPES.map((item) => [item.value, item.label]))
 
 onMounted(async () => {
@@ -84,10 +85,6 @@ onUnmounted(() => clearInterval(timer))
 async function loadModels() {
   models.value = (await reviewApi.models()).data
   selectedModel.value = models.value.find((model) => model.is_default)?.id || models.value[0]?.id || ''
-}
-
-function isActiveTask(item: ReviewTask) {
-  return item.status === 'queued' || item.status === 'running'
 }
 
 function readRememberedTaskIds() {
@@ -109,55 +106,79 @@ function forgetTask(id: string) {
   sessionStorage.setItem(WORKSPACE_TASK_IDS_KEY, JSON.stringify(ids))
 }
 
-function mergeTasks(items: ReviewTask[]) {
-  const merged = new Map(tasks.value.map((item) => [item.id, item]))
-  for (const item of items) merged.set(item.id, item)
-  tasks.value = Array.from(merged.values()).sort((left, right) => {
+function sortTasks(items: ReviewTask[]) {
+  return items.sort((left, right) => {
+    const leftActive = left.status === 'running' || left.status === 'queued'
+    const rightActive = right.status === 'running' || right.status === 'queued'
+    if (leftActive && !rightActive) return -1
+    if (rightActive && !leftActive) return 1
     if (left.status === 'running' && right.status !== 'running') return -1
     if (right.status === 'running' && left.status !== 'running') return 1
     if (left.status === 'queued' && right.status === 'queued') {
       return (left.queued_ahead_count ?? 0) - (right.queued_ahead_count ?? 0)
     }
-    if (left.status === 'queued' && right.status !== 'queued') return -1
-    if (right.status === 'queued' && left.status !== 'queued') return 1
     return new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
   })
+}
+
+function setTasks(items: ReviewTask[]) {
+  const merged = new Map<string, ReviewTask>()
+  for (const item of items) merged.set(item.id, item)
+  tasks.value = sortTasks(Array.from(merged.values()))
   if (!selectedTaskId.value || !tasks.value.some((item) => item.id === selectedTaskId.value)) {
     selectedTaskId.value = tasks.value[0]?.id || ''
   }
+}
+
+function mergeTasks(items: ReviewTask[]) {
+  setTasks([...tasks.value, ...items])
 }
 
 function upsertTask(item: ReviewTask) {
   rememberTask(item.id)
   mergeTasks([item])
   selectedTaskId.value = item.id
-  ensurePolling()
 }
 
 function removeLocalTask(id: string) {
   forgetTask(id)
   tasks.value = tasks.value.filter((item) => item.id !== id)
   if (selectedTaskId.value === id) selectedTaskId.value = tasks.value[0]?.id || ''
-  ensurePolling()
 }
 
 async function loadWorkspaceTasks() {
-  const [queued, running, remembered] = await Promise.all([
-    reviewApi.list({ status: 'queued', limit: 50 }),
-    reviewApi.list({ status: 'running', limit: 50 }),
-    Promise.allSettled(readRememberedTaskIds().map((id) => reviewApi.get(id))),
-  ])
-  const rememberedTasks = remembered
-    .filter((result): result is PromiseFulfilledResult<{ data: ReviewTask }> => result.status === 'fulfilled')
-    .map((result) => result.value.data)
-  mergeTasks([...queued.data.items, ...running.data.items, ...rememberedTasks])
+  await syncWorkspaceTasks(true)
   ensurePolling()
+}
+
+async function syncWorkspaceTasks(showError = false) {
+  if (syncInFlight) return
+  syncInFlight = true
+  try {
+    const rememberedIds = readRememberedTaskIds()
+    const [recent, queued, running, remembered] = await Promise.all([
+      reviewApi.list({ limit: 50 }),
+      reviewApi.list({ status: 'queued', limit: 50 }),
+      reviewApi.list({ status: 'running', limit: 50 }),
+      Promise.allSettled(rememberedIds.map((id) => reviewApi.get(id))),
+    ])
+    const rememberedTasks = remembered
+      .filter((result): result is PromiseFulfilledResult<{ data: ReviewTask }> => result.status === 'fulfilled')
+      .map((result) => result.value.data)
+    setTasks([...recent.data.items, ...queued.data.items, ...running.data.items, ...rememberedTasks])
+  } catch (e) {
+    if (showError) ElMessage.error(errorMessage(e))
+    else console.warn(errorMessage(e))
+  } finally {
+    syncInFlight = false
+  }
 }
 
 function ensurePolling() {
   clearInterval(timer)
-  timer = undefined
-  if (activeTasks.value.length) timer = window.setInterval(poll, 1400)
+  timer = window.setInterval(() => {
+    void syncWorkspaceTasks()
+  }, WORKSPACE_SYNC_INTERVAL_MS)
 }
 
 function startTaskDraft() {
@@ -281,7 +302,7 @@ async function submit() {
     }
     upsertTask(created)
     resetDraftInputs()
-    await poll()
+    await syncWorkspaceTasks()
   } catch (e) {
     ElMessage.error(errorMessage(e))
   } finally {
@@ -293,28 +314,11 @@ async function runDemo() {
   submitting.value = true
   try {
     upsertTask((await reviewApi.submitDemoArchive(checkTypes.value)).data)
-    await poll()
+    await syncWorkspaceTasks()
   } catch (e) {
     ElMessage.error(errorMessage(e))
   } finally {
     submitting.value = false
-  }
-}
-
-async function poll() {
-  const pollingTasks = activeTasks.value
-  if (!pollingTasks.length) {
-    ensurePolling()
-    return
-  }
-  try {
-    const updates = await Promise.all(pollingTasks.map((item) => reviewApi.get(item.id)))
-    mergeTasks(updates.map((item) => item.data))
-    ensurePolling()
-  } catch (e) {
-    clearInterval(timer)
-    timer = undefined
-    ElMessage.error(errorMessage(e))
   }
 }
 
