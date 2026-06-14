@@ -558,6 +558,15 @@ async function pinTask(target: ReviewTask) {
             <small v-if="item.status === 'queued'" class="task-queue-note">
               前方还有 {{ item.queued_ahead_count ?? 0 }} 个任务
               <b v-if="item.queue_priority">已置顶</b>
+              <el-button
+                v-else
+                link
+                type="primary"
+                class="task-pin-inline"
+                @click.stop="pinTask(item)"
+              >
+                置顶
+              </el-button>
             </small>
           </button>
         </div>
@@ -590,7 +599,6 @@ async function pinTask(target: ReviewTask) {
           <el-alert v-if="task.error_message" :title="task.error_message" type="error" :closable="false" show-icon />
           <el-button v-if="task.model_log" plain :icon="View" class="report-button" @click="logVisible = true">查看模型日志</el-button>
           <el-button v-if="task.status === 'completed'" type="primary" class="report-button" @click="openReport">查看审查报告</el-button>
-          <el-button v-if="task.status === 'queued'" plain type="primary" class="report-button" @click="pinTask(task)">置顶任务</el-button>
           <el-button plain type="danger" class="report-button" @click="removeTask(task)">
             {{ task.status === 'queued' || task.status === 'running' ? '停止并删除任务' : '删除任务' }}
           </el-button>
