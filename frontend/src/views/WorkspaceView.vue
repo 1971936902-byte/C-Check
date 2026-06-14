@@ -72,6 +72,7 @@ const allChecksSelected = computed(() => checkTypes.value.length === ALL_CHECK_T
 const task = computed(() => tasks.value.find((item) => item.id === selectedTaskId.value) || tasks.value[0])
 const progressSummary = computed(() => task.value ? deriveReviewProgressSummary(task.value) : undefined)
 const checkTypeLabelMap = new Map<string, string>(ALL_CHECK_TYPES.map((item) => [item.value, item.label]))
+const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 
 onMounted(async () => {
   try {
@@ -253,6 +254,11 @@ function taskCheckTypesLabel(target: ReviewTask) {
   return (target.check_types || [])
     .map((item) => checkTypeLabelMap.get(item) || item)
     .join('、')
+}
+function taskCreator(target: ReviewTask) {
+  if (target.tester_name) return target.tester_name
+  if (target.owner_id === auth.user?.id) return auth.user.username
+  return target.owner_id
 }
 function chooseFolder() { folderInput.value?.click() }
 function setFolderFiles(event: Event) {
@@ -542,6 +548,13 @@ async function pinTask(target: ReviewTask) {
               <strong>{{ taskDisplayName(item) }}</strong>
               <StatusBadge :status="item.status" />
             </span>
+            <span class="task-list-meta">
+              <small>创建者：{{ taskCreator(item) }}</small>
+              <small>创建时间：{{ date(item.created_at) }}</small>
+            </span>
+            <small class="task-list-checks" :title="taskCheckTypesLabel(item)">
+              审查类型：{{ taskCheckTypesLabel(item) || '未选择' }}
+            </small>
             <small v-if="item.status === 'queued'" class="task-queue-note">
               前方还有 {{ item.queued_ahead_count ?? 0 }} 个任务
               <b v-if="item.queue_priority">已置顶</b>
