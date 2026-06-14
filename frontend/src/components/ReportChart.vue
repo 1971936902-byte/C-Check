@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 const props = defineProps<{ counts: Record<string, number>; mode?: 'severity' | 'category' }>()
 const el = ref<HTMLDivElement>(); let chart: echarts.ECharts | undefined
@@ -24,11 +24,26 @@ const names: Record<string, string> = {
   portability: '可移植性',
 }
 const colors = ['#ec6a72', '#f0a35e', '#e9c25d', '#62a7d4', '#7392ce', '#82b59a', '#9c86c8']
-function render() {
+async function render() {
   if (!el.value) return
+  await nextTick()
   chart ||= echarts.init(el.value)
+  chart.resize()
   const data = Object.entries(props.counts).map(([key, value]) => ({ name: names[key] || key, value }))
-  chart.setOption({ tooltip: { trigger: 'item' }, color: colors, legend: { bottom: 0, textStyle: { color: '#607086' } }, series: [{ type: 'pie', radius: ['48%', '72%'], center: ['50%', '42%'], label: { formatter: '{b}\n{c}', color: '#4c5e73' }, data }] })
+  const isCategory = props.mode === 'category'
+  chart.setOption({
+    tooltip: { trigger: 'item' },
+    color: colors,
+    legend: { bottom: 0, type: isCategory ? 'scroll' : 'plain', textStyle: { color: '#607086' } },
+    series: [{
+      type: 'pie',
+      radius: isCategory ? ['38%', '58%'] : ['48%', '72%'],
+      center: ['50%', isCategory ? '38%' : '42%'],
+      label: isCategory ? { show: false } : { formatter: '{b}\n{c}', color: '#4c5e73' },
+      labelLine: { show: !isCategory },
+      data,
+    }],
+  })
 }
 onMounted(() => { render(); addEventListener('resize', render) })
 watch(() => props.counts, render, { deep: true })
