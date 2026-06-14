@@ -162,6 +162,18 @@ describe('mockApi', () => {
     expect(completed.data.status).toBe('completed')
   })
 
+  it('replaces the previously pinned queued task when another task is pinned', async () => {
+    const first = await mockApi.reviews.submitText('model-mock', 'int first;', ['logic'], 'first-queued.c')
+    const second = await mockApi.reviews.submitText('model-mock', 'int second;', ['logic'], 'second-queued.c')
+
+    await mockApi.reviews.pin(first.data.id)
+    const replacement = await mockApi.reviews.pin(second.data.id)
+    const queued = (await mockApi.reviews.list({ status: 'queued', limit: 100 })).data.items
+
+    expect(replacement.data.queue_priority).toBe(1)
+    expect(queued.filter((task) => task.queue_priority).map((task) => task.id)).toEqual([second.data.id])
+  })
+
   it('downloads markdown and pdf reports from mock data', async () => {
     const markdown = await mockApi.reports.download('report-seeded', 'markdown')
     const pdf = await mockApi.reports.download('report-seeded', 'pdf')

@@ -622,7 +622,10 @@ export const mockApi = {
       const task = visibleTasks(state).find((item) => item.id === taskId)
       if (!task) throw new Error('审查任务不存在')
       if (task.status !== 'queued') throw new Error('只有排队中的任务可以置顶')
-      task.queue_priority = Math.max(0, ...state.tasks.map((item) => item.queue_priority || 0)) + 1
+      state.tasks.forEach((item) => {
+        if (item.id !== task.id && item.status === 'queued') item.queue_priority = undefined
+      })
+      task.queue_priority = 1
       task.queued_ahead_count = 0
       save(state)
       return response(task)
