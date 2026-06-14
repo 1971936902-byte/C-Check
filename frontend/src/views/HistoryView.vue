@@ -7,7 +7,7 @@ import { errorMessage, reportApi, reviewApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
 import type { ModelNode, ReviewTask } from '../types'
 
-const filters = reactive({ keyword: '', severity: '', tester_name: '' })
+const filters = reactive({ keyword: '', tester_name: '' })
 const tasks = ref<ReviewTask[]>([])
 const models = ref<ModelNode[]>([])
 const loading = ref(false)
@@ -34,7 +34,6 @@ async function load() {
   try {
     const { data } = await reviewApi.list({
       keyword: optionalText(filters.keyword),
-      severity: filters.severity || undefined,
       tester_name: optionalText(filters.tester_name),
       offset: (page.value - 1) * pageSize.value,
       limit: pageSize.value,
@@ -143,12 +142,6 @@ onMounted(async () => {
     <div class="panel glass">
       <div class="filter-bar">
         <el-input v-model="filters.keyword" placeholder="搜索任务名称" :prefix-icon="Search" clearable />
-        <el-select v-model="filters.severity" placeholder="风险等级" clearable>
-          <el-option label="高危" value="high" />
-          <el-option label="中危" value="medium" />
-          <el-option label="低危" value="low" />
-          <el-option label="建议" value="suggestion" />
-        </el-select>
         <el-input v-model="filters.tester_name" placeholder="搜索测试人员" clearable />
         <el-button type="primary" @click="applyFilters">筛选</el-button>
       </div>
