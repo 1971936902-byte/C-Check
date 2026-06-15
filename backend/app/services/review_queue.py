@@ -36,13 +36,14 @@ def _send_to_worker(task_id: str) -> None:
 
 
 def dispatch_next_review(db: Session) -> ReviewTask | None:
-    running_count = db.scalar(
-        select(func.count()).select_from(ReviewTask).where(ReviewTask.status == TaskStatus.RUNNING)
-    ) or 0
-    if running_count:
-        return None
+    running_node_ids = set(
+        db.scalars(select(ReviewTask.model_node_id).where(ReviewTask.status == TaskStatus.RUNNING)).all()
+    )
+    queued_query = select(ReviewTask).where(ReviewTask.status == TaskStatus.QUEUED)
+    if running_node_ids:
+        queued_query = queued_query.where(ReviewTask.model_node_id.not_in(running_node_ids))
     task = db.scalar(
-        queued_order(select(ReviewTask).where(ReviewTask.status == TaskStatus.QUEUED).limit(1))
+        queued_order(queued_query.limit(1))
     )
     if task is None:
         return None

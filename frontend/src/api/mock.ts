@@ -1,12 +1,13 @@
-import type { AdminTask, AdminUser, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, TaskStatus, User } from '../types'
+import type { AdminTask, AdminUser, Dashboard, Finding, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, Severity, TaskStatus, User } from '../types'
 
 const STATE_KEY = 'c-check-mock-state'
 const SESSION_KEY = 'c-check-mock-session'
-const STATE_VERSION = 4
+const STATE_VERSION = 6
 
 type MockState = {
   version: number
   users: AdminUser[]
+  passwords: Record<string, string>
   models: ModelNode[]
   deployments: ModelDeployment[]
   prompts: Prompt[]
@@ -20,18 +21,201 @@ type MockResponse<T> = Promise<{ data: T }>
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`
 const response = async <T>(data: T): MockResponse<T> => ({ data })
-const demoFiles = (count = 6) => ['src/main.c', 'src/parser.c', 'src/config.c', 'src/network.c', 'include/config.h', 'include/protocol.h']
-  .slice(0, count)
-  .map((relative_path, index) => ({ id: `file-${index + 1}`, relative_path, size_bytes: 180 + index * 73 }))
+const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
 
-const findings = [
-  { severity: 'high' as const, category: 'memory_safety', title: '固定长度缓冲区存在越界写入风险', description: '使用 strcpy 复制外部输入时未校验长度，输入超过目标缓冲区容量会破坏栈内存。', file_path: 'src/parser.c', line: 42, remediation: '改用 snprintf 或显式校验输入长度，并为结尾的空字符预留空间。', code_snippet: [{ line: 40, content: 'char name[32];', kind: 'context' as const }, { line: 41, content: 'const char *input = request->name;', kind: 'context' as const }, { line: 42, content: 'strcpy(name, input);', kind: 'removed' as const }, { line: 43, content: 'process_name(name);', kind: 'context' as const }], fixed_snippet: [{ line: 40, content: 'char name[32];', kind: 'context' as const }, { line: 41, content: 'const char *input = request->name;', kind: 'context' as const }, { line: 42, content: 'snprintf(name, sizeof(name), \"%s\", input);', kind: 'added' as const }, { line: 43, content: 'process_name(name);', kind: 'context' as const }] },
-  { severity: 'medium' as const, category: 'logic', title: '文件句柄在异常分支未关闭', description: '读取失败后函数提前返回，已打开的 FILE 指针没有释放。', file_path: 'src/config.c', line: 87, remediation: '将资源释放集中到统一 cleanup 分支，所有退出路径都执行 fclose。', code_snippet: [{ line: 85, content: 'FILE *file = fopen(path, \"r\");', kind: 'context' as const }, { line: 86, content: 'if (read_config(file, config) < 0) {', kind: 'context' as const }, { line: 87, content: '    return -1;', kind: 'removed' as const }, { line: 88, content: '}', kind: 'context' as const }], fixed_snippet: [{ line: 85, content: 'FILE *file = fopen(path, \"r\");', kind: 'context' as const }, { line: 86, content: 'if (read_config(file, config) < 0) {', kind: 'context' as const }, { line: 87, content: '    fclose(file);', kind: 'added' as const }, { line: 88, content: '    return -1;', kind: 'added' as const }, { line: 89, content: '}', kind: 'context' as const }] },
-  { severity: 'low' as const, category: 'portability', title: '整数类型依赖平台位宽', description: '使用 long 保存协议字段，在不同 ABI 下位宽可能不同。', file_path: 'include/protocol.h', line: 18, remediation: '改用 stdint.h 中的 uint32_t，并在序列化时明确字节序。', code_snippet: [{ line: 17, content: 'typedef struct packet_header {', kind: 'context' as const }, { line: 18, content: '    unsigned long payload_size;', kind: 'removed' as const }, { line: 19, content: '} packet_header_t;', kind: 'context' as const }], fixed_snippet: [{ line: 17, content: 'typedef struct packet_header {', kind: 'context' as const }, { line: 18, content: '    uint32_t payload_size;', kind: 'added' as const }, { line: 19, content: '} packet_header_t;', kind: 'context' as const }] },
-  { severity: 'suggestion' as const, category: 'performance', title: '循环内重复计算字符串长度', description: '循环条件每次调用 strlen，会重复扫描字符串。', file_path: 'src/utils.c', line: 31, remediation: '进入循环前缓存字符串长度，减少重复遍历。', code_snippet: [{ line: 30, content: 'size_t count_letters(const char *text) {', kind: 'context' as const }, { line: 31, content: '    for (size_t i = 0; i < strlen(text); ++i) {', kind: 'removed' as const }, { line: 32, content: '        inspect(text[i]);', kind: 'context' as const }], fixed_snippet: [{ line: 30, content: 'size_t count_letters(const char *text) {', kind: 'context' as const }, { line: 31, content: '    const size_t length = strlen(text);', kind: 'added' as const }, { line: 32, content: '    for (size_t i = 0; i < length; ++i) {', kind: 'added' as const }, { line: 33, content: '        inspect(text[i]);', kind: 'context' as const }] },
+const checkTypeLabels: Record<string, string> = {
+  memory_safety: '内存安全',
+  buffer_overflow: '缓冲区溢出',
+  pointer_safety: '指针安全',
+  resource_leak: '资源泄漏',
+  concurrency: '并发与线程安全',
+  logic: '逻辑错误',
+  input_validation: '输入校验',
+  integer_safety: '整数安全',
+  compatibility: '编译兼容性',
+  portability: '跨平台可移植性',
+  performance: '性能隐患',
+  maintainability: '代码规范与可维护性',
+}
+
+const allCheckTypes = Object.keys(checkTypeLabels)
+
+const sourceFiles = [
+  'src/main.c',
+  'src/parser.c',
+  'src/config.c',
+  'src/network.c',
+  'src/scheduler.c',
+  'src/adc_driver.c',
+  'src/dma_ring.c',
+  'src/usb_sample.c',
+  'src/can_bus.c',
+  'src/storage.c',
+  'include/config.h',
+  'include/protocol.h',
+  'include/device_state.h',
+  'drivers/stm32f10x_adc.c',
+  'drivers/stm32f10x_dma.c',
+  'drivers/stm32f10x_usart.c',
 ]
 
+const demoFiles = (count = 8, prefix = '') => sourceFiles
+  .slice(0, Math.min(count, sourceFiles.length))
+  .map((relative_path, index) => ({
+    id: `file-${prefix || 'demo'}-${index + 1}`,
+    relative_path,
+    size_bytes: 420 + index * 137,
+  }))
+
+const snippet = (line: number, removed: string, added: string) => ({
+  code_snippet: [
+    { line: line - 1, content: 'if (request != NULL) {', kind: 'context' as const },
+    { line, content: removed, kind: 'removed' as const },
+    { line: line + 1, content: '}', kind: 'context' as const },
+  ],
+  fixed_snippet: [
+    { line: line - 1, content: 'if (request != NULL) {', kind: 'context' as const },
+    { line, content: added, kind: 'added' as const },
+    { line: line + 1, content: '}', kind: 'context' as const },
+  ],
+})
+
+const findingTemplates: Finding[] = [
+  {
+    severity: 'high',
+    category: 'memory_safety',
+    title: '固定长度缓冲区存在越界写入风险',
+    description: '使用 strcpy 复制外部输入时未校验长度，输入超过目标缓冲区容量会破坏栈内存。',
+    file_path: 'src/parser.c',
+    line: 42,
+    remediation: '改用 snprintf 或显式校验输入长度，并为字符串结尾预留空间。',
+    ...snippet(42, 'strcpy(name, request->name);', 'snprintf(name, sizeof(name), "%s", request->name);'),
+  },
+  {
+    severity: 'high',
+    category: 'pointer_safety',
+    title: '空指针返回值未检查',
+    description: '内存申请失败时继续解引用指针，低内存场景下会导致进程崩溃。',
+    file_path: 'src/network.c',
+    line: 118,
+    remediation: '使用分配结果前先判断是否为空，并在失败时返回明确错误码。',
+    ...snippet(118, 'session->buffer = malloc(size);', 'session->buffer = malloc(size); if (!session->buffer) return -ENOMEM;'),
+  },
+  {
+    severity: 'medium',
+    category: 'resource_leak',
+    title: '异常分支未关闭文件句柄',
+    description: '读取配置失败后提前返回，已经打开的 FILE 指针没有释放。',
+    file_path: 'src/config.c',
+    line: 87,
+    remediation: '将资源释放集中到统一 cleanup 分支，确保所有退出路径都执行 fclose。',
+    ...snippet(87, 'return -1;', 'fclose(file); return -1;'),
+  },
+  {
+    severity: 'medium',
+    category: 'integer_safety',
+    title: '长度计算可能发生整数截断',
+    description: '将 size_t 长度强制转换为 int，超大输入会截断并影响边界判断。',
+    file_path: 'src/usb_sample.c',
+    line: 206,
+    remediation: '保留 size_t 类型参与计算，必要时先校验上限再转换。',
+    ...snippet(206, 'int payload_len = (int)packet->payload_len;', 'size_t payload_len = packet->payload_len;'),
+  },
+  {
+    severity: 'low',
+    category: 'portability',
+    title: '协议字段依赖 long 位宽',
+    description: '使用 unsigned long 保存协议字段，在 32/64 位 ABI 下大小不一致。',
+    file_path: 'include/protocol.h',
+    line: 18,
+    remediation: '改用 stdint.h 中的固定宽度整数类型。',
+    ...snippet(18, 'unsigned long payload_size;', 'uint32_t payload_size;'),
+  },
+  {
+    severity: 'low',
+    category: 'maintainability',
+    title: '错误码含义缺少集中定义',
+    description: '多个模块直接返回魔法数字，调用方难以准确判断错误原因。',
+    file_path: 'include/device_state.h',
+    line: 33,
+    remediation: '使用枚举或宏集中定义错误码，并在接口文档中说明。',
+    ...snippet(33, 'return -7;', 'return DEVICE_ERR_TIMEOUT;'),
+  },
+  {
+    severity: 'suggestion',
+    category: 'performance',
+    title: '循环内重复计算字符串长度',
+    description: '循环条件每次调用 strlen，会重复扫描同一字符串。',
+    file_path: 'src/storage.c',
+    line: 65,
+    remediation: '进入循环前缓存长度，减少重复遍历。',
+    ...snippet(65, 'for (size_t i = 0; i < strlen(text); ++i) {', 'const size_t length = strlen(text); for (size_t i = 0; i < length; ++i) {'),
+  },
+  {
+    severity: 'suggestion',
+    category: 'compatibility',
+    title: '编译器扩展未提供兼容分支',
+    description: '直接使用特定编译器扩展，跨工具链构建时可能失败。',
+    file_path: 'drivers/stm32f10x_dma.c',
+    line: 151,
+    remediation: '使用条件编译封装扩展语法，并提供标准 C 兼容实现。',
+    ...snippet(151, '__attribute__((packed)) dma_desc_t desc;', '#if defined(__GNUC__)\n__attribute__((packed)) dma_desc_t desc;\n#endif'),
+  },
+]
+
+const cloneFindings = (count: number, offset = 0) => Array.from({ length: count }, (_, index) => {
+  const base = findingTemplates[(index + offset) % findingTemplates.length]
+  return {
+    ...base,
+    title: index < findingTemplates.length ? base.title : `${base.title} #${index + 1}`,
+    line: (base.line || 1) + Math.floor(index / findingTemplates.length) * 9,
+    code_snippet: base.code_snippet?.map((line) => ({ ...line, line: line.line + Math.floor(index / findingTemplates.length) * 9 })),
+    fixed_snippet: base.fixed_snippet?.map((line) => ({ ...line, line: line.line + Math.floor(index / findingTemplates.length) * 9 })),
+  }
+})
+
+const summarizeFindings = (items: Finding[]) => ({
+  high_count: items.filter((item) => item.severity === 'high').length,
+  medium_count: items.filter((item) => item.severity === 'medium').length,
+  low_count: items.filter((item) => item.severity === 'low').length,
+  suggestion_count: items.filter((item) => item.severity === 'suggestion').length,
+  category_counts: items.reduce<Record<string, number>>((counts, item) => {
+    counts[item.category] = (counts[item.category] || 0) + 1
+    return counts
+  }, {}),
+})
+
+const makeReport = (reportId: string, taskId: string, findingCount = 8, score = 72): Report => {
+  const findings = cloneFindings(findingCount, taskId.length % findingTemplates.length)
+  const counts = summarizeFindings(findings)
+  return {
+    id: reportId,
+    task_id: taskId,
+    summary: `分片审查完成，共发现 ${findingCount} 个问题，已保存全部问题并按风险等级排序。`,
+    score,
+    ...counts,
+    result_json: {
+      summary: `发现 ${findingCount} 个问题，其中高危 ${counts.high_count} 个，中危 ${counts.medium_count} 个。`,
+      score,
+      findings,
+    },
+  }
+}
+
 const modelCatalog: ModelCatalogItem[] = [
+  {
+    key: 'qwen2.5-coder-14b-instruct',
+    display_name: 'Qwen2.5-Coder 14B Instruct',
+    model_identifier: 'Qwen/Qwen2.5-Coder-14B-Instruct',
+    description: '适合 C 代码批量审查和日常风险定位。',
+    recommended_source: 'modelscope',
+    huggingface_repo: 'Qwen/Qwen2.5-Coder-14B-Instruct',
+    modelscope_repo: 'Qwen/Qwen2.5-Coder-14B-Instruct',
+    default_port: 8101,
+    default_served_model_name: 'qwen2.5-coder-14b-instruct',
+    estimated_vram_gb: 28,
+    tags: ['c', 'security', 'mock-ready'],
+  },
   {
     key: 'deepseek-coder-14b-instruct',
     display_name: 'DeepSeek-Coder 14B Instruct',
@@ -40,29 +224,27 @@ const modelCatalog: ModelCatalogItem[] = [
     recommended_source: 'modelscope',
     huggingface_repo: 'deepseek-ai/deepseek-coder-14b-instruct',
     modelscope_repo: 'deepseek-ai/deepseek-coder-14b-instruct',
-    default_port: 8101,
+    default_port: 8102,
     default_served_model_name: 'deepseek-coder-14b-instruct',
-    estimated_vram_gb: 28,
+    estimated_vram_gb: 30,
     tags: ['c', 'security', 'instruct'],
   },
   {
-    key: 'codellama-13b-instruct',
-    display_name: 'CodeLlama 13B Instruct',
-    model_identifier: 'codellama/CodeLlama-13b-Instruct-hf',
-    description: '适合作为兼容性与代码规范审查的备选节点。',
-    recommended_source: 'huggingface',
-    huggingface_repo: 'codellama/CodeLlama-13b-Instruct-hf',
-    modelscope_repo: 'LLM-Research/CodeLlama-13b-Instruct-hf',
-    default_port: 8102,
-    default_served_model_name: 'codellama-13b-instruct',
-    estimated_vram_gb: 26,
-    tags: ['c', 'instruct', 'fallback'],
+    key: 'mock-local-reviewer',
+    display_name: 'Mock 审查模型',
+    model_identifier: 'mock-local-reviewer',
+    description: '无需后端服务，用于前端联调、并发任务和报告展示验证。',
+    recommended_source: 'local',
+    default_port: 8800,
+    default_served_model_name: 'mock-local-reviewer',
+    estimated_vram_gb: 0,
+    tags: ['mock', 'frontend', 'testing'],
   },
   {
     key: 'starcoder2-15b',
     display_name: 'StarCoder2 15B',
     model_identifier: 'bigcode/starcoder2-15b',
-    description: '适合作为批量代码质量检查节点。',
+    description: '适合批量代码质量检查和兼容性审查。',
     recommended_source: 'huggingface',
     huggingface_repo: 'bigcode/starcoder2-15b',
     modelscope_repo: 'AI-ModelScope/starcoder2-15b',
@@ -73,64 +255,206 @@ const modelCatalog: ModelCatalogItem[] = [
   },
 ]
 
-const makeReport = (reportId: string, taskId: string): Report => ({
-  id: reportId,
-  task_id: taskId,
-  summary: '本次审查覆盖内存安全、逻辑正确性、可移植性与性能。建议优先修复缓冲区越界风险，再处理资源释放与类型兼容问题。',
-  score: 78,
-  high_count: 1,
-  medium_count: 1,
-  low_count: 1,
-  suggestion_count: 1,
-  category_counts: { memory_safety: 1, logic: 1, portability: 1, performance: 1 },
-  result_json: { summary: '发现 4 个需要关注的问题。', score: 78, findings },
-})
+const seedTasks = (created: string): ReviewTask[] => [
+  {
+    id: 'review-seeded',
+    owner_id: 'user-admin',
+    model_node_id: 'model-qwen',
+    input_mode: 'archive',
+    display_name: 'embedded-gateway-demo.zip',
+    status: 'completed',
+    progress: 100,
+    duration_ms: 12840,
+    file_count: 10,
+    finding_count: 36,
+    report_id: 'report-seeded',
+    files: demoFiles(10, 'seeded'),
+    check_types: allCheckTypes,
+    created_at: minutesAgo(110),
+    updated_at: minutesAgo(90),
+    completed_at: minutesAgo(90),
+  },
+  {
+    id: 'review-demo-completed',
+    owner_id: 'user-demo',
+    model_node_id: 'model-mock',
+    input_mode: 'folder',
+    display_name: 'sensor_gateway',
+    status: 'completed',
+    progress: 100,
+    duration_ms: 8420,
+    file_count: 14,
+    finding_count: 21,
+    report_id: 'report-demo-completed',
+    files: demoFiles(14, 'demo-completed'),
+    check_types: ['memory_safety', 'resource_leak', 'logic', 'performance'],
+    created_at: minutesAgo(76),
+    updated_at: minutesAgo(62),
+    completed_at: minutesAgo(62),
+  },
+  {
+    id: 'review-running-admin',
+    owner_id: 'user-admin',
+    model_node_id: 'model-qwen',
+    input_mode: 'folder',
+    display_name: 'USBSample.c',
+    status: 'running',
+    progress: 57,
+    file_count: 10,
+    finding_count: 12,
+    files: demoFiles(10, 'running-admin'),
+    check_types: allCheckTypes,
+    started_at: minutesAgo(9),
+    created_at: minutesAgo(14),
+    updated_at: minutesAgo(2),
+    model_log: '[mock] 正在审查 drivers/stm32f10x_adc.c\n[mock] 已完成 6/10 个文件\n[mock] 当前批次使用 Mock 审查模型',
+  },
+  {
+    id: 'review-running-demo',
+    owner_id: 'user-demo',
+    model_node_id: 'model-mock',
+    input_mode: 'file',
+    display_name: 'network_driver.c',
+    status: 'running',
+    progress: 41,
+    file_count: 1,
+    finding_count: 3,
+    files: [{ id: 'file-running-demo', relative_path: 'network_driver.c', size_bytes: 4096 }],
+    check_types: ['memory_safety', 'input_validation', 'concurrency'],
+    started_at: minutesAgo(4),
+    created_at: minutesAgo(5),
+    updated_at: minutesAgo(1),
+    model_log: '[mock] 单文件审查中，已识别输入校验和指针安全风险。',
+  },
+  {
+    id: 'review-queued-1',
+    owner_id: 'user-alice',
+    model_node_id: 'model-mock',
+    input_mode: 'archive',
+    display_name: 'motor_control.zip',
+    status: 'queued',
+    progress: 0,
+    queue_priority: 1,
+    queued_ahead_count: 0,
+    file_count: 18,
+    finding_count: 0,
+    files: demoFiles(12, 'queue-1'),
+    check_types: ['integer_safety', 'logic', 'compatibility'],
+    created_at: minutesAgo(3),
+    updated_at: minutesAgo(3),
+  },
+  {
+    id: 'review-queued-2',
+    owner_id: 'user-demo',
+    model_node_id: 'model-mock',
+    input_mode: 'folder',
+    display_name: 'rtos_porting',
+    status: 'queued',
+    progress: 0,
+    queued_ahead_count: 1,
+    file_count: 22,
+    finding_count: 0,
+    files: demoFiles(12, 'queue-2'),
+    check_types: ['portability', 'maintainability', 'performance'],
+    created_at: minutesAgo(2),
+    updated_at: minutesAgo(2),
+  },
+  {
+    id: 'review-failed',
+    owner_id: 'user-bob',
+    model_node_id: 'model-deepseek',
+    input_mode: 'archive',
+    display_name: 'legacy-module.zip',
+    status: 'failed',
+    progress: 100,
+    error_message: 'Mock 模型模拟：结构化响应校验失败，已保留模型日志供排查。',
+    model_log: '[mock] invalid structured response: fixed_snippet.kind should be context/removed/added',
+    duration_ms: 3100,
+    file_count: 8,
+    finding_count: 0,
+    files: demoFiles(8, 'failed'),
+    check_types: ['memory_safety', 'logic'],
+    created_at: minutesAgo(42),
+    updated_at: minutesAgo(39),
+    completed_at: minutesAgo(39),
+  },
+]
 
 const seedState = (): MockState => {
   const created = now()
-  const taskId = 'review-seeded'
-  const reportId = 'report-seeded'
+  const tasks = seedTasks(created)
   return {
     version: STATE_VERSION,
     users: [
       { id: 'user-admin', username: 'admin', role: 'admin', is_enabled: true, created_at: created },
       { id: 'user-demo', username: 'demo', role: 'user', is_enabled: true, created_at: created },
+      { id: 'user-alice', username: 'alice', role: 'user', is_enabled: true, created_at: created },
+      { id: 'user-bob', username: 'bob', role: 'user', is_enabled: true, created_at: created },
       { id: 'user-disabled', username: 'disabled_user', role: 'user', is_enabled: false, created_at: created },
     ],
+    passwords: {
+      admin: 'admin12345678',
+      demo: 'demo12345678',
+      alice: 'alice12345678',
+      bob: 'bob12345678',
+      disabled_user: 'disabled12345678',
+    },
     models: [
-      { id: 'model-qwen', display_name: 'Qwen3-Coder 30B', model_identifier: 'qwen3-coder-30b', base_url: 'http://gpu-node-01:8000', timeout_seconds: 120, is_enabled: true, is_default: true, description: '适合日常批量代码审查与规范检查。', created_at: created },
-      { id: 'model-deepseek', display_name: 'DeepSeek-Coder 33B', model_identifier: 'deepseek-coder-33b-instruct', base_url: 'http://gpu-node-02:8000', timeout_seconds: 180, is_enabled: true, is_default: false, description: '适合复杂逻辑与安全漏洞审计。', created_at: created },
+      { id: 'model-qwen', display_name: 'Qwen2.5-Coder 14B Instruct', model_identifier: 'qwen2.5-coder-14b-instruct', base_url: 'http://gpu-node-01:8001', timeout_seconds: 120, is_enabled: true, is_default: true, gpu_indices: [0, 1], tensor_parallel_size: 2, description: '由手动部署验证登记，可直接用于代码审查。', created_at: created },
+      { id: 'model-mock', display_name: 'Mock 审查模式', model_identifier: 'mock-local-reviewer', base_url: 'mock://frontend', timeout_seconds: 5, is_enabled: true, is_default: false, gpu_indices: [], tensor_parallel_size: 1, description: '前端本地假数据模式，覆盖登录、上传、下载、报告和后台管理流程。', created_at: created },
+      { id: 'model-deepseek', display_name: 'DeepSeek-Coder 33B', model_identifier: 'deepseek-coder-33b-instruct', base_url: 'http://gpu-node-02:8001', timeout_seconds: 180, is_enabled: true, is_default: false, gpu_indices: [0], tensor_parallel_size: 1, description: '适合复杂逻辑与安全漏洞审计。', created_at: created },
     ],
     deployments: [
       {
-        id: 'deploy-seeded',
-        catalog_key: 'deepseek-coder-14b-instruct',
-        display_name: 'DeepSeek-Coder 14B Instruct',
-        model_identifier: 'deepseek-ai/deepseek-coder-14b-instruct',
+        id: 'deploy-qwen',
+        catalog_key: 'qwen2.5-coder-14b-instruct',
+        display_name: 'Qwen2.5-Coder 14B Instruct',
+        model_identifier: 'Qwen/Qwen2.5-Coder-14B-Instruct',
         source: 'modelscope',
-        source_repository: 'deepseek-ai/deepseek-coder-14b-instruct',
-        served_model_name: 'deepseek-coder-14b-instruct',
-        base_url: 'http://127.0.0.1:8101',
-        port: 8101,
-        service_name: 'c-check-vllm-deepseek-coder-14b-instruct',
-        status: 'manual_required',
-        progress: 10,
-        log: '自动部署未开启；请在 Linux GPU 服务器设置 MODEL_DEPLOYMENT_ENABLED=true 后执行。',
+        source_repository: 'Qwen/Qwen2.5-Coder-14B-Instruct',
+        served_model_name: 'qwen2.5-coder-14b-instruct',
+        base_url: 'http://127.0.0.1:8001',
+        port: 8001,
+        service_name: 'c-check-vllm-qwen25-coder-14b',
+        gpu_indices: [0, 1],
+        tensor_parallel_size: 2,
+        status: 'succeeded',
+        progress: 100,
+        log: 'Mock 数据：模型节点已登记，服务健康检查通过。',
         model_node_id: 'model-qwen',
-        created_at: created,
-        updated_at: created,
+        created_at: minutesAgo(180),
+        updated_at: minutesAgo(120),
+      },
+      {
+        id: 'deploy-mock',
+        catalog_key: 'mock-local-reviewer',
+        display_name: 'Mock 审查模型',
+        model_identifier: 'mock-local-reviewer',
+        source: 'local',
+        source_repository: 'frontend/mock',
+        served_model_name: 'mock-local-reviewer',
+        base_url: 'mock://frontend',
+        port: 8800,
+        service_name: 'c-check-frontend-mock',
+        gpu_indices: [],
+        tensor_parallel_size: 1,
+        status: 'running',
+        progress: 88,
+        log: 'Mock 数据：用于多用户并发和页面联调。',
+        model_node_id: 'model-mock',
+        created_at: minutesAgo(30),
+        updated_at: minutesAgo(1),
       },
     ],
     prompts: [
-      { id: 'prompt-2', version: 2, body: 'C 语言企业级审查提示词：检查内存安全、逻辑漏洞、性能、规范与可移植性。', is_active: true, created_at: created },
-      { id: 'prompt-1', version: 1, body: 'C 语言基础审查提示词。', is_active: false, created_at: created },
+      { id: 'prompt-2', version: 2, body: 'C 语言企业级审查提示词：检查内存安全、逻辑漏洞、资源释放、并发安全、性能和可移植性。输出结构化 JSON，并保留代码片段。', is_active: true, created_at: created },
+      { id: 'prompt-1', version: 1, body: 'C 语言基础审查提示词。', is_active: false, created_at: minutesAgo(240) },
     ],
-    tasks: [
-      { id: taskId, owner_id: 'user-admin', model_node_id: 'model-qwen', input_mode: 'archive', display_name: 'embedded-gateway-demo.zip', status: 'completed', progress: 100, duration_ms: 12840, file_count: 6, finding_count: 4, report_id: reportId, files: demoFiles(), check_types: ['memory_safety', 'logic', 'portability', 'performance'], created_at: created, updated_at: created, completed_at: created },
-      { id: 'review-running', owner_id: 'user-demo', model_node_id: 'model-deepseek', input_mode: 'file', display_name: 'network_driver.c', status: 'running', progress: 62, file_count: 1, finding_count: 0, created_at: created, updated_at: created },
-      { id: 'review-failed', owner_id: 'user-demo', model_node_id: 'model-qwen', input_mode: 'archive', display_name: 'legacy-module.zip', status: 'failed', progress: 100, error_message: '模型节点暂时不可用，请稍后重试。', model_log: '[demo] selected model node is unavailable', duration_ms: 3100, file_count: 8, finding_count: 0, created_at: created, updated_at: created, completed_at: created },
+    tasks,
+    reports: [
+      makeReport('report-seeded', 'review-seeded', 36, 78),
+      makeReport('report-demo-completed', 'review-demo-completed', 21, 84),
     ],
-    reports: [makeReport(reportId, taskId)],
     polls: {},
   }
 }
@@ -158,8 +482,17 @@ const visibleTasks = (state: MockState) => {
   return user.role === 'admin' ? state.tasks : state.tasks.filter((task) => task.owner_id === user.id)
 }
 const taskToAdmin = (task: ReviewTask): AdminTask => ({
-  id: task.id, owner_id: task.owner_id, model_node_id: task.model_node_id, display_name: task.display_name,
-  status: task.status, progress: task.progress, finding_count: task.finding_count, error_message: task.error_message, created_at: task.created_at,
+  id: task.id,
+  owner_id: task.owner_id,
+  model_node_id: task.model_node_id,
+  display_name: task.display_name,
+  status: task.status,
+  progress: task.progress,
+  queue_priority: task.queue_priority,
+  queued_ahead_count: task.queued_ahead_count,
+  finding_count: task.finding_count,
+  error_message: task.error_message,
+  created_at: task.created_at,
 })
 
 export const resetMockState = () => {
@@ -167,28 +500,85 @@ export const resetMockState = () => {
   localStorage.removeItem(SESSION_KEY)
 }
 
+function dashboardFromState(state: MockState): Dashboard {
+  return {
+    users: state.users.length,
+    enabled_users: state.users.filter((user) => user.is_enabled).length,
+    models: state.models.length,
+    enabled_models: state.models.filter((model) => model.is_enabled).length,
+    tasks: state.tasks.length,
+    queued_tasks: state.tasks.filter((task) => task.status === 'queued').length,
+    running_tasks: state.tasks.filter((task) => task.status === 'running').length,
+    completed_tasks: state.tasks.filter((task) => task.status === 'completed').length,
+    failed_tasks: state.tasks.filter((task) => task.status === 'failed').length,
+  }
+}
+
+function ensureReportForTask(state: MockState, task: ReviewTask) {
+  if (!task.report_id) task.report_id = `report-${task.id}`
+  if (!state.reports.some((report) => report.id === task.report_id)) {
+    const count = Math.max(4, task.finding_count || Math.min(24, task.file_count * 2))
+    state.reports.push(makeReport(task.report_id, task.id, count, Math.max(45, 92 - count)))
+  }
+}
+
+function progressTask(state: MockState, task: ReviewTask) {
+  if (task.status !== 'queued' && task.status !== 'running') return
+  const polls = (state.polls[task.id] || 0) + 1
+  state.polls[task.id] = polls
+  const hasRunningTask = state.tasks.some((item) => item.id !== task.id && item.status === 'running')
+
+  if (task.status === 'queued' && hasRunningTask && polls < 2) {
+    task.queued_ahead_count = Math.max(0, task.queued_ahead_count ?? 1)
+    task.updated_at = now()
+    return
+  }
+
+  if (polls >= 4) {
+    task.status = 'completed'
+    task.progress = 100
+    task.duration_ms = 2800 + task.file_count * 640
+    task.finding_count = Math.max(task.finding_count, Math.min(48, task.file_count * 3))
+    task.completed_at = now()
+    ensureReportForTask(state, task)
+  } else {
+    task.status = 'running'
+    task.progress = Math.min(88, Math.max(task.progress, 25 + polls * 18))
+    task.started_at ||= now()
+    task.model_log = `[mock] ${task.display_name} 审查中\n[mock] 当前进度 ${task.progress}%\n[mock] 已按串行队列处理文件`
+  }
+  task.updated_at = now()
+}
+
 export const mockApi = {
   auth: {
     login: async (username: string, password: string) => {
       const state = load()
       const user = state.users.find((item) => item.username === username)
-      const validPassword = username === 'admin' ? 'admin12345678' : username === 'demo' ? 'demo12345678' : ''
-      if (!user || !user.is_enabled || password !== validPassword) throw new Error('账号或密码错误')
+      if (!user || !user.is_enabled || state.passwords[username] !== password) throw new Error('账号或密码错误')
       localStorage.setItem(SESSION_KEY, username)
       return response({ access_token: `mock-token-${username}` })
     },
     me: async () => response(requireUser(load()) as User),
-    password: async () => response({ ok: true }),
+    password: async (currentPassword?: string, newPassword?: string) => {
+      const state = load()
+      const user = requireUser(state)
+      if (currentPassword && state.passwords[user.username] !== currentPassword) throw new Error('当前密码不正确')
+      if (newPassword) state.passwords[user.username] = newPassword
+      save(state)
+      return response({ ok: true })
+    },
   },
   models: async () => {
     const state = load()
     const models = state.models.filter((model) => model.is_enabled).sort((a, b) => Number(b.is_default) - Number(a.is_default))
-    return response(requireUser(state).role === 'admin' ? models : models.filter((model) => model.is_default))
+    return response(requireUser(state).role === 'admin' ? models : models.filter((model) => model.is_default || model.base_url.startsWith('mock://')))
   },
   reviews: {
     submitText: async (model_node_id: string, source_text: string, check_types: string[], display_name?: string) => createReview(model_node_id, 'text', display_name || 'snippet.c', source_text ? 1 : 0, check_types),
-    submitFile: async (mode: 'file' | 'archive', model_node_id: string, file: File, check_types: string[], display_name?: string) => createReview(model_node_id, mode, display_name || file.name, mode === 'archive' ? 6 : 1, check_types),
-    submitDemoArchive: async (check_types: string[]) => createReview('model-qwen', 'archive', 'embedded-gateway-live-demo.zip', 6, check_types),
+    submitFile: async (mode: 'file' | 'archive', model_node_id: string, file: File, check_types: string[], display_name?: string) => createReview(model_node_id, mode, display_name || file.name, mode === 'archive' ? 12 : 1, check_types),
+    submitFolder: async (model_node_id: string, files: File[], check_types: string[], display_name?: string) => createReview(model_node_id, 'folder', display_name || 'selected-folder', files.length, check_types),
+    submitDemoArchive: async (check_types: string[]) => createReview('model-mock', 'archive', 'embedded-gateway-live-demo.zip', 12, check_types),
     list: async (params?: Record<string, unknown>) => {
       const state = load()
       let tasks = visibleTasks(state)
@@ -199,10 +589,10 @@ export const mockApi = {
       if (params?.start_time) tasks = tasks.filter((task) => new Date(task.created_at) >= new Date(String(params.start_time)))
       if (params?.end_time) tasks = tasks.filter((task) => new Date(task.created_at) <= new Date(String(params.end_time)))
       if (params?.severity) {
-        const countKey = `${String(params.severity)}_count` as 'high_count' | 'medium_count' | 'low_count' | 'suggestion_count'
+        const countKey = `${String(params.severity)}_count` as `${Severity}_count`
         tasks = tasks.filter((task) => {
           const report = state.reports.find((item) => item.id === task.report_id)
-          return Boolean(report?.[countKey])
+          return Boolean(report?.[countKey as keyof Report])
         })
       }
       const sortBy = String(params?.sort_by || 'created_at')
@@ -210,7 +600,7 @@ export const mockApi = {
       const modelName = (task: ReviewTask) => state.models.find((model) => model.id === task.model_node_id)?.display_name || task.model_node_id
       const testerName = (task: ReviewTask) => state.users.find((user) => user.id === task.owner_id)?.username || task.owner_id
       const value = (task: ReviewTask) => sortBy === 'tester_name' ? testerName(task) : sortBy === 'model' ? modelName(task) : task[sortBy as keyof ReviewTask] ?? ''
-      tasks.sort((left, right) => String(value(left)).localeCompare(String(value(right)), 'zh-CN', { numeric: true }) * sortDir)
+      tasks = [...tasks].sort((left, right) => String(value(left)).localeCompare(String(value(right)), 'zh-CN', { numeric: true }) * sortDir)
       const total = tasks.length
       const offset = Number(params?.offset || 0), limit = Number(params?.limit || 20)
       return response({ items: tasks.slice(offset, offset + limit).map((task) => ({ ...task, tester_name: testerName(task) })), total })
@@ -219,20 +609,15 @@ export const mockApi = {
       const state = load()
       const task = visibleTasks(state).find((item) => item.id === taskId)
       if (!task) throw new Error('审查任务不存在')
-      if (task.status === 'queued' || task.status === 'running') {
-        const polls = (state.polls[task.id] || 0) + 1
-        state.polls[task.id] = polls
-        Object.assign(task, polls >= 3
-          ? { status: 'completed' as TaskStatus, progress: 100, duration_ms: 2860, finding_count: 4, report_id: `report-${task.id}`, completed_at: now() }
-          : { status: 'running' as TaskStatus, progress: polls === 1 ? 34 : 68 })
-        task.updated_at = now()
-        save(state)
-      }
+      progressTask(state, task)
+      save(state)
       return response(task)
     },
     remove: async (taskId: string) => {
       const state = load()
-      state.tasks = state.tasks.filter((task) => task.id !== taskId)
+      const task = visibleTasks(state).find((item) => item.id === taskId)
+      if (!task) throw new Error('审查任务不存在')
+      state.tasks = state.tasks.filter((item) => item.id !== taskId)
       state.reports = state.reports.filter((report) => report.task_id !== taskId)
       save(state)
       return response({ ok: true })
@@ -242,73 +627,68 @@ export const mockApi = {
       const task = visibleTasks(state).find((item) => item.id === taskId)
       if (!task) throw new Error('审查任务不存在')
       if (task.status !== 'queued') throw new Error('只有排队中的任务可以置顶')
-      task.queue_priority = Math.max(0, ...state.tasks.map((item) => item.queue_priority || 0)) + 1
+      state.tasks.forEach((item) => {
+        if (item.id !== task.id && item.status === 'queued') item.queue_priority = undefined
+      })
+      task.queue_priority = 1
+      task.queued_ahead_count = 0
       save(state)
       return response(task)
     },
   },
   reports: {
     get: async (reportId: string) => {
-      const report = load().reports.find((item) => item.id === reportId)
+      const state = load()
+      const report = state.reports.find((item) => item.id === reportId)
       if (!report) throw new Error('审查报告不存在')
       return response(report)
     },
     download: async (reportId: string, format: 'markdown' | 'pdf') => {
-      const report = load().reports.find((item) => item.id === reportId)
+      const state = load()
+      const report = state.reports.find((item) => item.id === reportId)
       if (!report) throw new Error('审查报告不存在')
-      return response(new Blob([format === 'markdown' ? `# C-Check 审查报告\n\n${report.summary}` : 'C-Check demo PDF report'], { type: format === 'markdown' ? 'text/markdown' : 'application/pdf' }))
+      const task = state.tasks.find((item) => item.id === report.task_id)
+      const taskLine = task ? `任务：${task.display_name}\n输入方式：${task.input_mode}\n` : ''
+      const content = format === 'markdown'
+        ? `# C-Check 审查报告\n\n${taskLine}\n${report.summary}\n\n发现问题：${report.result_json.findings.length} 个`
+        : `C-Check mock PDF report\n${taskLine}${report.summary}`
+      return response(new Blob([content], { type: format === 'markdown' ? 'text/markdown' : 'application/pdf' }))
     },
   },
   admin: {
-    dashboard: async () => {
-      const state = load()
-      return response({
-        users: state.users.length, enabled_users: state.users.filter((user) => user.is_enabled).length,
-        models: state.models.length, enabled_models: state.models.filter((model) => model.is_enabled).length,
-        tasks: state.tasks.length, queued_tasks: state.tasks.filter((task) => task.status === 'queued').length,
-        running_tasks: state.tasks.filter((task) => task.status === 'running').length,
-        completed_tasks: state.tasks.filter((task) => task.status === 'completed').length,
-        failed_tasks: state.tasks.filter((task) => task.status === 'failed').length,
-      } satisfies Dashboard)
-    },
+    dashboard: async () => response(dashboardFromState(load())),
     resources: async () => {
       const state = load()
-      const tasks = {
-        users: state.users.length,
-        enabled_users: state.users.filter((user) => user.is_enabled).length,
-        models: state.models.length,
-        enabled_models: state.models.filter((model) => model.is_enabled).length,
-        tasks: state.tasks.length,
-        queued_tasks: state.tasks.filter((task) => task.status === 'queued').length,
-        running_tasks: state.tasks.filter((task) => task.status === 'running').length,
-        completed_tasks: state.tasks.filter((task) => task.status === 'completed').length,
-        failed_tasks: state.tasks.filter((task) => task.status === 'failed').length,
-      }
+      const tasks = dashboardFromState(state)
+      const jitter = Math.round(Date.now() / 1000) % 8
       return response({
         captured_at: now(),
         system: {
-          cpu_percent: 28,
-          load_average_1m: 1.35,
-          memory_total_bytes: 64 * 1024 ** 3,
-          memory_used_bytes: 31 * 1024 ** 3,
-          memory_percent: 48.4,
-          disk_total_bytes: 500 * 1024 ** 3,
-          disk_used_bytes: 182 * 1024 ** 3,
-          disk_percent: 36.4,
+          cpu_percent: 32 + jitter,
+          load_average_1m: 1.35 + jitter / 10,
+          memory_total_bytes: 128 * 1024 ** 3,
+          memory_used_bytes: (52 + jitter) * 1024 ** 3,
+          memory_percent: 41 + jitter,
+          disk_total_bytes: 1024 * 1024 ** 3,
+          disk_used_bytes: 286 * 1024 ** 3,
+          disk_percent: 28,
         },
         gpus: [
-          { index: 0, name: 'NVIDIA A100', utilization_percent: 62, memory_used_mb: 24576, memory_total_mb: 81920, memory_percent: 30, temperature_c: 58, power_w: 220 },
+          { index: 0, name: 'NVIDIA RTX 4090', utilization_percent: 71 + jitter, memory_used_mb: 18_432, memory_total_mb: 24_576, memory_percent: 75, temperature_c: 62, power_w: 328 },
+          { index: 1, name: 'NVIDIA RTX 4090', utilization_percent: 58 + jitter, memory_used_mb: 16_896, memory_total_mb: 24_576, memory_percent: 69, temperature_c: 59, power_w: 301 },
         ],
-        models: state.models.map((model) => ({
+        models: state.models.map((model, index) => ({
           node_id: model.id,
           display_name: model.display_name,
           base_url: model.base_url,
+          gpu_indices: model.gpu_indices,
+          tensor_parallel_size: model.tensor_parallel_size,
           metrics_available: model.is_enabled,
-          prompt_throughput_tps: model.is_enabled ? 1200 : null,
-          generation_throughput_tps: model.is_enabled ? 150 : null,
-          running_requests: model.is_enabled ? 2 : 0,
-          pending_requests: 0,
-          gpu_kv_cache_usage_percent: model.is_enabled ? 27.4 : null,
+          prompt_throughput_tps: model.is_enabled ? 980 - index * 120 + jitter * 12 : null,
+          generation_throughput_tps: model.is_enabled ? 86 - index * 9 + jitter : null,
+          running_requests: model.is_enabled ? Math.max(0, tasks.running_tasks - index) : 0,
+          pending_requests: index === 0 ? tasks.queued_tasks : 0,
+          gpu_kv_cache_usage_percent: model.is_enabled ? 34 + jitter + index * 5 : null,
         })),
         tasks,
       } satisfies ResourceSnapshot)
@@ -316,24 +696,29 @@ export const mockApi = {
     users: async () => response(load().users),
     createUser: async (payload: { username: string; password: string; role: string }) => {
       const state = load()
+      if (state.users.some((user) => user.username === payload.username)) throw new Error('用户名已存在')
       state.users.push({ id: id('user'), username: payload.username, role: payload.role === 'admin' ? 'admin' : 'user', is_enabled: true, created_at: now() })
+      state.passwords[payload.username] = payload.password
       save(state)
       return response({ ok: true })
     },
     enableUser: async (userId: string, is_enabled: boolean) => update(state => state.users.find(user => user.id === userId)!.is_enabled = is_enabled),
-    resetPassword: async () => response({ ok: true }),
+    resetPassword: async (userId?: string, password?: string) => update(state => {
+      const user = state.users.find((item) => item.id === userId)
+      if (user && password) state.passwords[user.username] = password
+    }),
     models: async () => response(load().models),
     saveModel: async (payload: Partial<ModelNode> & { display_name: string; model_identifier: string; base_url: string }, modelId?: string) => {
       const state = load()
       if (modelId) Object.assign(state.models.find((model) => model.id === modelId)!, payload)
-      else state.models.push({ id: id('model'), timeout_seconds: 120, is_enabled: true, is_default: !state.models.some(model => model.is_default), ...payload })
+      else state.models.push({ id: id('model'), timeout_seconds: 120, is_enabled: true, is_default: !state.models.some(model => model.is_default), created_at: now(), ...payload, gpu_indices: payload.gpu_indices || [], tensor_parallel_size: payload.tensor_parallel_size || 1 })
       save(state)
       return response({ ok: true })
     },
     enableModel: async (modelId: string, is_enabled: boolean) => update(state => state.models.find(model => model.id === modelId)!.is_enabled = is_enabled),
     defaultModel: async (modelId: string) => update(state => state.models.forEach(model => { model.is_default = model.id === modelId })),
     deleteModel: async (modelId: string) => update(state => { state.models = state.models.filter(model => model.id !== modelId) }),
-    modelHealth: async () => response({ ok: true }),
+    modelHealth: async (_id?: string) => response({ ok: true }),
     modelCatalog: async () => response(modelCatalog),
     modelDeployments: async () => response(load().deployments),
     createModelDeployment: async (payload: Record<string, unknown>) => {
@@ -350,9 +735,11 @@ export const mockApi = {
         base_url: String(payload.base_url || `http://127.0.0.1:${catalog.default_port || 8101}`),
         port: Number(payload.port || catalog.default_port || 8101),
         service_name: String(payload.service_name || `c-check-vllm-${catalog.key}`),
+        gpu_indices: Array.isArray(payload.gpu_indices) ? payload.gpu_indices as number[] : [0, 1],
+        tensor_parallel_size: Number(payload.tensor_parallel_size || 2),
         status: 'queued',
         progress: 0,
-        log: 'Deployment task queued.',
+        log: 'Mock 部署任务已加入队列。',
         model_node_id: id('model'),
         created_at: now(),
         updated_at: now(),
@@ -366,7 +753,9 @@ export const mockApi = {
         timeout_seconds: Number(payload.timeout_seconds || 180),
         is_enabled: true,
         is_default: !state.models.some(model => model.is_default),
-        description: '由模型部署任务自动登记',
+        gpu_indices: Array.isArray(payload.gpu_indices) ? payload.gpu_indices as number[] : [0, 1],
+        tensor_parallel_size: Number(payload.tensor_parallel_size || 2),
+        description: '由模型部署任务自动登记。',
         created_at: now(),
       })
       save(state)
@@ -383,7 +772,7 @@ export const mockApi = {
     updatePrompt: async (promptId: string, body: string) => update(state => { state.prompts.find(prompt => prompt.id === promptId)!.body = body }),
     deletePrompt: async (promptId: string) => update(state => {
       const prompt = state.prompts.find(item => item.id === promptId)
-      if (!prompt || prompt.is_active || state.prompts.length <= 1) throw new Error('当前启用版本或最后一个版本不可删除')
+      if (!prompt || prompt.is_active || state.prompts.length <= 1) throw new Error('当前启用版本或最后一个版本不能删除')
       state.prompts = state.prompts.filter(item => item.id !== promptId)
     }),
     tasks: async (status?: TaskStatus | '') => response(load().tasks.filter(task => !status || task.status === status).map(taskToAdmin)),
@@ -394,12 +783,29 @@ async function createReview(model_node_id: string, input_mode: string, display_n
   const state = load()
   const user = requireUser(state)
   const taskId = id('review')
-  const reportId = `report-${taskId}`
   const created = now()
-  const files = input_mode === 'archive' ? demoFiles(file_count) : [{ id: 'file-1', relative_path: display_name, size_bytes: 180 }]
-  const task: ReviewTask = { id: taskId, owner_id: user.id, model_node_id, input_mode, display_name, status: 'queued', progress: 8, file_count, finding_count: 0, files, check_types, created_at: created, updated_at: created }
+  const activeTasks = state.tasks.filter((task) => task.status === 'queued' || task.status === 'running')
+  const files = input_mode === 'archive' || input_mode === 'folder'
+    ? demoFiles(file_count, taskId)
+    : [{ id: 'file-1', relative_path: display_name, size_bytes: 4096 }]
+  const task: ReviewTask = {
+    id: taskId,
+    owner_id: user.id,
+    model_node_id,
+    input_mode,
+    display_name,
+    status: activeTasks.length ? 'queued' : 'running',
+    progress: activeTasks.length ? 0 : 18,
+    queued_ahead_count: activeTasks.length,
+    file_count,
+    finding_count: 0,
+    files,
+    check_types,
+    created_at: created,
+    updated_at: created,
+    started_at: activeTasks.length ? undefined : created,
+  }
   state.tasks.unshift(task)
-  state.reports.push(makeReport(reportId, taskId))
   save(state)
   return response(task)
 }

@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from app.core.config import Settings
 from app.core.security import create_access_token, hash_password
-from app.db.models import ModelNode, Report, ReviewFile, ReviewTask, User
+from app.db.models import ModelNode, Report, ReviewFile, ReviewTask, TaskStatus, User
 
 
 JWT_SECRET = "test-jwt-secret-at-least-32-characters-long"
@@ -179,6 +179,16 @@ def test_collect_archive_rejects_total_extracted_size_limit():
         collect_archive_submission("sources.zip", archive, settings)
 
 
+def test_collect_archive_rejects_review_source_size_limit():
+    from app.services.submissions import SubmissionError, collect_archive_submission
+
+    archive = make_zip([("one.c", b"1234", None), ("two.h", b"5678", None)])
+    settings = Settings(_env_file=None, allow_insecure_defaults=True, review_max_source_bytes=7)
+
+    with pytest.raises(SubmissionError, match="review source size"):
+        collect_archive_submission("sources.zip", archive, settings)
+
+
 def test_collect_archive_rejects_source_file_count_limit():
     from app.services.submissions import SubmissionError, collect_archive_submission
 
@@ -258,12 +268,23 @@ def test_collect_archive_accepts_big5_encoded_source():
     assert "繁體中文測試" in submission.files[0].source_text
 
 
+def test_collect_archive_accepts_windows_ansi_encoded_source():
+    from app.services.submissions import collect_archive_submission
+
+    ansi_source = b"/* copyright \xa9 vendor */\nint main(void) { return 0; }"
+    archive = make_zip([("src/ansi.c", ansi_source, None)])
+
+    submission = collect_archive_submission("sources.zip", archive, Settings(_env_file=None))
+
+    assert "\u00a9 vendor" in submission.files[0].source_text
+
+
 def test_collect_archive_rejects_unknown_text_encoding():
     from app.services.submissions import SubmissionError, collect_archive_submission
 
     archive = make_zip([("invalid.c", b"\xff\xff\xff", None)])
 
-    with pytest.raises(SubmissionError, match="text encoding"):
+    with pytest.raises(SubmissionError, match=r"invalid\.c: .*text encoding"):
         collect_archive_submission("sources.zip", archive, Settings(_env_file=None))
 
 
@@ -326,6 +347,58 @@ def test_text_submission_persists_task_and_file(db_session_factory):
     assert task.display_name == "manual text task"
     assert task.file_count == 1
     assert files[0].relative_path == "snippet.c"
+
+
+def test_submission_balances_across_enabled_sibling_model_nodes(db_session_factory):
+    from app.main import app
+
+    with db_session_factory() as db:
+        user = User(username="reviewer", password_hash=hash_password("reviewer-password"))
+        node0 = ModelNode(
+            display_name="Qwen GPU0",
+            model_identifier="qwen-review",
+            base_url="http://127.0.0.1:8001",
+            api_key="shared-key",
+            gpu_indices=[0],
+            is_enabled=True,
+            is_default=True,
+        )
+        node1 = ModelNode(
+            display_name="Qwen GPU1",
+            model_identifier="qwen-review",
+            base_url="http://127.0.0.1:8002",
+            api_key="shared-key",
+            gpu_indices=[1],
+            is_enabled=True,
+        )
+        busy = ReviewTask(
+            owner=user,
+            model_node=node0,
+            input_mode="text",
+            display_name="busy.c",
+            file_count=1,
+            check_types=["logic"],
+            status=TaskStatus.RUNNING,
+        )
+        db.add_all([user, node0, node1, busy])
+        db.commit()
+        user_id = user.id
+        node0_id = node0.id
+        node1_id = node1.id
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/reviews/text",
+            headers=auth_headers(user_id),
+            json={
+                "model_node_id": node0_id,
+                "source_text": "int main(void) { return 0; }",
+                "check_types": ["logic"],
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["model_node_id"] == node1_id
 
 
 def test_file_and_archive_endpoints_accept_valid_uploads(db_session_factory):

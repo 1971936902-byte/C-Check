@@ -11,6 +11,7 @@ from app.services.model_router import (
     ModelInvocationError,
     _chunk_file,
     _effective_chunk_max_chars,
+    _ensure_input_budget,
     _invoke_chunked_review,
     _chunk_review_batches,
     _chunk_review_files,
@@ -525,12 +526,133 @@ def test_chunk_review_batches_uses_conservative_context_budget():
     batches = _chunk_review_batches(files, settings)
     effective_budget = _effective_chunk_max_chars(settings)
 
-    assert effective_budget == 5400
+    assert effective_budget == 8400
     assert all(
         sum(len(f"===== FILE: {chunk.relative_path} =====\n{chunk.source_text}\n\n") for chunk in batch)
         <= effective_budget
         for batch in batches
     )
+
+
+def test_chunk_review_batches_respects_prompt_aware_input_budget():
+    files = [
+        ReviewFile(
+            relative_path="large.c",
+            source_text="int value;\n" * 1200,
+            size_bytes=12000,
+        )
+    ]
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        model_context_window=4096,
+        model_max_input_tokens=3000,
+        model_max_tokens=512,
+        model_token_chars_per_token=2,
+        model_chunk_max_chars=20000,
+    )
+
+    batches = _chunk_review_batches(files, settings, prompt="review " * 200)
+    effective_budget = _effective_chunk_max_chars(settings, prompt="review " * 200)
+
+    assert effective_budget < settings.model_chunk_max_chars
+    assert all(
+        sum(len(f"===== FILE: {chunk.relative_path} =====\n{chunk.source_text}\n\n") for chunk in batch)
+        <= effective_budget + 64
+        for batch in batches
+    )
+
+
+def test_invoke_model_rejects_oversized_input_before_http(monkeypatch):
+    class ForbiddenClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            raise AssertionError("HTTP client should not be opened for over-budget input")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr("app.services.model_router.httpx.AsyncClient", ForbiddenClient)
+
+    with pytest.raises(ModelInvocationError) as raised:
+        asyncio.run(
+            invoke_model(
+                node=ModelNode(
+                    display_name="test",
+                    model_identifier="qwen-test",
+                    base_url="http://model.local",
+                    is_enabled=True,
+                ),
+                files=[
+                    ReviewFile(
+                        relative_path="large.c",
+                        source_text="int value;\n" * 500,
+                        size_bytes=5000,
+                    )
+                ],
+                prompt="review",
+                settings=Settings(
+                    _env_file=None,
+                    allow_insecure_defaults=True,
+                    model_context_window=2048,
+                    model_max_input_tokens=1024,
+                    model_max_tokens=1024,
+                    model_token_chars_per_token=1,
+                ),
+            )
+        )
+
+    assert "context window is too small" in str(raised.value)
+    assert "Estimated input tokens" in (raised.value.details or "")
+
+
+def test_ensure_input_budget_allows_small_request():
+    _ensure_input_budget(
+        prompt="review",
+        files=[ReviewFile(relative_path="main.c", source_text="int main(void) { return 0; }", size_bytes=28)],
+        settings=Settings(_env_file=None, allow_insecure_defaults=True),
+    )
+
+
+def test_chunked_review_rejects_extreme_chunk_counts(monkeypatch):
+    async def fake_invoke_model(**_kwargs):
+        raise AssertionError("model should not be called when chunk count exceeds the safety limit")
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+
+    with pytest.raises(ModelInvocationError) as raised:
+        asyncio.run(
+            _invoke_chunked_review(
+                node=ModelNode(
+                    display_name="test",
+                    model_identifier="qwen-test",
+                    base_url="http://model.local",
+                    is_enabled=True,
+                ),
+                files=[
+                    ReviewFile(
+                        relative_path=f"file_{index}.c",
+                        source_text="int value;\n" * 200,
+                        size_bytes=2000,
+                    )
+                    for index in range(12)
+                ],
+                prompt="review",
+                settings=Settings(
+                    _env_file=None,
+                    allow_insecure_defaults=True,
+                    model_chunk_max_chars=1000,
+                    model_chunk_max_count=2,
+                    model_context_window=8192,
+                    model_max_tokens=512,
+                ),
+            )
+        )
+
+    assert "too large to split safely" in str(raised.value)
+    assert "MODEL_CHUNK_MAX_COUNT=2" in (raised.value.details or "")
 
 
 def test_chunked_review_halves_chunk_size_after_context_error(monkeypatch):

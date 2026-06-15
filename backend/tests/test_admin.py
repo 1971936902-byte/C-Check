@@ -125,6 +125,7 @@ def test_admin_can_create_model_deployment_and_register_node(db_session_factory,
 
     started: list[str] = []
     monkeypatch.setattr("app.api.admin.start_model_deployment", lambda deployment_id: started.append(deployment_id))
+    monkeypatch.setattr("app.services.model_deployments.available_gpu_indices", lambda: [0, 1])
 
     with db_session_factory() as db:
         admin = User(username="admin-user", password_hash=hash_password("admin-password"), role="admin")
@@ -151,7 +152,15 @@ def test_admin_can_create_model_deployment_and_register_node(db_session_factory,
     assert payload["status"] == "queued"
     assert payload["model_node_id"]
     assert payload["display_name"] == "DeepSeek-Coder 14B Instruct"
+    assert payload["gpu_indices"] == [0, 1]
+    assert payload["tensor_parallel_size"] == 1
     assert started == [payload["id"]]
+
+    with db_session_factory() as db:
+        node = db.get(ModelNode, payload["model_node_id"])
+        assert node is not None
+        assert node.gpu_indices == [0]
+        assert node.tensor_parallel_size == 1
 
 
 def test_admin_model_deployment_generates_local_base_url(db_session_factory, monkeypatch):
@@ -159,6 +168,7 @@ def test_admin_model_deployment_generates_local_base_url(db_session_factory, mon
 
     started: list[str] = []
     monkeypatch.setattr("app.api.admin.start_model_deployment", lambda deployment_id: started.append(deployment_id))
+    monkeypatch.setattr("app.services.model_deployments.available_gpu_indices", lambda: [0])
 
     with db_session_factory() as db:
         admin = User(username="admin-user", password_hash=hash_password("admin-password"), role="admin")
@@ -190,6 +200,38 @@ def test_admin_model_deployment_generates_local_base_url(db_session_factory, mon
         node = db.get(ModelNode, payload["model_node_id"])
         assert node is not None
         assert node.base_url == "http://127.0.0.1:8123"
+
+
+def test_model_deployment_command_defaults_multi_gpu_to_independent_nodes(db_session_factory):
+    from app.core.config import Settings
+    from app.core.security import hash_password
+    from app.db.models import ModelDeployment, ModelDeploymentStatus
+    from app.services.model_deployments import deployment_command
+
+    with db_session_factory() as db:
+        admin = User(username="admin-user", password_hash=hash_password("admin-password"), role="admin")
+        deployment = ModelDeployment(
+            display_name="Qwen",
+            model_identifier="Qwen/Qwen2.5-Coder-14B-Instruct",
+            source="local",
+            source_repository="/models/qwen",
+            served_model_name="qwen",
+            base_url="http://127.0.0.1:8001",
+            port=8001,
+            model_dir="/models/qwen",
+            service_name="c-check-vllm-qwen",
+            gpu_indices=[0, 1],
+            tensor_parallel_size=1,
+            status=ModelDeploymentStatus.QUEUED,
+            created_by_id=admin.id,
+        )
+        db.add_all([admin, deployment])
+        db.commit()
+
+        command = deployment_command(deployment, Settings(_env_file=None, allow_insecure_defaults=True))
+
+    assert command[command.index("--gpu-indices") + 1] == "0,1"
+    assert command[command.index("--tensor-parallel-size") + 1] == "1"
 
 
 def test_model_deployment_admin_only(db_session_factory):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import asyncio
 from collections.abc import Callable, Sequence
@@ -21,9 +22,11 @@ MAX_MODEL_LOG_CHARS = 12000
 RESPONSE_REQUIRED_KEYS = {"summary", "score", "findings"}
 STRUCTURED_RESPONSE_SCHEMA_NAME = "c_review_response"
 TOKEN_BUDGET_SAFETY_MARGIN = 128
+INPUT_TOKEN_SAFETY_MARGIN = 512
 MIN_RETRY_OUTPUT_TOKENS = 128
-CHUNK_CONTEXT_CHAR_RATIO = 0.45
+CHUNK_CONTEXT_CHAR_RATIO = 0.70
 MIN_CHUNK_CONTEXT_CHARS = 1000
+CHUNK_PROMPT_CHAR_MARGIN = 512
 CHUNK_LINE_PREFIX_WIDTH = 6
 SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "suggestion": 3}
 TOKEN_BUDGET_PATTERN = re.compile(
@@ -42,6 +45,8 @@ Use Chinese. Keep summary under 80 Chinese chars.
 Return at most 3 findings for this request, only concrete C defects.
 Each finding uses: severity, category, title, description, file_path, line, remediation, code_snippet, fixed_snippet.
 Keep title under 40 chars. Keep description and remediation under 120 Chinese chars each.
+The line value must point to the exact visible statement or declaration causing the issue.
+Do not use pure data initializer rows, lookup tables, font/bitmap tables, or comments as finding locations.
 Use code_snippet/fixed_snippet as [] unless one line is essential; then include at most one line.
 Use lowercase enum values exactly. Use null for line only when no precise line exists.
 """
@@ -84,6 +89,65 @@ def _source_message(files: Sequence[ReviewFile]) -> str:
     for source in files:
         sections.append(f"===== FILE: {source.relative_path} =====\n{source.source_text}")
     return "\n\n".join(sections)
+
+
+def _estimate_tokens(text: str, settings: Settings) -> int:
+    return math.ceil(len(text) / settings.model_token_chars_per_token)
+
+
+def _input_token_budget(settings: Settings) -> int:
+    context_budget = settings.model_context_window - settings.model_max_tokens - INPUT_TOKEN_SAFETY_MARGIN
+    return max(0, min(settings.model_max_input_tokens, context_budget))
+
+
+def _response_format_overhead(settings: Settings) -> str:
+    response_format = _response_format(settings)
+    if response_format is None:
+        return ""
+    return json.dumps(response_format, ensure_ascii=False, separators=(",", ":"))
+
+
+def _strict_prompt(
+    prompt: str,
+    retry_instruction: str | None = None,
+) -> str:
+    strict_prompt = f"{prompt}\n\n{RESPONSE_CONTRACT}"
+    if retry_instruction:
+        strict_prompt = (
+            f"{strict_prompt}\n\nPrevious response was rejected by the backend validator:\n"
+            f"{retry_instruction}\nReturn a corrected JSON object only."
+        )
+    return strict_prompt
+
+
+def _input_budget_details(
+    *,
+    prompt: str,
+    files: Sequence[ReviewFile],
+    settings: Settings,
+    retry_instruction: str | None = None,
+) -> tuple[int, int]:
+    input_text = "\n\n".join(
+        part
+        for part in (
+            _strict_prompt(prompt, retry_instruction),
+            _response_format_overhead(settings),
+            _source_message(files),
+        )
+        if part
+    )
+    return _estimate_tokens(input_text, settings), _input_token_budget(settings)
+
+
+def _source_char_budget(
+    *,
+    prompt: str,
+    settings: Settings,
+    retry_instruction: str | None = None,
+) -> int:
+    max_input_chars = int(_input_token_budget(settings) * settings.model_token_chars_per_token)
+    overhead = len(_strict_prompt(prompt, retry_instruction)) + len(_response_format_overhead(settings))
+    return max(1, max_input_chars - overhead - CHUNK_PROMPT_CHAR_MARGIN)
 
 
 def _numbered_chunk_source(source_text: str, start_line: int, end_line: int) -> str:
@@ -160,20 +224,45 @@ def _chunk_payload_chars(chunk: ChunkedReviewFile) -> int:
     return len(f"===== FILE: {chunk.relative_path} =====\n{chunk.source_text}\n\n")
 
 
-def _effective_chunk_max_chars(settings: Settings) -> int:
+def _effective_chunk_max_chars(
+    settings: Settings,
+    *,
+    prompt: str | None = None,
+    retry_instruction: str | None = None,
+) -> int:
     conservative_budget = int(settings.model_chunk_max_chars * CHUNK_CONTEXT_CHAR_RATIO)
     if settings.model_chunk_max_chars >= MIN_CHUNK_CONTEXT_CHARS:
         conservative_budget = max(MIN_CHUNK_CONTEXT_CHARS, conservative_budget)
-    return max(1, min(settings.model_chunk_max_chars, conservative_budget))
+    max_chars = max(1, min(settings.model_chunk_max_chars, conservative_budget))
+    if prompt is not None:
+        max_chars = min(max_chars, _source_char_budget(
+            prompt=prompt,
+            settings=settings,
+            retry_instruction=retry_instruction,
+        ))
+    return max(1, max_chars)
 
 
-def _chunk_review_batches(files: Sequence[ReviewFile], settings: Settings) -> list[list[ChunkedReviewFile]]:
+def _chunk_review_batches(
+    files: Sequence[ReviewFile],
+    settings: Settings,
+    *,
+    prompt: str | None = None,
+    retry_instruction: str | None = None,
+) -> list[list[ChunkedReviewFile]]:
     batches: list[list[ChunkedReviewFile]] = []
     current_batch: list[ChunkedReviewFile] = []
     current_chars = 0
-    max_chars = _effective_chunk_max_chars(settings)
+    max_chars = _effective_chunk_max_chars(
+        settings,
+        prompt=prompt,
+        retry_instruction=retry_instruction,
+    )
 
-    for chunk in _chunk_review_files(files, settings):
+    chunks: list[ChunkedReviewFile] = []
+    for source in files:
+        chunks.extend(_chunk_file(source, max_chars))
+    for chunk in chunks:
         chunk_chars = _chunk_payload_chars(chunk)
         if current_batch and current_chars + chunk_chars > max_chars:
             batches.append(current_batch)
@@ -189,6 +278,31 @@ def _chunk_review_batches(files: Sequence[ReviewFile], settings: Settings) -> li
 
 def _should_chunk(files: Sequence[ReviewFile], settings: Settings) -> bool:
     return len(_source_message(files)) > _effective_chunk_max_chars(settings)
+
+
+def _ensure_input_budget(
+    *,
+    prompt: str,
+    files: Sequence[ReviewFile],
+    settings: Settings,
+    retry_instruction: str | None = None,
+) -> None:
+    estimated_tokens, budget_tokens = _input_budget_details(
+        prompt=prompt,
+        files=files,
+        settings=settings,
+        retry_instruction=retry_instruction,
+    )
+    if estimated_tokens <= budget_tokens:
+        return
+    raise ModelInvocationError(
+        "model context window is too small for this review request",
+        details=(
+            f"Estimated input tokens {estimated_tokens} exceed safe input budget "
+            f"{budget_tokens} for context window {settings.model_context_window}. "
+            "The request should be chunked or reduced before invoking the model."
+        ),
+    )
 
 
 def _batch_prompt(
@@ -249,7 +363,21 @@ async def _invoke_chunked_review(
     if chunk_max_chars is not None:
         settings = settings.model_copy(update={"model_chunk_max_chars": chunk_max_chars})
     while True:
-        batches = _chunk_review_batches(files, settings)
+        batches = _chunk_review_batches(
+            files,
+            settings,
+            prompt=prompt,
+            retry_instruction=retry_instruction,
+        )
+        if len(batches) > settings.model_chunk_max_count:
+            raise ModelInvocationError(
+                "review request is too large to split safely",
+                details=(
+                    f"Generated {len(batches)} chunks, exceeding MODEL_CHUNK_MAX_COUNT="
+                    f"{settings.model_chunk_max_count}. Reduce the number of files, total "
+                    "source size, or raise the limit only after confirming GPU capacity."
+                ),
+            )
         indexed_results: list[tuple[int, ModelReviewResponse]] = []
         semaphore = asyncio.Semaphore(settings.model_chunk_concurrency)
 
@@ -508,9 +636,13 @@ async def invoke_model(
     headers = {"Content-Type": "application/json"}
     if node.api_key:
         headers["Authorization"] = f"Bearer {node.api_key}"
-    strict_prompt = f"{prompt}\n\n{RESPONSE_CONTRACT}"
-    if retry_instruction:
-        strict_prompt = f"{strict_prompt}\n\nPrevious response was rejected by the backend validator:\n{retry_instruction}\nReturn a corrected JSON object only."
+    _ensure_input_budget(
+        prompt=prompt,
+        files=files,
+        settings=settings,
+        retry_instruction=retry_instruction,
+    )
+    strict_prompt = _strict_prompt(prompt, retry_instruction)
     body = {
         "model": node.model_identifier,
         "messages": [

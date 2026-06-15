@@ -78,6 +78,63 @@ def _append_log(existing: str | None, line: str) -> str:
     return f"{existing.rstrip()}\n{line}" if existing else line
 
 
+def available_gpu_indices() -> list[int]:
+    command = ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"]
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=3)
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return []
+    indices: list[int] = []
+    for line in completed.stdout.splitlines():
+        try:
+            indices.append(int(line.strip()))
+        except ValueError:
+            continue
+    return indices
+
+
+def _deployment_gpu_indices(request: ModelDeploymentCreateRequest) -> list[int]:
+    if request.gpu_indices is not None:
+        return sorted({index for index in request.gpu_indices if index >= 0})
+    return available_gpu_indices()
+
+
+def _deployment_tensor_parallel_size(request: ModelDeploymentCreateRequest, gpu_indices: list[int]) -> int:
+    if request.tensor_parallel_size:
+        return request.tensor_parallel_size
+    return 1
+
+
+def _node_display_name(display_name: str, gpu_indices: list[int]) -> str:
+    if len(gpu_indices) == 1:
+        return f"{display_name} GPU{gpu_indices[0]}"
+    if gpu_indices:
+        return f"{display_name} GPU{','.join(str(index) for index in gpu_indices)}"
+    return display_name
+
+
+def _independent_gpu_node_specs(deployment: ModelDeployment) -> list[tuple[list[int], str, str]]:
+    gpu_indices = deployment.gpu_indices or []
+    if deployment.tensor_parallel_size != 1 or len(gpu_indices) <= 1 or deployment.port is None:
+        return [(gpu_indices, deployment.base_url, deployment.service_name or "")]
+    specs: list[tuple[list[int], str, str]] = []
+    for offset, gpu_index in enumerate(gpu_indices):
+        port = deployment.port + offset
+        base_url = rebase_url_port(deployment.base_url, port)
+        service_name = f"{deployment.service_name}-gpu{gpu_index}" if deployment.service_name else ""
+        specs.append(([gpu_index], base_url, service_name))
+    return specs
+
+
+def rebase_url_port(base_url: str, port: int) -> str:
+    from urllib.parse import urlsplit, urlunsplit
+
+    parsed = urlsplit(base_url)
+    hostname = parsed.hostname or "127.0.0.1"
+    netloc = f"{hostname}:{port}"
+    return urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
+
+
 def create_model_deployment(
     db: Session,
     request: ModelDeploymentCreateRequest,
@@ -101,16 +158,21 @@ def create_model_deployment(
     port = _deployment_port(catalog, request)
     base_url = _deployment_base_url(catalog, request)
     api_key = request.api_key or settings.vllm_api_key
+    gpu_indices = _deployment_gpu_indices(request)
+    tensor_parallel_size = _deployment_tensor_parallel_size(request, gpu_indices)
+    initial_node_gpus = gpu_indices[:1] if tensor_parallel_size == 1 and len(gpu_indices) > 1 else gpu_indices
     node: ModelNode | None = None
     if request.auto_register:
         node = ModelNode(
-            display_name=display_name,
+            display_name=_node_display_name(display_name, initial_node_gpus),
             model_identifier=served_model_name,
             base_url=base_url,
             api_key=api_key,
             timeout_seconds=request.timeout_seconds,
             is_enabled=False,
             is_default=False,
+            gpu_indices=initial_node_gpus,
+            tensor_parallel_size=tensor_parallel_size,
             description=f"由模型部署任务自动登记：{source_repository}",
         )
         db.add(node)
@@ -127,6 +189,8 @@ def create_model_deployment(
         port=port,
         model_dir=request.model_dir,
         service_name=request.service_name or f"c-check-vllm-{served_model_name}".replace("/", "-"),
+        gpu_indices=gpu_indices,
+        tensor_parallel_size=tensor_parallel_size,
         status=ModelDeploymentStatus.QUEUED,
         progress=0,
         created_by_id=admin.id,
@@ -141,7 +205,7 @@ def create_model_deployment(
 
 def deployment_command(deployment: ModelDeployment, settings: Settings) -> list[str]:
     script = settings.model_deployment_script
-    return [
+    command = [
         "bash",
         str(script),
         "--source",
@@ -158,7 +222,47 @@ def deployment_command(deployment: ModelDeployment, settings: Settings) -> list[
         deployment.service_name or "",
         "--model-dir",
         deployment.model_dir or "",
+        "--tensor-parallel-size",
+        str(deployment.tensor_parallel_size),
     ]
+    if deployment.gpu_indices:
+        command.extend(["--gpu-indices", ",".join(str(index) for index in deployment.gpu_indices)])
+    return command
+
+
+def _sync_deployment_model_nodes(db: Session, deployment: ModelDeployment, settings: Settings) -> list[ModelNode]:
+    if deployment.model_node is None:
+        return []
+    specs = _independent_gpu_node_specs(deployment)
+    synced: list[ModelNode] = []
+    for index, (gpu_indices, base_url, _service_name) in enumerate(specs):
+        node = deployment.model_node if index == 0 else db.scalar(
+            select(ModelNode).where(
+                ModelNode.model_identifier == deployment.served_model_name,
+                ModelNode.base_url == base_url,
+            )
+        )
+        if node is None:
+            node = ModelNode(
+                display_name=_node_display_name(deployment.display_name, gpu_indices),
+                model_identifier=deployment.served_model_name,
+                base_url=base_url,
+                api_key=deployment.model_node.api_key or settings.vllm_api_key,
+                timeout_seconds=deployment.model_node.timeout_seconds,
+                description=f"由模型部署任务自动登记：{deployment.source_repository}",
+            )
+            db.add(node)
+        node.display_name = _node_display_name(deployment.display_name, gpu_indices)
+        node.model_identifier = deployment.served_model_name
+        node.base_url = base_url
+        node.gpu_indices = gpu_indices
+        node.tensor_parallel_size = deployment.tensor_parallel_size
+        node.is_enabled = True
+        node.is_default = index == 0
+        if not node.api_key and settings.vllm_api_key:
+            node.api_key = settings.vllm_api_key
+        synced.append(node)
+    return synced
 
 
 def _manual_instruction(deployment: ModelDeployment, settings: Settings) -> str:
@@ -219,13 +323,11 @@ def run_model_deployment(deployment_id: str, settings: Settings | None = None) -
             deployment.status = ModelDeploymentStatus.SUCCEEDED
             deployment.error_message = None
             if deployment.model_node is not None:
-                for node in db.scalars(select(ModelNode).where(ModelNode.id != deployment.model_node.id)).all():
+                synced_nodes = _sync_deployment_model_nodes(db, deployment, settings)
+                synced_ids = {node.id for node in synced_nodes}
+                for node in db.scalars(select(ModelNode).where(ModelNode.id.not_in(synced_ids))).all():
                     node.is_enabled = False
                     node.is_default = False
-                if not deployment.model_node.api_key and settings.vllm_api_key:
-                    deployment.model_node.api_key = settings.vllm_api_key
-                deployment.model_node.is_enabled = True
-                deployment.model_node.is_default = True
         else:
             deployment.status = ModelDeploymentStatus.FAILED
             deployment.error_message = f"deployment script exited with {process.returncode}"

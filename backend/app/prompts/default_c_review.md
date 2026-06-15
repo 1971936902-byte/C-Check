@@ -19,3 +19,8 @@ Focus on practical, high-signal C engineering risks:
 - `maintainability`: readability, naming, cohesion, duplication, and maintainable C style.
 
 Prefer fewer, concrete findings over broad style advice. Output format is provided separately by the system.
+
+Every finding must point to a concrete executable statement, declaration, macro, or API call that is visible in the
+submitted source. Do not report font tables, bitmap data, lookup tables, pure numeric/string initializer rows, or
+comments as memory, pointer, buffer, or initialization defects unless the submitted code also shows the actual unsafe
+read/write/access path. If the only visible evidence is static data, omit the finding.

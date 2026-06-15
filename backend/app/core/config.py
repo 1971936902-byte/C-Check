@@ -36,13 +36,17 @@ class Settings(BaseSettings):
     upload_max_files: int = Field(default=200, gt=0)
     upload_max_archive_entries: int = Field(default=1000, gt=0)
     upload_max_path_length: int = Field(default=512, gt=0)
+    review_max_source_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
     cors_origins: list[str] = ["http://localhost:5173"]
     storage_path: Path = Path("uploads")
     mock_model_enabled: bool = False
     model_max_attempts: int = Field(default=3, ge=1, le=5)
-    model_max_tokens: int = Field(default=2048, ge=256, le=16384)
-    model_chunk_max_chars: int = Field(default=5000, ge=1000, le=200000)
-    model_chunk_max_count: int = Field(default=2500, ge=1, le=10000)
+    model_context_window: int = Field(default=8192, ge=1024, le=1048576)
+    model_max_tokens: int = Field(default=1024, ge=256, le=16384)
+    model_max_input_tokens: int = Field(default=6144, ge=512, le=1048576)
+    model_token_chars_per_token: float = Field(default=2.0, ge=1.0, le=8.0)
+    model_chunk_max_chars: int = Field(default=8000, ge=1000, le=200000)
+    model_chunk_max_count: int = Field(default=360, ge=1, le=10000)
     model_chunk_concurrency: int = Field(default=1, ge=1, le=8)
     model_structured_outputs_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"

@@ -169,6 +169,8 @@ def _model_metrics(node: ModelNode) -> ModelRuntimeMetricResponse:
             node_id=node.id,
             display_name=node.display_name,
             base_url=node.base_url,
+            gpu_indices=node.gpu_indices or [],
+            tensor_parallel_size=node.tensor_parallel_size or 1,
             metrics_available=False,
             error=str(exc)[:300],
         )
@@ -206,6 +208,8 @@ def _model_metrics(node: ModelNode) -> ModelRuntimeMetricResponse:
         node_id=node.id,
         display_name=node.display_name,
         base_url=node.base_url,
+        gpu_indices=node.gpu_indices or [],
+        tensor_parallel_size=node.tensor_parallel_size or 1,
         metrics_available=True,
         prompt_throughput_tps=prompt_throughput,
         generation_throughput_tps=generation_throughput,

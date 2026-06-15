@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timezone
 from time import monotonic
 
 from app.core.config import get_settings
 from app.db.models import Report, ReviewTask, TaskStatus
 from app.db.session import SessionLocal
-from app.schemas.model_response import ModelReviewResponse
+from app.schemas.model_response import CodeLine, CodeLineKind, ModelReviewResponse
 from app.services.model_router import ModelInvocationError, invoke_selected_model, truncate_model_log
 from app.services.reports import build_report
 from app.worker import celery_app
@@ -37,6 +38,122 @@ def _is_structured_output_audit_failure(exc: Exception) -> bool:
     return isinstance(exc, ModelInvocationError) and str(exc) == "model returned an invalid structured response"
 
 
+def _normalized_path(value: str) -> str:
+    return value.replace("\\", "/").strip().lstrip("./")
+
+
+def _source_file_for_finding(task: ReviewTask, file_path: str):
+    wanted = _normalized_path(file_path)
+    if not wanted:
+        return None
+    files = list(task.files)
+    for source in files:
+        if _normalized_path(source.relative_path) == wanted:
+            return source
+    suffix_matches = [source for source in files if _normalized_path(source.relative_path).endswith(f"/{wanted}")]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+    basename_matches = [source for source in files if _normalized_path(source.relative_path).split("/")[-1] == wanted.split("/")[-1]]
+    if len(basename_matches) == 1:
+        return basename_matches[0]
+    return None
+
+
+def _source_context_lines(source_text: str, line_number: int, *, radius: int = 1) -> list[CodeLine]:
+    lines = source_text.splitlines()
+    if line_number < 1 or line_number > len(lines):
+        return []
+    start = max(1, line_number - radius)
+    end = min(len(lines), line_number + radius)
+    return [
+        CodeLine(line=line, content=lines[line - 1], kind=CodeLineKind.CONTEXT)
+        for line in range(start, end + 1)
+    ]
+
+
+DATA_ONLY_LINE_PATTERN = re.compile(r"^[\s{},().+\-*/&|^~!?:<>=0-9xXa-fA-FuUlL'\"]+$")
+ACTIONABLE_C_ANCHOR_PATTERN = re.compile(
+    r"\b("
+    r"if|for|while|switch|case|return|goto|break|continue|sizeof|"
+    r"malloc|calloc|realloc|free|memcpy|memmove|memset|strcpy|strncpy|"
+    r"strcat|strncat|sprintf|snprintf|scanf|fscanf|sscanf|fgets|gets|"
+    r"open|fopen|close|fclose|read|write|recv|send|lock|unlock"
+    r")\b|[A-Za-z_]\w*\s*\(|[A-Za-z_]\w*\s*(?:->|\.)[A-Za-z_]\w*|"
+    r"[A-Za-z_]\w*\s*(?:=|\+=|-=|\*=|/=|%=|<<=|>>=|&=|\|=|\^=|\+\+|--)"
+)
+
+
+def _is_comment_only_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("//") or stripped.startswith("/*") or stripped.endswith("*/")
+
+
+def _line_has_actionable_c_anchor(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("#"):
+        return True
+    if _is_comment_only_line(stripped):
+        return False
+    if DATA_ONLY_LINE_PATTERN.match(stripped):
+        return False
+    return bool(ACTIONABLE_C_ANCHOR_PATTERN.search(stripped))
+
+
+def _finding_has_actionable_anchor(task: ReviewTask, file_path: str, line_number: int | None) -> bool:
+    if line_number is None:
+        return True
+    source = _source_file_for_finding(task, file_path)
+    if source is None:
+        return True
+    lines = source.source_text.splitlines()
+    if line_number < 1 or line_number > len(lines):
+        return False
+    return _line_has_actionable_c_anchor(lines[line_number - 1])
+
+
+def _filter_unanchored_findings(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
+    kept = [
+        finding
+        for finding in result.findings
+        if _finding_has_actionable_anchor(task, finding.file_path, finding.line)
+    ]
+    if len(kept) == len(result.findings):
+        return result
+    if kept:
+        summary = f"已过滤无法定位到有效代码语句的误报，保留 {len(kept)} 个问题。"
+    else:
+        summary = "经源码行定位校验，未发现可定位到有效代码语句的问题。"
+    return result.model_copy(update={"summary": summary, "findings": kept})
+
+
+def _enrich_missing_code_snippets(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
+    enriched_findings = []
+    changed = False
+    for finding in result.findings:
+        if finding.code_snippet or finding.line is None:
+            enriched_findings.append(finding)
+            continue
+        source = _source_file_for_finding(task, finding.file_path)
+        if source is None:
+            enriched_findings.append(finding)
+            continue
+        context_lines = _source_context_lines(source.source_text, finding.line)
+        if not context_lines:
+            enriched_findings.append(finding)
+            continue
+        enriched_findings.append(finding.model_copy(update={"code_snippet": context_lines}))
+        changed = True
+    if not changed:
+        return result
+    return result.model_copy(update={"findings": enriched_findings})
+
+
+def _postprocess_review_result(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
+    return _enrich_missing_code_snippets(task, _filter_unanchored_findings(task, result))
+
+
 def _retry_instruction(attempt: int, exc: Exception) -> str:
     if _is_structured_output_audit_failure(exc):
         parts = [
@@ -49,6 +166,8 @@ def _retry_instruction(attempt: int, exc: Exception) -> str:
         if isinstance(exc, ModelInvocationError):
             if exc.details:
                 parts.append(f"Validation details:\n{exc.details}")
+            if exc.raw_response:
+                parts.append(f"Raw model response:\n{truncate_model_log(exc.raw_response, 3000)}")
         return truncate_model_log("\n\n".join(parts), 4000) or ""
     return truncate_model_log(_failure_log(attempt, exc), 4000) or ""
 
@@ -123,6 +242,7 @@ def run_review_task(task_id: str) -> None:
                 task = db.get(ReviewTask, task_id)
                 if task is None:
                     return
+                result = _postprocess_review_result(task, result)
                 report = build_report(task, result)
                 db.add(report)
                 task.status = TaskStatus.COMPLETED

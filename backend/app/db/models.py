@@ -65,6 +65,8 @@ class ModelNode(TimestampMixin, Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    gpu_indices: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
+    tensor_parallel_size: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
 
     review_tasks: Mapped[list[ReviewTask]] = relationship(back_populates="model_node")
@@ -86,6 +88,8 @@ class ModelDeployment(TimestampMixin, Base):
     port: Mapped[int | None] = mapped_column(Integer)
     model_dir: Mapped[str | None] = mapped_column(String(512))
     service_name: Mapped[str | None] = mapped_column(String(128))
+    gpu_indices: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
+    tensor_parallel_size: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[ModelDeploymentStatus] = mapped_column(
         Enum(
             ModelDeploymentStatus,
