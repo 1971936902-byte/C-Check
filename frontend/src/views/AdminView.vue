@@ -41,6 +41,8 @@ let deploymentTimer: number | undefined
 const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const percent = (value?: number | null) => Math.max(0, Math.min(100, Number(value ?? 0)))
 const metric = (value?: number | null, digits = 1) => value == null ? '--' : value.toFixed(digits)
+const gpuLabel = (indices?: number[] | null) => indices?.length ? indices.map((index) => `GPU ${index}`).join(', ') : '--'
+const tpLabel = (size?: number | null) => `TP ${size || 1}`
 const bytes = (value?: number | null) => {
   if (value == null) return '--'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -519,6 +521,7 @@ onUnmounted(() => {
             <el-table :data="resources?.models || []">
               <el-table-column prop="display_name" label="模型节点" min-width="170" />
               <el-table-column prop="base_url" label="地址" min-width="210" />
+              <el-table-column label="GPU" width="150"><template #default="{ row }"><div class="metric-cell"><b>{{ gpuLabel(row.gpu_indices) }}</b><small>{{ tpLabel(row.tensor_parallel_size) }}</small></div></template></el-table-column>
               <el-table-column label="状态" width="110">
                 <template #default="{ row }"><el-tag :type="row.metrics_available ? 'success' : 'warning'">{{ row.metrics_available ? '可采集' : '不可用' }}</el-tag></template>
               </el-table-column>
@@ -549,6 +552,7 @@ onUnmounted(() => {
             <el-table-column prop="display_name" label="模型名称" />
             <el-table-column prop="model_identifier" label="模型标识" min-width="180" />
             <el-table-column prop="base_url" label="服务地址" min-width="200" />
+            <el-table-column label="GPU" width="150"><template #default="{ row }"><div class="metric-cell"><b>{{ gpuLabel(row.gpu_indices) }}</b><small>{{ tpLabel(row.tensor_parallel_size) }}</small></div></template></el-table-column>
             <el-table-column label="状态" width="150"><template #default="{ row }"><el-tag :type="row.is_enabled ? 'success' : 'info'">{{ row.is_enabled ? '启用' : '禁用' }}</el-tag><el-tag v-if="row.is_default" class="model-default-tag">默认</el-tag></template></el-table-column>
             <el-table-column label="操作" width="355"><template #default="{ row }"><el-button link :icon="Connection" @click="health(row.id)">检测</el-button><el-button link type="primary" :disabled="row.is_default || !row.is_enabled" @click="setDefaultModel(row)">设为默认</el-button><el-button link type="primary" @click="toggleModel(row)">{{ row.is_enabled ? '禁用' : '启用' }}</el-button><el-button link type="primary" @click="openModel(row)">编辑</el-button><el-button link type="danger" @click="removeModel(row.id)">删除</el-button></template></el-table-column>
           </el-table>

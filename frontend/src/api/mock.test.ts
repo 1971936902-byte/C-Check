@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { reportApi, reviewApi } from './client'
 import { mockApi, resetMockState } from './mock'
 
 class MemoryStorage implements Storage {
@@ -56,6 +57,56 @@ describe('mockApi', () => {
     const created = await mockApi.reviews.submitDemoArchive(['memory_safety'])
     expect(created.data.files).toHaveLength(12)
     expect(created.data.check_types).toEqual(['memory_safety'])
+  })
+
+  it('simulates text, single file, zip, and folder inputs through the frontend client', async () => {
+    const cFile = new File(['int main(void) { return 0; }\n'], 'main.c', { type: 'text/x-csrc' })
+    const headerFile = new File(['#pragma once\nint value(void);\n'], 'include/value.h', { type: 'text/x-chdr' })
+    const zipFile = new File(['PK mock archive bytes'], 'firmware.zip', { type: 'application/zip' })
+    const folderFiles = [
+      new File(['int app(void) { return 1; }\n'], 'app.c'),
+      new File(['int driver(void) { return 2; }\n'], 'driver.c'),
+      headerFile,
+    ]
+
+    const textTask = await reviewApi.submitText('model-qwen', 'int snippet(void) { return 0; }', ['logic'], 'snippet-input.c')
+    const fileTask = await reviewApi.submitFile('file', 'model-qwen', cFile, ['memory_safety'], 'single-file.c')
+    const zipTask = await reviewApi.submitFile('archive', 'model-qwen', zipFile, ['compatibility'], 'firmware.zip')
+    const folderTask = await reviewApi.submitFolder('model-qwen', folderFiles, ['logic', 'maintainability'], 'firmware-folder')
+
+    expect(textTask.data).toMatchObject({ input_mode: 'text', file_count: 1, display_name: 'snippet-input.c' })
+    expect(fileTask.data).toMatchObject({ input_mode: 'file', file_count: 1, display_name: 'single-file.c' })
+    expect(zipTask.data).toMatchObject({ input_mode: 'archive', file_count: 12, display_name: 'firmware.zip' })
+    expect(folderTask.data).toMatchObject({ input_mode: 'folder', file_count: 3, display_name: 'firmware-folder' })
+    expect(folderTask.data.files).toHaveLength(3)
+  })
+
+  it('handles burst submissions and still produces downloadable reports', async () => {
+    const submissions = await Promise.all([
+      ...Array.from({ length: 8 }, (_, index) => reviewApi.submitText('model-mock', `int t${index}(void){return ${index};}`, ['logic'], `stress-text-${index}.c`)),
+      ...Array.from({ length: 4 }, (_, index) => reviewApi.submitFile('file', 'model-mock', new File([`int f${index};`], `stress-${index}.c`), ['memory_safety'])),
+      ...Array.from({ length: 4 }, (_, index) => reviewApi.submitFile('archive', 'model-mock', new File(['PK'], `stress-${index}.zip`), ['compatibility'])),
+      ...Array.from({ length: 4 }, (_, index) => reviewApi.submitFolder('model-mock', [
+        new File([`int a${index};`], `folder-${index}/a.c`),
+        new File([`int b${index};`], `folder-${index}/b.c`),
+        new File([`int h${index};`], `folder-${index}/b.h`),
+      ], ['maintainability'], `stress-folder-${index}`)),
+    ])
+
+    expect(submissions).toHaveLength(20)
+    expect(submissions.map((item) => item.data.input_mode)).toEqual(expect.arrayContaining(['text', 'file', 'archive', 'folder']))
+    expect(submissions.filter((item) => item.data.status === 'queued').length).toBeGreaterThan(0)
+
+    const first = submissions[0].data
+    let current = first
+    for (let i = 0; i < 4 && current.status !== 'completed'; i += 1) {
+      current = (await reviewApi.get(first.id)).data
+    }
+
+    expect(current.status).toBe('completed')
+    expect(current.report_id).toBeTruthy()
+    const markdown = await reportApi.download(current.report_id!, 'markdown')
+    expect(await markdown.data.text()).toContain(current.display_name)
   })
 
   it('removes a review from history', async () => {

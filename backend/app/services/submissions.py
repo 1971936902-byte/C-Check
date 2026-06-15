@@ -6,15 +6,17 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath, PureWindowsPath
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+from app.db.models import ModelNode, ReviewFile, ReviewTask, TaskStatus, User
 from app.services.check_types import validate_check_types
 
 
 ALLOWED_SOURCE_EXTENSIONS = {".c", ".h"}
-SOURCE_TEXT_ENCODINGS = ("gb18030", "gbk", "big5", "cp950", "cp1252", "latin-1")
+SOURCE_TEXT_ENCODINGS = ("gb18030", "gbk", "big5", "cp950")
+FALLBACK_SOURCE_TEXT_ENCODINGS = ("cp1252", "latin-1")
 TEXT_BOMS: tuple[tuple[bytes, str], ...] = (
     (b"\xef\xbb\xbf", "utf-8-sig"),
     (b"\xff\xfe\x00\x00", "utf-32-le"),
@@ -64,12 +66,17 @@ class _SourceCollection:
         _require_size_limit(size_bytes, self.settings)
         self.total_source_bytes += size_bytes
         if self.total_source_bytes > self.settings.upload_max_extracted_bytes:
-            raise SubmissionError(f"{self.label} total source size exceeds limit")
+            raise SubmissionError(f"{self.label} total extracted size exceeds limit")
+        if self.total_source_bytes > self.settings.review_max_source_bytes:
+            raise SubmissionError(f"{self.label} review source size exceeds limit")
         if len(self.files) >= self.settings.upload_max_files:
             raise SubmissionError(f"{self.label} contains too many source files")
 
         _require_size_limit(len(content), self.settings)
-        source_text = _decode_source(content)
+        try:
+            source_text = _decode_source(content)
+        except SubmissionError as exc:
+            raise SubmissionError(f"{relative_path}: {exc}") from exc
         self.has_source_content = self.has_source_content or bool(source_text.strip())
         self.files.append(
             SubmittedFile(
@@ -116,6 +123,43 @@ def _decoded_text_score(value: str) -> tuple[int, int, int, int]:
     )
 
 
+def _looks_like_c_source_text(value: str) -> bool:
+    if "\x00" in value:
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return True
+
+    allowed_controls = {"\t", "\n", "\r", "\f"}
+    bad_controls = sum(1 for char in stripped if ord(char) < 32 and char not in allowed_controls)
+    if bad_controls:
+        return False
+
+    printable = sum(1 for char in stripped if char.isprintable() or char in allowed_controls)
+    if printable / max(len(stripped), 1) < 0.92:
+        return False
+
+    lowered = stripped.lower()
+    source_markers = (
+        "#include",
+        "#define",
+        "#pragma",
+        "int ",
+        "void ",
+        "char ",
+        "return",
+        "typedef",
+        "struct",
+        "enum",
+        "/*",
+        "//",
+        "{",
+        "}",
+        ";",
+    )
+    return any(marker in lowered for marker in source_markers)
+
+
 def _decode_without_loss(content: bytes, encoding: str) -> str | None:
     try:
         return content.decode(encoding)
@@ -149,9 +193,9 @@ def _decode_source(content: bytes) -> str:
             if decoded is not None:
                 return decoded
 
-    decoded = _decode_without_loss(content, "utf-8")
-    if decoded is not None:
-        return decoded
+    utf8_decoded = _decode_without_loss(content, "utf-8")
+    if utf8_decoded is not None and _suspicious_mojibake_score(utf8_decoded) == 0:
+        return utf8_decoded
 
     if _looks_like_utf16(content, little_endian=True):
         decoded = _decode_without_loss(content, "utf-16-le")
@@ -162,18 +206,27 @@ def _decode_source(content: bytes) -> str:
         if decoded is not None:
             return decoded
 
-    decoded = _charset_normalizer_guess(content)
-    if decoded is not None:
-        return decoded
-
     candidates: list[tuple[tuple[int, int, int, int], int, str]] = []
+    if utf8_decoded is not None:
+        candidates.append((_decoded_text_score(utf8_decoded), 1, utf8_decoded))
     for index, encoding in enumerate(SOURCE_TEXT_ENCODINGS):
         decoded = _decode_without_loss(content, encoding)
         if decoded is None:
             continue
         candidates.append((_decoded_text_score(decoded), -index, decoded))
     if candidates:
-        return max(candidates)[2]
+        best = max(candidates, key=lambda item: (item[0], item[1]))
+        return best[2]
+
+    for encoding in FALLBACK_SOURCE_TEXT_ENCODINGS:
+        decoded = _decode_without_loss(content, encoding)
+        if decoded is not None and _looks_like_c_source_text(decoded):
+            return decoded
+
+    normalized_guess = _charset_normalizer_guess(content)
+    if normalized_guess is not None and _looks_like_c_source_text(normalized_guess):
+        return normalized_guess
+
     raise SubmissionError("source files must use a supported text encoding")
 
 
@@ -295,6 +348,36 @@ def collect_folder_submission(files: list[tuple[str, bytes]], settings: Settings
     return collection.to_submission("folder", root_name)
 
 
+def _select_model_node_for_review(db: Session, requested_node: ModelNode) -> ModelNode:
+    sibling_nodes = list(
+        db.scalars(
+            select(ModelNode).where(
+                ModelNode.is_enabled.is_(True),
+                ModelNode.model_identifier == requested_node.model_identifier,
+                ModelNode.api_key == requested_node.api_key,
+            )
+        ).all()
+    )
+    if len(sibling_nodes) <= 1:
+        return requested_node
+
+    load_rows = db.execute(
+        select(ReviewTask.model_node_id, func.count(ReviewTask.id))
+        .where(ReviewTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
+        .group_by(ReviewTask.model_node_id)
+    ).all()
+    loads = {model_node_id: count for model_node_id, count in load_rows}
+    sibling_nodes.sort(
+        key=lambda node: (
+            loads.get(node.id, 0),
+            0 if node.id == requested_node.id else 1,
+            min(node.gpu_indices or [9999]),
+            node.created_at,
+        )
+    )
+    return sibling_nodes[0]
+
+
 def create_review_task(
     db: Session,
     *,
@@ -307,6 +390,7 @@ def create_review_task(
     model_node = db.get(ModelNode, model_node_id)
     if model_node is None or not model_node.is_enabled:
         raise SubmissionError("model node does not exist or is disabled")
+    model_node = _select_model_node_for_review(db, model_node)
 
     try:
         normalized_check_types = validate_check_types(check_types)

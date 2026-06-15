@@ -2,7 +2,7 @@ import type { AdminTask, AdminUser, Dashboard, Finding, ModelCatalogItem, ModelD
 
 const STATE_KEY = 'c-check-mock-state'
 const SESSION_KEY = 'c-check-mock-session'
-const STATE_VERSION = 5
+const STATE_VERSION = 6
 
 type MockState = {
   version: number
@@ -400,9 +400,9 @@ const seedState = (): MockState => {
       disabled_user: 'disabled12345678',
     },
     models: [
-      { id: 'model-qwen', display_name: 'Qwen2.5-Coder 14B Instruct', model_identifier: 'qwen2.5-coder-14b-instruct', base_url: 'http://gpu-node-01:8001', timeout_seconds: 120, is_enabled: true, is_default: true, description: '由手动部署验证登记，可直接用于代码审查。', created_at: created },
-      { id: 'model-mock', display_name: 'Mock 审查模式', model_identifier: 'mock-local-reviewer', base_url: 'mock://frontend', timeout_seconds: 5, is_enabled: true, is_default: false, description: '前端本地假数据模式，覆盖登录、上传、下载、报告和后台管理流程。', created_at: created },
-      { id: 'model-deepseek', display_name: 'DeepSeek-Coder 33B', model_identifier: 'deepseek-coder-33b-instruct', base_url: 'http://gpu-node-02:8001', timeout_seconds: 180, is_enabled: true, is_default: false, description: '适合复杂逻辑与安全漏洞审计。', created_at: created },
+      { id: 'model-qwen', display_name: 'Qwen2.5-Coder 14B Instruct', model_identifier: 'qwen2.5-coder-14b-instruct', base_url: 'http://gpu-node-01:8001', timeout_seconds: 120, is_enabled: true, is_default: true, gpu_indices: [0, 1], tensor_parallel_size: 2, description: '由手动部署验证登记，可直接用于代码审查。', created_at: created },
+      { id: 'model-mock', display_name: 'Mock 审查模式', model_identifier: 'mock-local-reviewer', base_url: 'mock://frontend', timeout_seconds: 5, is_enabled: true, is_default: false, gpu_indices: [], tensor_parallel_size: 1, description: '前端本地假数据模式，覆盖登录、上传、下载、报告和后台管理流程。', created_at: created },
+      { id: 'model-deepseek', display_name: 'DeepSeek-Coder 33B', model_identifier: 'deepseek-coder-33b-instruct', base_url: 'http://gpu-node-02:8001', timeout_seconds: 180, is_enabled: true, is_default: false, gpu_indices: [0], tensor_parallel_size: 1, description: '适合复杂逻辑与安全漏洞审计。', created_at: created },
     ],
     deployments: [
       {
@@ -416,6 +416,8 @@ const seedState = (): MockState => {
         base_url: 'http://127.0.0.1:8001',
         port: 8001,
         service_name: 'c-check-vllm-qwen25-coder-14b',
+        gpu_indices: [0, 1],
+        tensor_parallel_size: 2,
         status: 'succeeded',
         progress: 100,
         log: 'Mock 数据：模型节点已登记，服务健康检查通过。',
@@ -434,6 +436,8 @@ const seedState = (): MockState => {
         base_url: 'mock://frontend',
         port: 8800,
         service_name: 'c-check-frontend-mock',
+        gpu_indices: [],
+        tensor_parallel_size: 1,
         status: 'running',
         progress: 88,
         log: 'Mock 数据：用于多用户并发和页面联调。',
@@ -573,6 +577,7 @@ export const mockApi = {
   reviews: {
     submitText: async (model_node_id: string, source_text: string, check_types: string[], display_name?: string) => createReview(model_node_id, 'text', display_name || 'snippet.c', source_text ? 1 : 0, check_types),
     submitFile: async (mode: 'file' | 'archive', model_node_id: string, file: File, check_types: string[], display_name?: string) => createReview(model_node_id, mode, display_name || file.name, mode === 'archive' ? 12 : 1, check_types),
+    submitFolder: async (model_node_id: string, files: File[], check_types: string[], display_name?: string) => createReview(model_node_id, 'folder', display_name || 'selected-folder', files.length, check_types),
     submitDemoArchive: async (check_types: string[]) => createReview('model-mock', 'archive', 'embedded-gateway-live-demo.zip', 12, check_types),
     list: async (params?: Record<string, unknown>) => {
       const state = load()
@@ -642,9 +647,11 @@ export const mockApi = {
       const state = load()
       const report = state.reports.find((item) => item.id === reportId)
       if (!report) throw new Error('审查报告不存在')
+      const task = state.tasks.find((item) => item.id === report.task_id)
+      const taskLine = task ? `任务：${task.display_name}\n输入方式：${task.input_mode}\n` : ''
       const content = format === 'markdown'
-        ? `# C-Check 审查报告\n\n${report.summary}\n\n发现问题：${report.result_json.findings.length} 个`
-        : `C-Check mock PDF report\n${report.summary}`
+        ? `# C-Check 审查报告\n\n${taskLine}\n${report.summary}\n\n发现问题：${report.result_json.findings.length} 个`
+        : `C-Check mock PDF report\n${taskLine}${report.summary}`
       return response(new Blob([content], { type: format === 'markdown' ? 'text/markdown' : 'application/pdf' }))
     },
   },
@@ -674,6 +681,8 @@ export const mockApi = {
           node_id: model.id,
           display_name: model.display_name,
           base_url: model.base_url,
+          gpu_indices: model.gpu_indices,
+          tensor_parallel_size: model.tensor_parallel_size,
           metrics_available: model.is_enabled,
           prompt_throughput_tps: model.is_enabled ? 980 - index * 120 + jitter * 12 : null,
           generation_throughput_tps: model.is_enabled ? 86 - index * 9 + jitter : null,
@@ -702,7 +711,7 @@ export const mockApi = {
     saveModel: async (payload: Partial<ModelNode> & { display_name: string; model_identifier: string; base_url: string }, modelId?: string) => {
       const state = load()
       if (modelId) Object.assign(state.models.find((model) => model.id === modelId)!, payload)
-      else state.models.push({ id: id('model'), timeout_seconds: 120, is_enabled: true, is_default: !state.models.some(model => model.is_default), created_at: now(), ...payload })
+      else state.models.push({ id: id('model'), timeout_seconds: 120, is_enabled: true, is_default: !state.models.some(model => model.is_default), created_at: now(), ...payload, gpu_indices: payload.gpu_indices || [], tensor_parallel_size: payload.tensor_parallel_size || 1 })
       save(state)
       return response({ ok: true })
     },
@@ -726,6 +735,8 @@ export const mockApi = {
         base_url: String(payload.base_url || `http://127.0.0.1:${catalog.default_port || 8101}`),
         port: Number(payload.port || catalog.default_port || 8101),
         service_name: String(payload.service_name || `c-check-vllm-${catalog.key}`),
+        gpu_indices: Array.isArray(payload.gpu_indices) ? payload.gpu_indices as number[] : [0, 1],
+        tensor_parallel_size: Number(payload.tensor_parallel_size || 2),
         status: 'queued',
         progress: 0,
         log: 'Mock 部署任务已加入队列。',
@@ -742,6 +753,8 @@ export const mockApi = {
         timeout_seconds: Number(payload.timeout_seconds || 180),
         is_enabled: true,
         is_default: !state.models.some(model => model.is_default),
+        gpu_indices: Array.isArray(payload.gpu_indices) ? payload.gpu_indices as number[] : [0, 1],
+        tensor_parallel_size: Number(payload.tensor_parallel_size || 2),
         description: '由模型部署任务自动登记。',
         created_at: now(),
       })

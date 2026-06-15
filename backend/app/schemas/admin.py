@@ -36,6 +36,8 @@ class ModelNodeRequest(BaseModel):
     api_key: str | None = Field(default=None, max_length=512)
     timeout_seconds: int = Field(default=120, ge=1, le=3600)
     is_enabled: bool = True
+    gpu_indices: list[int] = Field(default_factory=list)
+    tensor_parallel_size: int = Field(default=1, ge=1, le=64)
     description: str | None = None
 
 
@@ -71,6 +73,8 @@ class ModelDeploymentCreateRequest(BaseModel):
     service_name: str | None = Field(default=None, max_length=128)
     timeout_seconds: int = Field(default=180, ge=1, le=3600)
     auto_register: bool = True
+    gpu_indices: list[int] | None = None
+    tensor_parallel_size: int | None = Field(default=None, ge=1, le=64)
 
 
 class ModelDeploymentResponse(BaseModel):
@@ -87,6 +91,8 @@ class ModelDeploymentResponse(BaseModel):
     port: int | None
     model_dir: str | None
     service_name: str | None
+    gpu_indices: list[int]
+    tensor_parallel_size: int
     status: ModelDeploymentStatus
     progress: int
     log: str | None
@@ -110,6 +116,8 @@ class AdminModelNodeResponse(BaseModel):
     timeout_seconds: int
     is_enabled: bool
     is_default: bool
+    gpu_indices: list[int]
+    tensor_parallel_size: int
     description: str | None
     created_at: datetime
 
@@ -184,6 +192,8 @@ class ModelRuntimeMetricResponse(BaseModel):
     node_id: str
     display_name: str
     base_url: str
+    gpu_indices: list[int] = Field(default_factory=list)
+    tensor_parallel_size: int = 1
     metrics_available: bool
     prompt_throughput_tps: float | None = None
     generation_throughput_tps: float | None = None

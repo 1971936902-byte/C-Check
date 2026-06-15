@@ -67,7 +67,7 @@ export const reviewApi = {
     return api.post<ReviewTask>(`/reviews/${mode}`, body)
   },
   submitFolder: (modelNodeId: string, files: File[], checkTypes: string[], displayName?: string) => {
-    if (MOCK_API_ENABLED) return mockApi.reviews.submitFile('archive', modelNodeId, files[0], checkTypes, displayName)
+    if (MOCK_API_ENABLED) return mockApi.reviews.submitFolder(modelNodeId, files, checkTypes, displayName)
     const body = reviewFormData(modelNodeId, checkTypes, displayName)
     files.forEach((file) => body.append('files', file, file.webkitRelativePath || file.name))
     return api.post<ReviewTask>('/reviews/folder', body)

@@ -2,7 +2,7 @@ export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed'
 export type Severity = 'high' | 'medium' | 'low' | 'suggestion'
 
 export interface User { id: string; username: string; role: 'user' | 'admin'; is_enabled: boolean }
-export interface ModelNode { id: string; display_name: string; model_identifier: string; base_url: string; api_key?: string | null; timeout_seconds: number; is_enabled: boolean; is_default: boolean; description?: string | null; created_at?: string }
+export interface ModelNode { id: string; display_name: string; model_identifier: string; base_url: string; api_key?: string | null; timeout_seconds: number; is_enabled: boolean; is_default: boolean; gpu_indices: number[]; tensor_parallel_size: number; description?: string | null; created_at?: string }
 export interface ReviewFile { id: string; relative_path: string; size_bytes: number }
 export interface ReviewTask {
   id: string; owner_id: string; model_node_id: string; input_mode: string; display_name: string
@@ -19,7 +19,7 @@ export interface Report { id: string; task_id: string; summary: string; score: n
 export interface Dashboard { users: number; enabled_users: number; models: number; enabled_models: number; tasks: number; queued_tasks: number; running_tasks: number; completed_tasks: number; failed_tasks: number }
 export interface SystemResource { cpu_percent?: number | null; load_average_1m?: number | null; memory_total_bytes?: number | null; memory_used_bytes?: number | null; memory_percent?: number | null; disk_total_bytes?: number | null; disk_used_bytes?: number | null; disk_percent?: number | null }
 export interface GpuDevice { index: number; name: string; utilization_percent?: number | null; memory_used_mb?: number | null; memory_total_mb?: number | null; memory_percent?: number | null; temperature_c?: number | null; power_w?: number | null }
-export interface ModelRuntimeMetric { node_id: string; display_name: string; base_url: string; metrics_available: boolean; prompt_throughput_tps?: number | null; generation_throughput_tps?: number | null; running_requests?: number | null; pending_requests?: number | null; gpu_kv_cache_usage_percent?: number | null; error?: string | null }
+export interface ModelRuntimeMetric { node_id: string; display_name: string; base_url: string; gpu_indices: number[]; tensor_parallel_size: number; metrics_available: boolean; prompt_throughput_tps?: number | null; generation_throughput_tps?: number | null; running_requests?: number | null; pending_requests?: number | null; gpu_kv_cache_usage_percent?: number | null; error?: string | null }
 export interface ResourceSnapshot { captured_at: string; system: SystemResource; gpus: GpuDevice[]; models: ModelRuntimeMetric[]; tasks: Dashboard }
 export interface AdminUser extends User { created_at: string }
 export interface Prompt { id: string; version: number; body: string; is_active: boolean; creator_id?: string | null; created_at: string }
@@ -35,6 +35,6 @@ export interface ModelCatalogItem {
 export interface ModelDeployment {
   id: string; catalog_key?: string | null; display_name: string; model_identifier: string; source: string
   source_repository: string; served_model_name: string; base_url: string; port?: number | null
-  model_dir?: string | null; service_name?: string | null; status: ModelDeploymentStatus; progress: number
+  model_dir?: string | null; service_name?: string | null; gpu_indices: number[]; tensor_parallel_size: number; status: ModelDeploymentStatus; progress: number
   log?: string | null; error_message?: string | null; model_node_id?: string | null; created_at: string; updated_at: string
 }

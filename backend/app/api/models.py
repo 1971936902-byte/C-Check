@@ -26,6 +26,8 @@ class ModelNodeResponse(BaseModel):
     timeout_seconds: int
     is_enabled: bool
     is_default: bool
+    gpu_indices: list[int]
+    tensor_parallel_size: int
     description: str | None
 
 
@@ -42,6 +44,8 @@ def ensure_mock_model_node(db: Session, settings: Settings) -> None:
                 timeout_seconds=30,
                 is_enabled=True,
                 is_default=False,
+                gpu_indices=[],
+                tensor_parallel_size=1,
                 description="模拟审查模式，用于快速验证任务流程，不调用真实模型。",
             )
         )

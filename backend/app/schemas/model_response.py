@@ -53,8 +53,8 @@ class ReviewFinding(BaseModel):
     file_path: str = Field(min_length=1, max_length=512)
     line: int | None = Field(default=None, ge=1)
     remediation: str = Field(min_length=1, max_length=360)
-    code_snippet: list[CodeLine] = Field(default_factory=list, max_length=2)
-    fixed_snippet: list[CodeLine] = Field(default_factory=list, max_length=2)
+    code_snippet: list[CodeLine] = Field(default_factory=list, max_length=5)
+    fixed_snippet: list[CodeLine] = Field(default_factory=list, max_length=5)
 
 
 class ModelReviewResponse(BaseModel):
