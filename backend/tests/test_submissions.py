@@ -401,6 +401,83 @@ def test_submission_balances_across_enabled_sibling_model_nodes(db_session_facto
     assert response.json()["model_node_id"] == node1_id
 
 
+def test_submission_prefers_reserved_node_for_small_task(db_session_factory):
+    from app.main import app
+
+    with db_session_factory() as db:
+        user = User(username="reviewer", password_hash=hash_password("reviewer-password"))
+        nodes = [
+            ModelNode(
+                display_name=f"Qwen GPU{index}",
+                model_identifier="qwen-review",
+                base_url=f"http://127.0.0.1:800{index + 1}",
+                api_key="shared-key",
+                gpu_indices=[index],
+                is_enabled=True,
+                is_default=index == 0,
+            )
+            for index in range(3)
+        ]
+        db.add_all([user, *nodes])
+        db.commit()
+        user_id = user.id
+        requested_id = nodes[0].id
+        reserved_id = nodes[2].id
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/reviews/text",
+            headers=auth_headers(user_id),
+            json={
+                "model_node_id": requested_id,
+                "source_text": "int main(void) { return 0; }",
+                "check_types": ["logic"],
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["model_node_id"] == reserved_id
+
+
+def test_submission_keeps_large_task_on_general_nodes(db_session_factory):
+    from app.main import app
+
+    with db_session_factory() as db:
+        user = User(username="reviewer", password_hash=hash_password("reviewer-password"))
+        nodes = [
+            ModelNode(
+                display_name=f"Qwen GPU{index}",
+                model_identifier="qwen-review",
+                base_url=f"http://127.0.0.1:800{index + 1}",
+                api_key="shared-key",
+                gpu_indices=[index],
+                is_enabled=True,
+                is_default=index == 0,
+            )
+            for index in range(3)
+        ]
+        db.add_all([user, *nodes])
+        db.commit()
+        user_id = user.id
+        requested_id = nodes[0].id
+        general_ids = {nodes[0].id, nodes[1].id}
+
+    large_source = "int value;\n" * 14000
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/reviews/text",
+            headers=auth_headers(user_id),
+            json={
+                "model_node_id": requested_id,
+                "source_text": large_source,
+                "check_types": ["logic"],
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["model_node_id"] in general_ids
+
+
 def test_file_and_archive_endpoints_accept_valid_uploads(db_session_factory):
     from app.main import app
 

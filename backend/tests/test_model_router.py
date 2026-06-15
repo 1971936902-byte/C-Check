@@ -977,3 +977,67 @@ def test_invoke_selected_model_distributes_multi_file_task_across_sibling_nodes(
     assert result.score == 100
     assert "http://gpu0" in calls
     assert "http://gpu1" in calls
+
+
+def test_invoke_selected_model_keeps_large_task_off_reserved_small_node(monkeypatch, db_session_factory):
+    from app.core.security import hash_password
+    from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+
+    calls: list[str] = []
+
+    async def fake_invoke_model(*, node, files, **_kwargs):
+        calls.append(node.base_url)
+        await asyncio.sleep(0.01)
+        assert len(files) == 1
+        return ModelReviewResponse(summary="ok", score=100, findings=[])
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr("app.services.model_router.get_settings", lambda: Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        model_chunk_max_chars=1000,
+        model_chunk_max_count=20,
+        model_chunk_concurrency=2,
+        model_small_task_max_files=2,
+        model_small_task_reserved_nodes=1,
+        model_large_task_max_nodes=2,
+    ))
+
+    with db_session_factory() as db:
+        user = User(username="large-runner", password_hash=hash_password("large-runner-password"))
+        nodes = [
+            ModelNode(
+                display_name=f"GPU {index}",
+                model_identifier="review-model",
+                base_url=f"http://gpu{index}",
+                is_enabled=True,
+                gpu_indices=[index],
+            )
+            for index in range(3)
+        ]
+        task = ReviewTask(
+            owner=user,
+            model_node=nodes[0],
+            input_mode="folder",
+            display_name="large-project",
+            file_count=4,
+            check_types=["logic"],
+        )
+        for index in range(4):
+            task.files.append(
+                ReviewFile(
+                    relative_path=f"src/file_{index}.c",
+                    source_text="int value;\n" * 4,
+                    size_bytes=44,
+                )
+            )
+        db.add_all([*nodes[1:], task])
+        db.commit()
+        task_id = task.id
+
+    with db_session_factory() as db:
+        result = asyncio.run(invoke_selected_model(db, task_id))
+
+    assert result.score == 100
+    assert set(calls) == {"http://gpu0", "http://gpu1"}
+    assert "http://gpu2" not in calls

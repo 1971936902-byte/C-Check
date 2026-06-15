@@ -9,7 +9,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.db.models import ModelNode, ReviewFile, ReviewTask, TaskStatus, User
 from app.services.check_types import validate_check_types
 
@@ -348,7 +348,45 @@ def collect_folder_submission(files: list[tuple[str, bytes]], settings: Settings
     return collection.to_submission("folder", root_name)
 
 
-def _select_model_node_for_review(db: Session, requested_node: ModelNode) -> ModelNode:
+def _node_min_gpu_index(node: ModelNode) -> int:
+    return min(node.gpu_indices or [9999])
+
+
+def _task_is_small_enough(settings: Settings, *, file_count: int, source_bytes: int) -> bool:
+    return file_count <= settings.model_small_task_max_files and source_bytes <= settings.model_small_task_max_bytes
+
+
+def _reserved_small_task_nodes(nodes: list[ModelNode], settings: Settings) -> set[str]:
+    if len(nodes) < 3 or settings.model_small_task_reserved_nodes <= 0:
+        return set()
+    sorted_nodes = sorted(nodes, key=lambda node: (_node_min_gpu_index(node), node.created_at, node.id))
+    return {node.id for node in sorted_nodes[-settings.model_small_task_reserved_nodes:]}
+
+
+def _preferred_nodes_for_submission(
+    nodes: list[ModelNode],
+    settings: Settings,
+    submission: Submission,
+) -> list[ModelNode]:
+    reserved_ids = _reserved_small_task_nodes(nodes, settings)
+    if not reserved_ids:
+        return nodes
+    source_bytes = sum(source.size_bytes for source in submission.files)
+    is_small = _task_is_small_enough(
+        settings,
+        file_count=len(submission.files),
+        source_bytes=source_bytes,
+    )
+    if is_small:
+        reserved = [node for node in nodes if node.id in reserved_ids]
+        return reserved or nodes
+    general = [node for node in nodes if node.id not in reserved_ids]
+    if not general:
+        return nodes
+    return general[:settings.model_large_task_max_nodes]
+
+
+def _select_model_node_for_review(db: Session, requested_node: ModelNode, submission: Submission) -> ModelNode:
     sibling_nodes = list(
         db.scalars(
             select(ModelNode).where(
@@ -360,6 +398,9 @@ def _select_model_node_for_review(db: Session, requested_node: ModelNode) -> Mod
     )
     if len(sibling_nodes) <= 1:
         return requested_node
+    settings = get_settings()
+    sibling_nodes.sort(key=lambda node: (_node_min_gpu_index(node), node.created_at, node.id))
+    candidate_nodes = _preferred_nodes_for_submission(sibling_nodes, settings, submission)
 
     load_rows = db.execute(
         select(ReviewTask.model_node_id, func.count(ReviewTask.id))
@@ -367,15 +408,15 @@ def _select_model_node_for_review(db: Session, requested_node: ModelNode) -> Mod
         .group_by(ReviewTask.model_node_id)
     ).all()
     loads = {model_node_id: count for model_node_id, count in load_rows}
-    sibling_nodes.sort(
+    candidate_nodes.sort(
         key=lambda node: (
             loads.get(node.id, 0),
             0 if node.id == requested_node.id else 1,
-            min(node.gpu_indices or [9999]),
+            _node_min_gpu_index(node),
             node.created_at,
         )
     )
-    return sibling_nodes[0]
+    return candidate_nodes[0]
 
 
 def create_review_task(
@@ -390,7 +431,7 @@ def create_review_task(
     model_node = db.get(ModelNode, model_node_id)
     if model_node is None or not model_node.is_enabled:
         raise SubmissionError("model node does not exist or is disabled")
-    model_node = _select_model_node_for_review(db, model_node)
+    model_node = _select_model_node_for_review(db, model_node, submission)
 
     try:
         normalized_check_types = validate_check_types(check_types)

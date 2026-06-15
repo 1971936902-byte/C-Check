@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     model_chunk_max_chars: int = Field(default=8000, ge=1000, le=200000)
     model_chunk_max_count: int = Field(default=360, ge=1, le=10000)
     model_chunk_concurrency: int = Field(default=1, ge=1, le=8)
+    model_small_task_max_files: int = Field(default=2, ge=1, le=1000)
+    model_small_task_max_bytes: int = Field(default=128 * 1024, ge=1024, le=50 * 1024 * 1024)
+    model_small_task_reserved_nodes: int = Field(default=1, ge=0, le=8)
+    model_large_task_max_nodes: int = Field(default=2, ge=1, le=8)
     model_structured_outputs_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False

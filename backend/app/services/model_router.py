@@ -286,7 +286,56 @@ def _chunk_review_batches(
     return batches
 
 
-def _review_node_dispatch_pool(db: Session, requested_node: ModelNode) -> ModelNodeDispatchPool:
+def _node_min_gpu_index(node: ModelNode) -> int:
+    return min(node.gpu_indices or [9999])
+
+
+def _review_task_source_bytes(task: ReviewTask) -> int:
+    return sum(source.size_bytes for source in task.files)
+
+
+def _review_task_is_small(settings: Settings, task: ReviewTask) -> bool:
+    return (
+        len(task.files) <= settings.model_small_task_max_files
+        and _review_task_source_bytes(task) <= settings.model_small_task_max_bytes
+    )
+
+
+def _reserved_small_task_nodes(nodes: tuple[ModelNode, ...], settings: Settings) -> set[str]:
+    if len(nodes) < 3 or settings.model_small_task_reserved_nodes <= 0:
+        return set()
+    sorted_nodes = sorted(nodes, key=lambda node: (_node_min_gpu_index(node), node.created_at, node.id))
+    return {node.id for node in sorted_nodes[-settings.model_small_task_reserved_nodes:]}
+
+
+def _select_dispatch_nodes(
+    nodes: tuple[ModelNode, ...],
+    settings: Settings,
+    task: ReviewTask,
+) -> tuple[ModelNode, ...]:
+    if not nodes:
+        return nodes
+    ordered_nodes = tuple(sorted(nodes, key=lambda node: (_node_min_gpu_index(node), node.created_at, node.id)))
+    reserved_ids = _reserved_small_task_nodes(ordered_nodes, settings)
+    if not reserved_ids:
+        return ordered_nodes
+    if _review_task_is_small(settings, task):
+        reserved = tuple(node for node in ordered_nodes if node.id in reserved_ids)
+        general = tuple(node for node in ordered_nodes if node.id not in reserved_ids)
+        return reserved + general
+    general = tuple(node for node in ordered_nodes if node.id not in reserved_ids)
+    if not general:
+        return ordered_nodes
+    return general[:settings.model_large_task_max_nodes]
+
+
+def _review_node_dispatch_pool(
+    db: Session,
+    requested_node: ModelNode,
+    *,
+    task: ReviewTask,
+    settings: Settings,
+) -> ModelNodeDispatchPool:
     sibling_nodes = tuple(
         db.scalars(
             select(ModelNode).where(
@@ -296,7 +345,7 @@ def _review_node_dispatch_pool(db: Session, requested_node: ModelNode) -> ModelN
             )
         ).all()
     )
-    nodes = sibling_nodes or (requested_node,)
+    nodes = _select_dispatch_nodes(sibling_nodes or (requested_node,), settings, task)
     load_rows = db.execute(
         select(ReviewTask.model_node_id, func.count(ReviewTask.id))
         .where(ReviewTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
@@ -312,7 +361,7 @@ def _node_dispatch_key(node: ModelNode, base_loads: dict[str, int], in_flight: d
     return (
         in_flight.get(node.id, 0),
         base_loads.get(node.id, 0),
-        min(node.gpu_indices or [9999]),
+        _node_min_gpu_index(node),
         node.id,
     )
 
@@ -797,7 +846,7 @@ async def invoke_selected_model(
     prompt = get_active_prompt(db)
     scoped_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
     settings = get_settings()
-    dispatch_pool = _review_node_dispatch_pool(db, task.model_node)
+    dispatch_pool = _review_node_dispatch_pool(db, task.model_node, task=task, settings=settings)
 
     def update_chunk_progress(completed_chunks: int, total_chunks: int) -> None:
         if total_chunks <= 0:
