@@ -10,10 +10,11 @@ from typing import Any
 
 import httpx
 from pydantic import ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import ModelNode, ReviewFile
+from app.db.models import ModelNode, ReviewFile, ReviewTask, TaskStatus
 from app.schemas.model_response import ModelReviewResponse
 from app.services.check_types import check_types_prompt
 
@@ -74,6 +75,12 @@ class ChunkedReviewFile:
     size_bytes: int
     start_line: int
     end_line: int
+
+
+@dataclass(frozen=True)
+class ModelNodeDispatchPool:
+    nodes: tuple[ModelNode, ...]
+    base_loads: dict[str, int]
 
 
 def _mock_response(files: Sequence[ReviewFile]) -> ModelReviewResponse:
@@ -249,6 +256,7 @@ def _chunk_review_batches(
     *,
     prompt: str | None = None,
     retry_instruction: str | None = None,
+    isolate_chunks: bool = False,
 ) -> list[list[ChunkedReviewFile]]:
     batches: list[list[ChunkedReviewFile]] = []
     current_batch: list[ChunkedReviewFile] = []
@@ -262,6 +270,8 @@ def _chunk_review_batches(
     chunks: list[ChunkedReviewFile] = []
     for source in files:
         chunks.extend(_chunk_file(source, max_chars))
+    if isolate_chunks:
+        return [[chunk] for chunk in chunks]
     for chunk in chunks:
         chunk_chars = _chunk_payload_chars(chunk)
         if current_batch and current_chars + chunk_chars > max_chars:
@@ -274,6 +284,41 @@ def _chunk_review_batches(
     if current_batch:
         batches.append(current_batch)
     return batches
+
+
+def _review_node_dispatch_pool(db: Session, requested_node: ModelNode) -> ModelNodeDispatchPool:
+    sibling_nodes = tuple(
+        db.scalars(
+            select(ModelNode).where(
+                ModelNode.is_enabled.is_(True),
+                ModelNode.model_identifier == requested_node.model_identifier,
+                ModelNode.api_key == requested_node.api_key,
+            )
+        ).all()
+    )
+    nodes = sibling_nodes or (requested_node,)
+    load_rows = db.execute(
+        select(ReviewTask.model_node_id, func.count(ReviewTask.id))
+        .where(ReviewTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
+        .group_by(ReviewTask.model_node_id)
+    ).all()
+    return ModelNodeDispatchPool(
+        nodes=nodes,
+        base_loads={model_node_id: count for model_node_id, count in load_rows},
+    )
+
+
+def _node_dispatch_key(node: ModelNode, base_loads: dict[str, int], in_flight: dict[str, int]) -> tuple[int, int, int, str]:
+    return (
+        in_flight.get(node.id, 0),
+        base_loads.get(node.id, 0),
+        min(node.gpu_indices or [9999]),
+        node.id,
+    )
+
+
+def _is_retryable_node_failure(exc: ModelInvocationError) -> bool:
+    return str(exc) == "selected model node is unavailable"
 
 
 def _should_chunk(files: Sequence[ReviewFile], settings: Settings) -> bool:
@@ -317,8 +362,8 @@ def _batch_prompt(
     )
     return (
         f"{prompt}\n\n"
-        "The submitted code is being reviewed in chunks because it is too large for one model "
-        "context window. Review only this batch and report concrete issues visible in this "
+        "The submitted code is being reviewed in batches to keep context usage controlled and "
+        "balance work across available model nodes. Review only this batch and report concrete issues visible in this "
         "batch. Each source line is prefixed as `000123: code`; use the numeric prefix as the "
         "`line` value and keep `file_path` as the original file path.\n"
         f"Batch {batch_index} of {batch_count}, containing {len(batch)} source chunk(s):\n"
@@ -353,6 +398,7 @@ def _merge_chunk_results(results: Sequence[ModelReviewResponse]) -> ModelReviewR
 async def _invoke_chunked_review(
     *,
     node: ModelNode,
+    dispatch_pool: ModelNodeDispatchPool | None = None,
     files: Sequence[ReviewFile],
     prompt: str,
     settings: Settings,
@@ -368,6 +414,7 @@ async def _invoke_chunked_review(
             settings,
             prompt=prompt,
             retry_instruction=retry_instruction,
+            isolate_chunks=dispatch_pool is not None and len(dispatch_pool.nodes) > 1,
         )
         if len(batches) > settings.model_chunk_max_count:
             raise ModelInvocationError(
@@ -379,18 +426,65 @@ async def _invoke_chunked_review(
                 ),
             )
         indexed_results: list[tuple[int, ModelReviewResponse]] = []
+        pool_nodes = tuple(dispatch_pool.nodes) if dispatch_pool is not None else (node,)
+        if not pool_nodes:
+            pool_nodes = (node,)
+        base_loads = dispatch_pool.base_loads if dispatch_pool is not None else {}
+        in_flight = {candidate.id: 0 for candidate in pool_nodes}
+        unavailable_node_ids: set[str] = set()
+        dispatch_lock = asyncio.Lock()
         semaphore = asyncio.Semaphore(settings.model_chunk_concurrency)
+
+        async def acquire_node(attempted_node_ids: set[str]) -> ModelNode:
+            async with dispatch_lock:
+                candidates = [
+                    candidate
+                    for candidate in pool_nodes
+                    if candidate.id not in attempted_node_ids and candidate.id not in unavailable_node_ids
+                ]
+                if not candidates:
+                    candidates = [
+                        candidate
+                        for candidate in pool_nodes
+                        if candidate.id not in attempted_node_ids
+                    ]
+                if not candidates:
+                    raise ModelInvocationError("selected model node is unavailable")
+                selected = min(candidates, key=lambda candidate: _node_dispatch_key(candidate, base_loads, in_flight))
+                in_flight[selected.id] = in_flight.get(selected.id, 0) + 1
+                return selected
+
+        async def release_node(selected: ModelNode) -> None:
+            async with dispatch_lock:
+                in_flight[selected.id] = max(0, in_flight.get(selected.id, 0) - 1)
 
         async def invoke_batch(index: int, batch: Sequence[ChunkedReviewFile]) -> tuple[int, ModelReviewResponse]:
             async with semaphore:
-                result = await invoke_model(
-                    node=node,
-                    files=list(batch),  # type: ignore[list-item]
-                    prompt=_batch_prompt(prompt, index, len(batches), batch),
-                    retry_instruction=retry_instruction,
-                    settings=settings,
-                )
-                return index, result
+                attempted_node_ids: set[str] = set()
+                last_error: ModelInvocationError | None = None
+                while len(attempted_node_ids) < len(pool_nodes):
+                    selected_node = await acquire_node(attempted_node_ids)
+                    attempted_node_ids.add(selected_node.id)
+                    try:
+                        result = await invoke_model(
+                            node=selected_node,
+                            files=list(batch),  # type: ignore[list-item]
+                            prompt=_batch_prompt(prompt, index, len(batches), batch),
+                            retry_instruction=retry_instruction,
+                            settings=settings,
+                        )
+                        return index, result
+                    except ModelInvocationError as exc:
+                        last_error = exc
+                        if _is_retryable_node_failure(exc) and len(attempted_node_ids) < len(pool_nodes):
+                            unavailable_node_ids.add(selected_node.id)
+                            continue
+                        raise
+                    finally:
+                        await release_node(selected_node)
+                if last_error is not None:
+                    raise last_error
+                raise ModelInvocationError("selected model node is unavailable")
 
         pending = [
             asyncio.create_task(invoke_batch(index, batch))
@@ -703,6 +797,7 @@ async def invoke_selected_model(
     prompt = get_active_prompt(db)
     scoped_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
     settings = get_settings()
+    dispatch_pool = _review_node_dispatch_pool(db, task.model_node)
 
     def update_chunk_progress(completed_chunks: int, total_chunks: int) -> None:
         if total_chunks <= 0:
@@ -714,9 +809,10 @@ async def invoke_selected_model(
         current_task.progress = max(current_task.progress, min(95, chunk_progress))
         db.commit()
 
-    if _should_chunk(task.files, settings):
+    if _should_chunk(task.files, settings) or (len(dispatch_pool.nodes) > 1 and len(task.files) > 1):
         return await _invoke_chunked_review(
             node=task.model_node,
+            dispatch_pool=dispatch_pool,
             files=task.files,
             prompt=scoped_prompt,
             retry_instruction=retry_instruction,
@@ -736,6 +832,7 @@ async def invoke_selected_model(
             raise
         return await _invoke_chunked_review(
             node=task.model_node,
+            dispatch_pool=dispatch_pool,
             files=task.files,
             prompt=scoped_prompt,
             retry_instruction=retry_instruction,
