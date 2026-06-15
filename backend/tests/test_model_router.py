@@ -8,6 +8,7 @@ from app.db.models import ModelNode, ReviewFile
 from app.core.config import Settings
 from app.schemas.model_response import FindingCategory, ModelReviewResponse
 from app.services.model_router import (
+    ModelNodeDispatchPool,
     ModelInvocationError,
     _chunk_file,
     _effective_chunk_max_chars,
@@ -508,6 +509,28 @@ def test_chunk_review_batches_groups_small_files():
     ]
 
 
+def test_chunk_review_batches_can_isolate_files_for_node_balancing():
+    files = [
+        ReviewFile(
+            relative_path=f"small_{index}.c",
+            source_text="int value;\n" * 8,
+            size_bytes=88,
+        )
+        for index in range(4)
+    ]
+
+    batches = _chunk_review_batches(
+        files,
+        Settings(_env_file=None, allow_insecure_defaults=True, model_chunk_max_chars=1000),
+        isolate_chunks=True,
+    )
+
+    assert len(batches) == len(files)
+    assert [[chunk.relative_path for chunk in batch] for batch in batches] == [
+        [file.relative_path] for file in files
+    ]
+
+
 def test_chunk_review_batches_uses_conservative_context_budget():
     files = [
         ReviewFile(
@@ -696,6 +719,110 @@ def test_chunked_review_halves_chunk_size_after_context_error(monkeypatch):
     assert 6000 in seen_chunk_sizes
 
 
+def test_chunked_review_balances_batches_across_sibling_nodes(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_invoke_model(*, node, **_kwargs):
+        calls.append(node.base_url)
+        await asyncio.sleep(0.01)
+        return ModelReviewResponse(summary="ok", score=100, findings=[])
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    nodes = (
+        ModelNode(
+            id="node-0",
+            display_name="GPU 0",
+            model_identifier="qwen-test",
+            base_url="http://gpu0",
+            is_enabled=True,
+            gpu_indices=[0],
+        ),
+        ModelNode(
+            id="node-1",
+            display_name="GPU 1",
+            model_identifier="qwen-test",
+            base_url="http://gpu1",
+            is_enabled=True,
+            gpu_indices=[1],
+        ),
+    )
+
+    result = asyncio.run(
+        _invoke_chunked_review(
+            node=nodes[0],
+            dispatch_pool=ModelNodeDispatchPool(nodes=nodes, base_loads={}),
+            files=[
+                ReviewFile(
+                    relative_path=f"file_{index}.c",
+                    source_text="int value;\n" * 4,
+                    size_bytes=44,
+                )
+                for index in range(4)
+            ],
+            prompt="review",
+            settings=Settings(
+                _env_file=None,
+                allow_insecure_defaults=True,
+                model_chunk_max_chars=1000,
+                model_chunk_concurrency=2,
+                model_chunk_max_count=10,
+            ),
+        )
+    )
+
+    assert result.score == 100
+    assert "http://gpu0" in calls
+    assert "http://gpu1" in calls
+
+
+def test_chunked_review_falls_back_when_a_node_is_unavailable(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_invoke_model(*, node, **_kwargs):
+        calls.append(node.base_url)
+        if node.base_url == "http://gpu0":
+            raise ModelInvocationError("selected model node is unavailable")
+        return ModelReviewResponse(summary="ok", score=100, findings=[])
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    nodes = (
+        ModelNode(
+            id="node-0",
+            display_name="GPU 0",
+            model_identifier="qwen-test",
+            base_url="http://gpu0",
+            is_enabled=True,
+            gpu_indices=[0],
+        ),
+        ModelNode(
+            id="node-1",
+            display_name="GPU 1",
+            model_identifier="qwen-test",
+            base_url="http://gpu1",
+            is_enabled=True,
+            gpu_indices=[1],
+        ),
+    )
+
+    result = asyncio.run(
+        _invoke_chunked_review(
+            node=nodes[0],
+            dispatch_pool=ModelNodeDispatchPool(nodes=nodes, base_loads={}),
+            files=[ReviewFile(relative_path="main.c", source_text="int main(void){return 0;}", size_bytes=25)],
+            prompt="review",
+            settings=Settings(
+                _env_file=None,
+                allow_insecure_defaults=True,
+                model_chunk_max_chars=1000,
+                model_chunk_concurrency=1,
+            ),
+        )
+    )
+
+    assert result.score == 100
+    assert calls == ["http://gpu0", "http://gpu1"]
+
+
 def test_merge_chunk_results_keeps_all_sorted_findings():
     finding = {
         "category": "memory_safety",
@@ -785,3 +912,68 @@ def test_invoke_selected_model_keeps_chunking_on_retry_instruction(monkeypatch, 
     assert len(calls) > 1
     assert all(file_count == 1 for file_count, _ in calls)
     assert all(retry_instruction == "previous chunk failed" for _, retry_instruction in calls)
+
+
+def test_invoke_selected_model_distributes_multi_file_task_across_sibling_nodes(monkeypatch, db_session_factory):
+    from app.core.security import hash_password
+    from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+
+    calls: list[str] = []
+
+    async def fake_invoke_model(*, node, files, **_kwargs):
+        calls.append(node.base_url)
+        await asyncio.sleep(0.01)
+        assert len(files) == 1
+        return ModelReviewResponse(summary="ok", score=100, findings=[])
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr("app.services.model_router.get_settings", lambda: Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        model_chunk_max_chars=1000,
+        model_chunk_max_count=20,
+        model_chunk_concurrency=2,
+    ))
+
+    with db_session_factory() as db:
+        user = User(username="balancer", password_hash=hash_password("balancer-password"))
+        node0 = ModelNode(
+            display_name="GPU 0",
+            model_identifier="review-model",
+            base_url="http://gpu0",
+            is_enabled=True,
+            gpu_indices=[0],
+        )
+        node1 = ModelNode(
+            display_name="GPU 1",
+            model_identifier="review-model",
+            base_url="http://gpu1",
+            is_enabled=True,
+            gpu_indices=[1],
+        )
+        task = ReviewTask(
+            owner=user,
+            model_node=node0,
+            input_mode="folder",
+            display_name="project",
+            file_count=4,
+            check_types=["logic"],
+        )
+        for index in range(4):
+            task.files.append(
+                ReviewFile(
+                    relative_path=f"src/file_{index}.c",
+                    source_text="int value;\n" * 4,
+                    size_bytes=44,
+                )
+            )
+        db.add_all([node1, task])
+        db.commit()
+        task_id = task.id
+
+    with db_session_factory() as db:
+        result = asyncio.run(invoke_selected_model(db, task_id))
+
+    assert result.score == 100
+    assert "http://gpu0" in calls
+    assert "http://gpu1" in calls

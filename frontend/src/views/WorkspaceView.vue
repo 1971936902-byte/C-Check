@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, FolderOpened, Plus, Promotion, UploadFilled, View } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowUp, Document, FolderOpened, Plus, Promotion, UploadFilled, View } from '@element-plus/icons-vue'
 import { errorMessage, MOCK_API_ENABLED, reviewApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
 import type { ModelNode, ReviewTask } from '../types'
@@ -26,6 +26,7 @@ const archiveFileInput = ref<HTMLInputElement>()
 const folderInput = ref<HTMLInputElement>()
 const tasks = ref<ReviewTask[]>([])
 const selectedTaskId = ref('')
+const taskPanelExpanded = ref(true)
 const submitting = ref(false)
 const logVisible = ref(false)
 const sourcePreviewVisible = ref(false)
@@ -71,8 +72,18 @@ const selectedModelInfo = computed(() => models.value.find((model) => model.id =
 const allChecksSelected = computed(() => checkTypes.value.length === ALL_CHECK_TYPES.length)
 const task = computed(() => tasks.value.find((item) => item.id === selectedTaskId.value) || tasks.value[0])
 const progressSummary = computed(() => task.value ? deriveReviewProgressSummary(task.value) : undefined)
+const runningTask = computed(() => tasks.value.find((item) => item.status === 'running'))
+const runningProgressSummary = computed(() => runningTask.value ? deriveReviewProgressSummary(runningTask.value) : undefined)
+const taskListItems = computed(() => tasks.value.filter((item) => item.status !== 'running'))
+const completedTaskCount = computed(() => tasks.value.filter((item) => item.status === 'completed').length)
+const unfinishedTaskCount = computed(() => tasks.value.filter((item) => item.status !== 'completed').length)
+const topPinnedQueuedTaskId = computed(() => {
+  const pinnedQueued = tasks.value
+    .filter((item) => item.status === 'queued' && item.queue_priority && (item.queued_ahead_count ?? 0) === 0)
+    .sort((left, right) => (right.queue_priority ?? 0) - (left.queue_priority ?? 0))
+  return pinnedQueued[0]?.id || ''
+})
 const checkTypeLabelMap = new Map<string, string>(ALL_CHECK_TYPES.map((item) => [item.value, item.label]))
-const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 
 onMounted(async () => {
   try {
@@ -255,10 +266,14 @@ function taskCheckTypesLabel(target: ReviewTask) {
     .map((item) => checkTypeLabelMap.get(item) || item)
     .join('、')
 }
-function taskCreator(target: ReviewTask) {
-  if (target.tester_name) return target.tester_name
-  if (target.owner_id === auth.user?.id) return auth.user.username
-  return target.owner_id
+function taskOwnerName(target: ReviewTask) {
+  return target.tester_name || (target.owner_id === auth.user?.id ? auth.user.username : target.owner_id)
+}
+function formatTaskTime(value: string) {
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+function isTopPinnedTask(target: ReviewTask) {
+  return target.id === topPinnedQueuedTaskId.value
 }
 function chooseFolder() { folderInput.value?.click() }
 function setFolderFiles(event: Event) {
@@ -331,6 +346,10 @@ async function runDemo() {
 function openReport() {
   if (task.value?.report_id) router.push(`/reports/${task.value.report_id}`)
   else ElMessage.warning('报告暂不可用，请稍后刷新任务状态')
+}
+
+function openRunningLog() {
+  if (runningTask.value?.model_log) logVisible.value = true
 }
 
 async function removeTask(target: ReviewTask) {
@@ -532,12 +551,67 @@ async function pinTask(target: ReviewTask) {
             <h2>任务状态</h2>
             <p v-if="!tasks.length">提交代码后，可在此查看审查进度与结果。</p>
           </div>
-          <el-button v-if="MOCK_API_ENABLED && !tasks.length" plain @click="runDemo">加载多文件演示</el-button>
+          <div class="task-panel-actions">
+            <span v-if="tasks.length" class="task-panel-mini-summary">
+              共 {{ tasks.length }} 条 · 已完成 {{ completedTaskCount }} · 未完成 {{ unfinishedTaskCount }}
+            </span>
+            <el-button v-if="tasks.length" plain size="small" :icon="taskPanelExpanded ? ArrowUp : ArrowDown" @click="taskPanelExpanded = !taskPanelExpanded">
+              {{ taskPanelExpanded ? '收起' : '展开' }}
+            </el-button>
+            <el-button v-if="MOCK_API_ENABLED && !tasks.length" plain @click="runDemo">加载多文件演示</el-button>
+          </div>
         </div>
 
-        <div v-if="tasks.length" class="task-list">
+        <div v-if="tasks.length && !taskPanelExpanded" class="task-collapsed-summary">
+          <div>
+            <small>全部任务</small>
+            <strong>{{ tasks.length }}</strong>
+          </div>
+          <div>
+            <small>已完成</small>
+            <strong>{{ completedTaskCount }}</strong>
+          </div>
+          <div>
+            <small>未完成</small>
+            <strong>{{ unfinishedTaskCount }}</strong>
+          </div>
+        </div>
+
+        <section v-if="taskPanelExpanded && runningTask && runningProgressSummary" class="task-current task-current-running">
+          <div class="task-title task-current-title">
+            <div>
+              <strong>{{ taskDisplayName(runningTask) }}</strong>
+              <small>
+                {{ taskSubmissionCountLabel(runningTask) }} · {{ runningTask.check_types?.length || 0 }} 项检查
+                <template v-if="taskCheckTypesLabel(runningTask)">（{{ taskCheckTypesLabel(runningTask) }}）</template>
+              </small>
+            </div>
+            <StatusBadge :status="runningTask.status" />
+          </div>
+          <el-progress :percentage="runningTask.progress" />
+          <div class="task-focus-row">
+            <div class="task-focus-main">
+              <i :class="`file-state file-state-${runningProgressSummary.state}`"></i>
+              <div>
+                <small>{{ runningProgressSummary.stateLabel }}</small>
+                <code>{{ runningProgressSummary.currentLabel }}</code>
+              </div>
+            </div>
+            <div class="task-focus-remaining">
+              <small>剩余文件</small>
+              <strong>{{ runningProgressSummary.remainingCount }}</strong>
+            </div>
+          </div>
+          <el-alert v-if="runningTask.error_message" :title="runningTask.error_message" type="error" :closable="false" show-icon />
+          <el-button v-if="runningTask.model_log" plain :icon="View" class="report-button" @click="openRunningLog">查看模型日志</el-button>
+          <el-button plain type="danger" class="report-button" @click="removeTask(runningTask)">
+            停止并删除任务
+          </el-button>
+        </section>
+
+        <div v-if="taskPanelExpanded && taskListItems.length" class="task-list">
           <button
-            v-for="item in tasks"
+            v-for="item in taskListItems"
             :key="item.id"
             type="button"
             class="task-list-item"
@@ -549,19 +623,21 @@ async function pinTask(target: ReviewTask) {
               <StatusBadge :status="item.status" />
             </span>
             <span class="task-list-meta">
-              <small>创建者：{{ taskCreator(item) }}</small>
-              <small>创建时间：{{ date(item.created_at) }}</small>
+              <small>创建者：{{ taskOwnerName(item) }}</small>
+              <small>创建时间：{{ formatTaskTime(item.created_at) }}</small>
             </span>
             <small class="task-list-checks" :title="taskCheckTypesLabel(item)">
-              审查类型：{{ taskCheckTypesLabel(item) || '未选择' }}
+              审查类型：{{ taskCheckTypesLabel(item) || '未设置' }}
             </small>
             <small v-if="item.status === 'queued'" class="task-queue-note">
               前方还有 {{ item.queued_ahead_count ?? 0 }} 个任务
-              <b v-if="item.queue_priority">已置顶</b>
+              <b v-if="isTopPinnedTask(item)">已置顶</b>
               <el-button
-                v-else
+                v-else-if="(item.queued_ahead_count ?? 0) > 0"
                 link
                 type="primary"
+                size="small"
+                :icon="ArrowUp"
                 class="task-pin-inline"
                 @click.stop="pinTask(item)"
               >
@@ -570,44 +646,11 @@ async function pinTask(target: ReviewTask) {
             </small>
           </button>
         </div>
-
-        <template v-if="task && progressSummary">
-          <div class="task-title">
-            <div>
-              <strong>{{ taskDisplayName(task) }}</strong>
-              <small>
-                {{ taskSubmissionCountLabel(task) }} · {{ task.check_types?.length || 0 }} 项检查
-                <template v-if="taskCheckTypesLabel(task)">（{{ taskCheckTypesLabel(task) }}）</template>
-              </small>
-            </div>
-            <StatusBadge :status="task.status" />
-          </div>
-          <el-progress v-if="task.status === 'running'" :percentage="task.progress" />
-          <div v-if="task.status === 'running'" class="task-focus-row">
-            <div class="task-focus-main">
-              <i :class="`file-state file-state-${progressSummary.state}`"></i>
-              <div>
-                <small>{{ progressSummary.stateLabel }}</small>
-                <code>{{ progressSummary.currentLabel }}</code>
-              </div>
-            </div>
-            <div class="task-focus-remaining">
-              <small>剩余文件</small>
-              <strong>{{ progressSummary.remainingCount }}</strong>
-            </div>
-          </div>
-          <el-alert v-if="task.error_message" :title="task.error_message" type="error" :closable="false" show-icon />
-          <el-button v-if="task.model_log" plain :icon="View" class="report-button" @click="logVisible = true">查看模型日志</el-button>
-          <el-button v-if="task.status === 'completed'" type="primary" class="report-button" @click="openReport">查看审查报告</el-button>
-          <el-button plain type="danger" class="report-button" @click="removeTask(task)">
-            {{ task.status === 'queued' || task.status === 'running' ? '停止并删除任务' : '删除任务' }}
-          </el-button>
-        </template>
       </aside>
     </div>
 
-    <el-dialog v-model="logVisible" :title="`模型日志 · ${task?.display_name || ''}`" width="820px">
-      <div class="markdown-preview"><pre>{{ task?.model_log || '暂无模型日志' }}</pre></div>
+    <el-dialog v-model="logVisible" :title="`模型日志 · ${runningTask?.display_name || task?.display_name || ''}`" width="820px">
+      <div class="markdown-preview"><pre>{{ runningTask?.model_log || task?.model_log || '暂无模型日志' }}</pre></div>
       <template #footer><el-button @click="logVisible = false">关闭</el-button></template>
     </el-dialog>
 
