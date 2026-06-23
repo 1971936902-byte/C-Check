@@ -847,6 +847,7 @@ async def invoke_selected_model(
     scoped_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
     settings = get_settings()
     dispatch_pool = _review_node_dispatch_pool(db, task.model_node, task=task, settings=settings)
+    scoped_prompt = _with_rag_context(db, task, scoped_prompt, settings)
 
     def update_chunk_progress(completed_chunks: int, total_chunks: int) -> None:
         if total_chunks <= 0:
@@ -889,6 +890,23 @@ async def invoke_selected_model(
             chunk_max_chars=max(1000, settings.model_chunk_max_chars // 2),
             progress_callback=update_chunk_progress,
         )
+
+
+def _with_rag_context(db: Session, task: ReviewTask, prompt: str, settings: Settings) -> str:
+    if not settings.rag_enabled:
+        return prompt
+    try:
+        from app.services.code_index.context_builder import build_rag_context
+
+        rag_context = build_rag_context(db, task, task.files, settings=settings)
+    except Exception as exc:  # pragma: no cover - defensive guard for optional RAG services.
+        current_log = task.model_log or ""
+        task.model_log = truncate_model_log(f"{current_log}\n[RAG] Context build skipped: {exc}")
+        db.commit()
+        return prompt
+    if not rag_context:
+        return prompt
+    return f"{prompt}\n\n{rag_context}"
 
 
 async def check_model_health(node: ModelNode, settings: Settings | None = None) -> dict[str, Any]:

@@ -153,6 +153,7 @@ class ReviewTask(TimestampMixin, Base):
     model_node: Mapped[ModelNode] = relationship(back_populates="review_tasks")
     files: Mapped[list[ReviewFile]] = relationship(back_populates="task", cascade="all, delete-orphan")
     report: Mapped[Report | None] = relationship(back_populates="task", cascade="all, delete-orphan")
+    code_project: Mapped[CodeProject | None] = relationship(back_populates="task", cascade="all, delete-orphan")
 
     @property
     def report_id(self) -> str | None:
@@ -202,3 +203,118 @@ class Report(TimestampMixin, Base):
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
     task: Mapped[ReviewTask] = relationship(back_populates="report")
+
+
+class CodeProject(TimestampMixin, Base):
+    __tablename__ = "code_projects"
+    __table_args__ = (
+        Index("ix_code_projects_task_id", "task_id"),
+        Index("ix_code_projects_source_hash", "source_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    task_id: Mapped[str] = mapped_column(ForeignKey("review_tasks.id", ondelete="CASCADE"), unique=True, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding_backend: Mapped[str | None] = mapped_column(String(64))
+    stats_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    task: Mapped[ReviewTask] = relationship(back_populates="code_project")
+    files: Mapped[list[CodeFile]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    symbols: Mapped[list[CodeSymbol]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    edges: Mapped[list[CodeEdge]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    chunks: Mapped[list[CodeChunk]] = relationship(back_populates="project", cascade="all, delete-orphan")
+
+
+class CodeFile(TimestampMixin, Base):
+    __tablename__ = "code_files"
+    __table_args__ = (
+        Index("ix_code_files_project_path", "project_id", "relative_path", unique=True),
+        Index("ix_code_files_content_hash", "content_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("code_projects.id", ondelete="CASCADE"), nullable=False)
+    review_file_id: Mapped[str | None] = mapped_column(ForeignKey("review_files.id", ondelete="SET NULL"))
+    relative_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    language: Mapped[str] = mapped_column(String(32), default="c", nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    line_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    project: Mapped[CodeProject] = relationship(back_populates="files")
+    symbols: Mapped[list[CodeSymbol]] = relationship(back_populates="file", cascade="all, delete-orphan")
+    chunks: Mapped[list[CodeChunk]] = relationship(back_populates="file", cascade="all, delete-orphan")
+
+
+class CodeSymbol(TimestampMixin, Base):
+    __tablename__ = "code_symbols"
+    __table_args__ = (
+        Index("ix_code_symbols_project_name", "project_id", "name"),
+        Index("ix_code_symbols_project_kind", "project_id", "kind"),
+        Index("ix_code_symbols_file_range", "file_id", "start_line", "end_line"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("code_projects.id", ondelete="CASCADE"), nullable=False)
+    file_id: Mapped[str] = mapped_column(ForeignKey("code_files.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    signature: Mapped[str | None] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(String(32), default="global", nullable=False)
+    start_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.8, nullable=False)
+    source_tool: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    project: Mapped[CodeProject] = relationship(back_populates="symbols")
+    file: Mapped[CodeFile] = relationship(back_populates="symbols")
+    chunks: Mapped[list[CodeChunk]] = relationship(back_populates="symbol")
+
+
+class CodeEdge(TimestampMixin, Base):
+    __tablename__ = "code_edges"
+    __table_args__ = (
+        Index("ix_code_edges_project_type", "project_id", "edge_type"),
+        Index("ix_code_edges_source", "source_id"),
+        Index("ix_code_edges_target", "target_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("code_projects.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    target_id: Mapped[str | None] = mapped_column(String(36))
+    edge_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    line: Mapped[int | None] = mapped_column(Integer)
+    confidence: Mapped[float] = mapped_column(Float, default=0.8, nullable=False)
+    source_tool: Mapped[str] = mapped_column(String(64), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    project: Mapped[CodeProject] = relationship(back_populates="edges")
+
+
+class CodeChunk(TimestampMixin, Base):
+    __tablename__ = "code_chunks"
+    __table_args__ = (
+        Index("ix_code_chunks_project_symbol", "project_id", "symbol_id"),
+        Index("ix_code_chunks_project_kind", "project_id", "chunk_kind"),
+        Index("ix_code_chunks_content_hash", "content_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("code_projects.id", ondelete="CASCADE"), nullable=False)
+    file_id: Mapped[str] = mapped_column(ForeignKey("code_files.id", ondelete="CASCADE"), nullable=False)
+    symbol_id: Mapped[str | None] = mapped_column(ForeignKey("code_symbols.id", ondelete="SET NULL"))
+    chunk_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol_name: Mapped[str | None] = mapped_column(String(255))
+    start_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text().with_variant(mysql.LONGTEXT(), "mysql"), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_estimate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    embedding_id: Mapped[str | None] = mapped_column(String(128))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    project: Mapped[CodeProject] = relationship(back_populates="chunks")
+    file: Mapped[CodeFile] = relationship(back_populates="chunks")
+    symbol: Mapped[CodeSymbol | None] = relationship(back_populates="chunks")

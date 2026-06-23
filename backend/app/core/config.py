@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     model_small_task_reserved_nodes: int = Field(default=1, ge=0, le=8)
     model_large_task_max_nodes: int = Field(default=2, ge=1, le=8)
     model_structured_outputs_enabled: bool = True
+    rag_enabled: bool = True
+    rag_keyword_top_k: int = Field(default=8, ge=1, le=100)
+    rag_graph_max_depth: int = Field(default=1, ge=0, le=3)
+    rag_context_max_chars: int = Field(default=12000, ge=1000, le=100000)
+    rag_qdrant_url: str | None = None
+    rag_qdrant_api_key: str | None = None
+    rag_qdrant_collection: str = "c_check_code_chunks"
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False
     model_deployment_script: Path = REPOSITORY_ROOT / "deploy" / "models" / "deploy-vllm-model.sh"
