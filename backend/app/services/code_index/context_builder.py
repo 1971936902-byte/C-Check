@@ -6,7 +6,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.models import ReviewContext, ReviewEvidence, ReviewFile, ReviewTask
-from app.services.code_index.retriever import RetrievedContext, retrieve_context_for_files
+from app.services.code_index.retriever import (
+    RetrievedContext,
+    retrieve_context_for_files,
+    retrieve_missing_symbol_contexts,
+)
 
 
 def build_rag_context(
@@ -20,7 +24,10 @@ def build_rag_context(
     settings = settings or get_settings()
     if not settings.rag_enabled:
         return ""
-    contexts = retrieve_context_for_files(db, task, files, settings=settings)
+    contexts = [
+        *retrieve_missing_symbol_contexts(db, task, files, settings=settings),
+        *retrieve_context_for_files(db, task, files, settings=settings),
+    ]
     rendered, selected = render_rag_context(contexts, max_chars=settings.rag_context_max_chars)
     if persist and rendered:
         _persist_review_context(db, task, rendered, selected)
@@ -33,6 +40,7 @@ def render_rag_context(contexts: list[RetrievedContext], *, max_chars: int) -> t
     intro = [
         "RAG Evidence Context:",
         "Use Current Target first, then cite Evidence E numbers only when they directly support the finding.",
+        "Missing-symbol evidence resolves calls/macros/types/globals that are not defined in the current target.",
         "Prefer call/declaration/macro/type/global evidence over weak keyword or vector-only evidence.",
     ]
     contexts = _select_budgeted_contexts(_dedupe_contexts(contexts), max_chars=max_chars - len("\n".join(intro)))

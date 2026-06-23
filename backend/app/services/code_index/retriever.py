@@ -78,6 +78,7 @@ REASON_UPSTREAM = "upstream"
 REASON_SYMBOL = "symbol"
 REASON_KEYWORD = "keyword"
 REASON_VECTOR = "vector"
+REASON_MISSING = "missing"
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,56 @@ def retrieve_context_for_files(
 
     ranked = _rerank_contexts(db, project, list(contexts.values()), target_paths, source_text_by_path)
     return _prune_ranked_contexts(ranked, limit=settings.rag_keyword_top_k)
+
+
+def retrieve_missing_symbol_contexts(
+    db: Session,
+    task: ReviewTask,
+    files: list[ReviewFile],
+    *,
+    settings: Settings | None = None,
+) -> list[RetrievedContext]:
+    settings = settings or get_settings()
+    if not settings.rag_enabled or not files:
+        return []
+    project = load_or_build_code_index(db, task, settings=settings)
+    target_paths = {file.relative_path for file in files}
+    source_text_by_path = {file.relative_path: file.source_text for file in files}
+    referenced = set().union(*(_referenced_symbols(file.source_text) for file in files))
+    locally_defined = set().union(*(_locally_defined_symbols(file.source_text) for file in files))
+    missing_names = referenced - locally_defined - _COMMON_IDENTIFIERS
+    if not missing_names:
+        return []
+
+    chunks_by_symbol = _chunks_by_symbol(db, project)
+    contexts: dict[str, RetrievedContext] = {}
+    symbols = db.scalars(
+        select(CodeSymbol).where(
+            CodeSymbol.project_id == project.id,
+            CodeSymbol.name.in_(missing_names),
+        )
+    ).all()
+    for symbol in symbols:
+        chunk = chunks_by_symbol.get(symbol.id)
+        if chunk is None:
+            continue
+        score = _missing_symbol_score(symbol.kind, symbol.name, chunk.file.relative_path, target_paths)
+        context = _context_from_chunk(chunk, f"{REASON_MISSING}:{symbol.kind}", score)
+        current = contexts.get(context.evidence_id)
+        if current is None or context.score > current.score:
+            contexts[context.evidence_id] = context
+
+    for hit in keyword_search_chunks(db, project, missing_names, limit=settings.rag_keyword_top_k):
+        chunk = hit.chunk
+        if chunk.symbol_name not in missing_names and not (_identifiers(chunk.content) & missing_names):
+            continue
+        context = _context_from_chunk(chunk, f"{REASON_MISSING}:keyword", 1.0 + hit.score)
+        current = contexts.get(context.evidence_id)
+        if current is None or context.score > current.score:
+            contexts[context.evidence_id] = context
+
+    ranked = _rerank_contexts(db, project, list(contexts.values()), target_paths, source_text_by_path)
+    return _prune_ranked_contexts(ranked, limit=max(settings.rag_keyword_top_k, 6))
 
 
 def retrieve_context_diagnostics(
@@ -243,11 +294,12 @@ def _prune_ranked_contexts(contexts: list[RetrievedContext], *, limit: int) -> l
         REASON_KEYWORD: 1,
         REASON_VECTOR: 1,
         "qdrant": 1,
+        REASON_MISSING: 4,
     }
     selected: list[RetrievedContext] = []
     bucket_counts: dict[str, int] = {}
 
-    strong_buckets = {REASON_CALL, REASON_SYMBOL}
+    strong_buckets = {REASON_MISSING, REASON_CALL, REASON_SYMBOL}
     for context in contexts:
         bucket = _reason_bucket(context.reason)
         if bucket not in strong_buckets:
@@ -294,6 +346,7 @@ def _context_merge_key(context: RetrievedContext) -> tuple[int, float]:
         REASON_KEYWORD: 2,
         REASON_VECTOR: 1,
         "qdrant": 2,
+        REASON_MISSING: 7,
     }.get(_reason_bucket(context.reason), 0)
     return priority, context.score
 
@@ -558,6 +611,8 @@ def _relation_boost(reason: str) -> float:
     bucket = _reason_bucket(reason)
     if bucket == REASON_CALL:
         return 3.0
+    if bucket == REASON_MISSING:
+        return 3.4
     if bucket == REASON_SYMBOL:
         return 1.65
     if bucket == REASON_INCLUDE:
@@ -579,7 +634,7 @@ def _kind_from_reason(reason: str) -> str:
         return "file_summary"
     if bucket == REASON_CALL:
         return "function"
-    if bucket in {REASON_VECTOR, "qdrant"}:
+    if bucket in {REASON_VECTOR, "qdrant", REASON_MISSING}:
         return "function"
     return "symbol"
 
@@ -667,6 +722,46 @@ def _context_from_chunk(chunk: CodeChunk, reason: str, score: float) -> Retrieve
         reason=reason,
         score=score,
     )
+
+
+def _referenced_symbols(source_text: str) -> set[str]:
+    identifiers = _identifiers(source_text)
+    calls = {
+        match.group(1)
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", source_text)
+        if match.group(1) not in _COMMON_IDENTIFIERS
+    }
+    macros = {name for name in identifiers if name.isupper() and len(name) > 2}
+    return identifiers | calls | macros
+
+
+def _locally_defined_symbols(source_text: str) -> set[str]:
+    defined: set[str] = set()
+    for pattern in (
+        r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"\b(?:static\s+)?(?:inline\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{",
+        r"\btypedef\b.*?\b([A-Za-z_][A-Za-z0-9_]*)\s*;",
+        r"\b(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"^\s*(?:extern\s+)?(?:static\s+)?(?:const\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;)",
+    ):
+        defined.update(match.group(1) for match in re.finditer(pattern, source_text, flags=re.MULTILINE | re.DOTALL))
+    return defined
+
+
+def _missing_symbol_score(kind: str, name: str, file_path: str, target_paths: set[str]) -> float:
+    kind_weight = {
+        "function": 5.2,
+        "declaration": 4.9,
+        "macro": 4.6,
+        "type": 4.3,
+        "typedef": 4.3,
+        "struct": 4.1,
+        "enum": 4.0,
+        "global_variable": 3.9,
+        "callback_binding": 3.5,
+    }.get(kind, 3.0)
+    name_weight = 0.4 if name.isupper() else 0.0
+    return kind_weight + name_weight + _file_relatedness_boost(file_path, target_paths)
 
 
 def _identifiers(source_text: str) -> set[str]:

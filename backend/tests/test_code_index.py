@@ -22,7 +22,7 @@ from app.services.code_index.indexer import build_code_index
 from app.services.code_index.keyword_search import expand_query_terms, keyword_search_chunks
 from app.services.code_index.parser import ParsedFile, ParsedSymbol, parse_c_source
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import RetrievedContext, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files
+from app.services.code_index.retriever import RetrievedContext, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files, retrieve_missing_symbol_contexts
 from app.services.model_router import invoke_selected_model
 
 
@@ -255,6 +255,34 @@ def test_rag_context_includes_cross_file_callee_definition(db_session):
     assert task.review_contexts[0].evidence_items[0].evidence_key == "E1"
 
 
+def test_missing_symbol_context_resolves_calls_macros_and_globals(db_session):
+    task = _make_task()
+    task.files.append(
+        ReviewFile(
+            relative_path="src/state.c",
+            source_text="int shared_counter = 7;\n",
+            size_bytes=24,
+        )
+    )
+    task.files[0].source_text += "int read_counter(void) { return shared_counter + MAX_PACKET_SIZE; }\n"
+    db_session.add(task)
+    db_session.commit()
+
+    contexts = retrieve_missing_symbol_contexts(
+        db_session,
+        task,
+        [task.files[0]],
+        settings=Settings(_env_file=None, allow_insecure_defaults=True, rag_keyword_top_k=10),
+    )
+    rendered, selected = render_rag_context(contexts, max_chars=5000)
+
+    assert selected
+    assert "missing" in rendered
+    assert "helper_copy" in rendered
+    assert "MAX_PACKET_SIZE" in rendered
+    assert "shared_counter" in rendered
+
+
 def test_invoke_selected_model_adds_rag_context_to_prompt(monkeypatch, db_session_factory):
     captured_prompts: list[str] = []
 
@@ -290,6 +318,45 @@ def test_invoke_selected_model_adds_rag_context_to_prompt(monkeypatch, db_sessio
     assert captured_prompts
     assert "Evidence E1" in captured_prompts[0]
     assert "helper_copy" in captured_prompts[0]
+
+
+def test_chunked_review_adds_batch_specific_missing_symbol_context(monkeypatch, db_session_factory):
+    captured_prompts: list[str] = []
+
+    async def fake_invoke_model(*, prompt, files, **_kwargs):
+        captured_prompts.append(prompt)
+        return ModelReviewResponse(summary="ok", score=100, findings=[])
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr("app.services.model_router._should_chunk", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        "app.services.model_router.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            allow_insecure_defaults=True,
+            rag_enabled=True,
+            rag_review_units_enabled=False,
+            rag_context_max_chars=5000,
+            model_context_window=20000,
+            model_max_input_tokens=18000,
+            model_chunk_max_chars=1000,
+            model_chunk_max_count=20,
+        ),
+    )
+
+    with db_session_factory() as db:
+        task = _make_task()
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    with db_session_factory() as db:
+        result = asyncio.run(invoke_selected_model(db, task_id))
+
+    assert "分片审查完成" in result.summary
+    assert captured_prompts
+    assert any("Missing-symbol evidence" in prompt for prompt in captured_prompts)
+    assert any("helper_copy" in prompt and "MAX_PACKET_SIZE" in prompt for prompt in captured_prompts)
 
 
 def test_postprocess_review_result_removes_invalid_evidence_and_call_chain(db_session):

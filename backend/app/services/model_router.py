@@ -422,6 +422,9 @@ def _batch_prompt(
     )
 
 
+BatchPromptBuilder = Callable[[str, int, int, Sequence[ChunkedReviewFile]], str]
+
+
 def _merged_score(results: Sequence[ModelReviewResponse]) -> float:
     if not results:
         return 100
@@ -456,6 +459,7 @@ async def _invoke_chunked_review(
     retry_instruction: str | None = None,
     chunk_max_chars: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    batch_prompt_builder: BatchPromptBuilder | None = None,
 ) -> ModelReviewResponse:
     if chunk_max_chars is not None:
         settings = settings.model_copy(update={"model_chunk_max_chars": chunk_max_chars})
@@ -520,7 +524,11 @@ async def _invoke_chunked_review(
                         result = await invoke_model(
                             node=selected_node,
                             files=list(batch),  # type: ignore[list-item]
-                            prompt=_batch_prompt(prompt, index, len(batches), batch),
+                            prompt=(
+                                batch_prompt_builder(prompt, index, len(batches), batch)
+                                if batch_prompt_builder is not None
+                                else _batch_prompt(prompt, index, len(batches), batch)
+                            ),
                             retry_instruction=retry_instruction,
                             settings=settings,
                         )
@@ -859,10 +867,18 @@ async def invoke_selected_model(
     if task is None:
         raise ModelInvocationError("review task does not exist")
     prompt = get_active_prompt(db)
-    scoped_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
+    base_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
     settings = get_settings()
     dispatch_pool = _review_node_dispatch_pool(db, task.model_node, task=task, settings=settings)
-    scoped_prompt = _with_rag_context(db, task, scoped_prompt, settings)
+
+    def rag_batch_prompt(
+        prompt_text: str,
+        batch_index: int,
+        batch_count: int,
+        batch: Sequence[ChunkedReviewFile],
+    ) -> str:
+        enriched = _with_rag_context(db, task, prompt_text, settings, files=batch, persist=False)
+        return _batch_prompt(enriched, batch_index, batch_count, batch)
 
     def update_chunk_progress(completed_chunks: int, total_chunks: int) -> None:
         if total_chunks <= 0:
@@ -880,16 +896,17 @@ async def invoke_selected_model(
             node=task.model_node,
             dispatch_pool=dispatch_pool,
             files=dispatch_files,
-            prompt=scoped_prompt,
+            prompt=base_prompt,
             retry_instruction=retry_instruction,
             settings=settings,
             progress_callback=update_chunk_progress,
+            batch_prompt_builder=rag_batch_prompt,
         )
     try:
         return await invoke_model(
             node=task.model_node,
             files=task.files,
-            prompt=scoped_prompt,
+            prompt=_with_rag_context(db, task, base_prompt, settings, files=task.files),
             retry_instruction=retry_instruction,
             settings=settings,
         )
@@ -900,21 +917,30 @@ async def invoke_selected_model(
             node=task.model_node,
             dispatch_pool=dispatch_pool,
             files=_rag_review_unit_files(db, task, settings) or task.files,
-            prompt=scoped_prompt,
+            prompt=base_prompt,
             retry_instruction=retry_instruction,
             settings=settings,
             chunk_max_chars=max(1000, settings.model_chunk_max_chars // 2),
             progress_callback=update_chunk_progress,
+            batch_prompt_builder=rag_batch_prompt,
         )
 
 
-def _with_rag_context(db: Session, task: ReviewTask, prompt: str, settings: Settings) -> str:
+def _with_rag_context(
+    db: Session,
+    task: ReviewTask,
+    prompt: str,
+    settings: Settings,
+    *,
+    files: Sequence[ReviewFile] | Sequence[ChunkedReviewFile],
+    persist: bool = True,
+) -> str:
     if not settings.rag_enabled:
         return prompt
     try:
         from app.services.code_index.context_builder import build_rag_context
 
-        rag_context = build_rag_context(db, task, task.files, settings=settings)
+        rag_context = build_rag_context(db, task, list(files), settings=settings, persist=persist)
     except Exception as exc:  # pragma: no cover - defensive guard for optional RAG services.
         current_log = task.model_log or ""
         task.model_log = truncate_model_log(f"{current_log}\n[RAG] Context build skipped: {exc}")
