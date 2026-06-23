@@ -1,4 +1,5 @@
 import asyncio
+from time import perf_counter
 
 from app.core.config import Settings
 from app.core.security import hash_password
@@ -80,6 +81,30 @@ def test_parse_c_source_extracts_symbols_includes_and_calls():
     assert {symbol.name for symbol in parsed.symbols} >= {"MAX_LEN", "main"}
     assert parsed.calls[0].caller_name == "main"
     assert parsed.calls[0].callee_name == "helper_copy"
+
+
+def test_parse_c_source_handles_driver_style_file_without_regex_backtracking():
+    declarations = "\n".join(
+        f"static const struct rt_device_ops ops_{index} = {{ 0 }};"
+        for index in range(220)
+    )
+    source = (
+        '#include "rtdevice.h"\n'
+        "#define DRIVER_LIMIT 32\n"
+        f"{declarations}\n"
+        "static int rt_driver_probe(struct rt_device *dev) {\n"
+        "    if (dev == 0) return -1;\n"
+        "    return rt_device_register(dev, \"demo\", DRIVER_LIMIT);\n"
+        "}\n"
+    )
+
+    started = perf_counter()
+    parsed = parse_c_source("drivers/demo.c", source)
+    elapsed = perf_counter() - started
+
+    assert elapsed < 1.0
+    assert {symbol.name for symbol in parsed.symbols} >= {"DRIVER_LIMIT", "rt_driver_probe"}
+    assert any(call.callee_name == "rt_device_register" for call in parsed.calls)
 
 
 def test_build_code_index_persists_graph_entities(db_session):

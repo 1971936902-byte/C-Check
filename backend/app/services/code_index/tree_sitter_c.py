@@ -9,6 +9,17 @@ class TreeSitterStatus:
     reason: str | None = None
 
 
+MAX_TREE_SITTER_SOURCE_BYTES = 256_000
+MAX_TREE_SITTER_SOURCE_LINES = 180
+MAX_TREE_SITTER_NODES = 20_000
+MAX_DECLARATOR_SCAN_NODES = 512
+MAX_DECLARATOR_SCAN_DEPTH = 64
+
+
+class _TreeSitterBudgetExceeded(RuntimeError):
+    pass
+
+
 def probe_tree_sitter_c() -> TreeSitterStatus:
     try:
         import tree_sitter  # noqa: F401
@@ -24,6 +35,9 @@ def probe_tree_sitter_c() -> TreeSitterStatus:
 def parse_with_tree_sitter(relative_path: str, source_text: str):
     status = probe_tree_sitter_c()
     if not status.available:
+        return None
+    source_bytes = source_text.encode("utf-8", errors="ignore")
+    if len(source_bytes) > MAX_TREE_SITTER_SOURCE_BYTES or source_text.count("\n") + 1 > MAX_TREE_SITTER_SOURCE_LINES:
         return None
     try:
         from tree_sitter import Language, Parser
@@ -41,7 +55,6 @@ def parse_with_tree_sitter(relative_path: str, source_text: str):
             parser.set_language(Language(tree_sitter_c.language()))
         except Exception:
             return None
-    source_bytes = source_text.encode("utf-8", errors="ignore")
     try:
         tree = parser.parse(source_bytes)
     except Exception:
@@ -54,16 +67,26 @@ def parse_with_tree_sitter(relative_path: str, source_text: str):
     def text(node) -> str:
         return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="ignore")
 
-    def name_from_declarator(node) -> str | None:
+    def name_from_declarator(node, *, depth: int = 0, scanned: list[int] | None = None) -> str | None:
+        scanned = scanned if scanned is not None else [0]
+        scanned[0] += 1
+        if depth > MAX_DECLARATOR_SCAN_DEPTH or scanned[0] > MAX_DECLARATOR_SCAN_NODES:
+            return None
         if node.type == "identifier":
             return text(node)
         for child in getattr(node, "children", []):
-            found = name_from_declarator(child)
+            found = name_from_declarator(child, depth=depth + 1, scanned=scanned)
             if found:
                 return found
         return None
 
+    visited_nodes = 0
+
     def visit(node, current_function: str | None = None) -> None:
+        nonlocal visited_nodes
+        visited_nodes += 1
+        if visited_nodes > MAX_TREE_SITTER_NODES:
+            raise _TreeSitterBudgetExceeded
         node_type = node.type
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
@@ -123,7 +146,10 @@ def parse_with_tree_sitter(relative_path: str, source_text: str):
         for child in getattr(node, "children", []):
             visit(child, current_function)
 
-    visit(tree.root_node)
+    try:
+        visit(tree.root_node)
+    except _TreeSitterBudgetExceeded:
+        return None
     if not symbols and not includes and not calls:
         return None
     return ParsedFile(

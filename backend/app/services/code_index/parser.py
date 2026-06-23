@@ -18,20 +18,21 @@ _CONTROL_KEYWORDS = {
     "else",
 }
 _FUNCTION_HEADER_RE = re.compile(
-    rf"^\s*(?P<prefix>(?:static\s+|inline\s+|extern\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+|enum\s+|union\s+|[A-Za-z_][A-Za-z0-9_*\s]+)+?)"
+    rf"^\s*(?P<prefix>[A-Za-z_][A-Za-z0-9_*\s]*?)"
     rf"\s+(?P<name>{_IDENTIFIER})\s*\([^;]*\)\s*\{{"
 )
 _FUNCTION_DECL_RE = re.compile(
-    rf"^\s*(?P<prefix>(?:static\s+|inline\s+|extern\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+|enum\s+|union\s+|[A-Za-z_][A-Za-z0-9_*\s]+)+?)"
+    rf"^\s*(?P<prefix>[A-Za-z_][A-Za-z0-9_*\s]*?)"
     rf"\s+(?P<name>{_IDENTIFIER})\s*\([^;{{}}]*\)\s*;"
 )
 _GLOBAL_VAR_RE = re.compile(
-    rf"^\s*(?:extern\s+|static\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+|enum\s+|union\s+|[A-Za-z_][A-Za-z0-9_*\s]+)+\s+(?P<name>{_IDENTIFIER})\s*(?:=\s*[^;]+)?;"
+    rf"^\s*[A-Za-z_][A-Za-z0-9_*\s]*\s+(?P<name>{_IDENTIFIER})\s*(?:=\s*[^;]+)?;"
 )
 _CALL_RE = re.compile(rf"\b(?P<name>{_IDENTIFIER})\s*\(")
 _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"](?P<target>[^>"]+)[>"]')
 _MACRO_RE = re.compile(rf"^\s*#\s*define\s+(?P<name>{_IDENTIFIER})\b")
 _TYPE_RE = re.compile(rf"^\s*(?:typedef\s+)?(?:struct|enum|union)\s+(?P<name>{_IDENTIFIER})\b")
+MAX_REGEX_LINE_LENGTH = 2000
 
 
 @dataclass(frozen=True)
@@ -153,7 +154,10 @@ def _parse_type_symbols(lines: list[str]) -> list[ParsedSymbol]:
 def _parse_declaration_symbols(lines: list[str]) -> list[ParsedSymbol]:
     symbols: list[ParsedSymbol] = []
     for line_number, line in enumerate(lines, start=1):
-        match = _FUNCTION_DECL_RE.match(_strip_line_comment(line))
+        line_without_comment = _strip_line_comment(line)
+        if len(line_without_comment) > MAX_REGEX_LINE_LENGTH:
+            continue
+        match = _FUNCTION_DECL_RE.match(line_without_comment)
         if not match or match.group("name") in _CONTROL_KEYWORDS:
             continue
         symbols.append(
@@ -173,7 +177,13 @@ def _parse_global_variable_symbols(lines: list[str]) -> list[ParsedSymbol]:
     symbols: list[ParsedSymbol] = []
     for line_number, line in enumerate(lines, start=1):
         stripped = _strip_line_comment(line).strip()
-        if not stripped or stripped.startswith("#") or "(" in stripped or stripped.startswith(("typedef", "return")):
+        if (
+            not stripped
+            or len(stripped) > MAX_REGEX_LINE_LENGTH
+            or stripped.startswith("#")
+            or "(" in stripped
+            or stripped.startswith(("typedef", "return"))
+        ):
             continue
         match = _GLOBAL_VAR_RE.match(stripped)
         if not match or match.group("name") in _CONTROL_KEYWORDS:
@@ -198,6 +208,9 @@ def _parse_functions(lines: list[str]) -> tuple[list[ParsedSymbol], list[ParsedC
     index = 0
     while index < line_count:
         line = _strip_line_comment(lines[index])
+        if len(line) > MAX_REGEX_LINE_LENGTH:
+            index += 1
+            continue
         match = _FUNCTION_HEADER_RE.match(line)
         if not match or match.group("name") in _CONTROL_KEYWORDS:
             index += 1
