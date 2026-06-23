@@ -111,7 +111,7 @@ def _direct_call_contexts(
     for edge_depth, edge in all_edges:
         chunk = chunks_by_symbol.get(edge.target_id or "")
         if chunk:
-            contexts.append(_context_from_chunk(chunk, "调用关系", 1.0 + edge.confidence - (0.1 * (edge_depth - 1))))
+            contexts.append(_context_from_chunk(chunk, "调用关系", 2.5 + edge.confidence - (0.1 * (edge_depth - 1))))
     return contexts
 
 
@@ -162,7 +162,7 @@ def _include_contexts(db: Session, project: CodeProject, relative_path: str) -> 
             )
         )
         if chunk:
-            contexts.append(_context_from_chunk(chunk, "include关系", 1.25))
+            contexts.append(_context_from_chunk(chunk, "include关系", 1.8))
     return contexts
 
 
@@ -183,7 +183,7 @@ def _upstream_contexts(
         )
     ).all()
     return [
-        _context_from_chunk(chunk, "上游调用者", 0.9 + edge.confidence)
+        _context_from_chunk(chunk, "上游调用者", 1.8 + edge.confidence)
         for edge in edges
         if (chunk := chunks_by_symbol.get(edge.source_id))
     ]
@@ -215,7 +215,7 @@ def _usage_contexts(
         )
     ).all()
     return [
-        _context_from_chunk(chunk, "声明/宏/类型/全局变量", 0.85 + edge.confidence)
+        _context_from_chunk(chunk, "声明/宏/类型/全局变量", 1.5 + edge.confidence)
         for edge in edges
         if (chunk := chunks_by_symbol.get(edge.target_id or ""))
     ]
@@ -234,7 +234,7 @@ def _keyword_contexts(
         chunk = hit.chunk
         if chunk.file and chunk.file.relative_path in target_paths and chunk.chunk_kind == "function":
             continue
-        contexts.append(_context_from_chunk(chunk, f"关键词检索:{hit.reason}", 0.7 + hit.score))
+        contexts.append(_context_from_chunk(chunk, f"关键词检索:{hit.reason}", 0.4 + hit.score))
     return sorted(contexts, key=attrgetter("score"), reverse=True)[:limit]
 
 

@@ -33,6 +33,8 @@ _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"](?P<target>[^>"]+)[>"]')
 _MACRO_RE = re.compile(rf"^\s*#\s*define\s+(?P<name>{_IDENTIFIER})\b")
 _TYPE_RE = re.compile(rf"^\s*(?:typedef\s+)?(?:struct|enum|union)\s+(?P<name>{_IDENTIFIER})\b")
 MAX_REGEX_LINE_LENGTH = 2000
+MAX_FUNCTION_HEADER_LINES = 12
+MAX_FUNCTION_HEADER_LENGTH = 4000
 
 
 @dataclass(frozen=True)
@@ -207,11 +209,11 @@ def _parse_functions(lines: list[str]) -> tuple[list[ParsedSymbol], list[ParsedC
     line_count = len(lines)
     index = 0
     while index < line_count:
-        line = _strip_line_comment(lines[index])
-        if len(line) > MAX_REGEX_LINE_LENGTH:
+        header = _candidate_function_header(lines, index)
+        if header is None:
             index += 1
             continue
-        match = _FUNCTION_HEADER_RE.match(line)
+        match = _FUNCTION_HEADER_RE.match(header)
         if not match or match.group("name") in _CONTROL_KEYWORDS:
             index += 1
             continue
@@ -219,7 +221,7 @@ def _parse_functions(lines: list[str]) -> tuple[list[ParsedSymbol], list[ParsedC
         name = match.group("name")
         start_line = index + 1
         end_index = _find_balanced_block_end(lines, index)
-        signature = line.strip().rstrip("{").strip()
+        signature = header.strip().rstrip("{").strip()
         symbols.append(
             ParsedSymbol(
                 kind="function",
@@ -238,6 +240,32 @@ def _parse_functions(lines: list[str]) -> tuple[list[ParsedSymbol], list[ParsedC
                 calls.append(ParsedCall(caller_name=name, callee_name=callee, line=body_index + 1))
         index = end_index + 1
     return symbols, calls
+
+
+def _candidate_function_header(lines: list[str], start_index: int) -> str | None:
+    parts: list[str] = []
+    total_length = 0
+    for index in range(start_index, min(len(lines), start_index + MAX_FUNCTION_HEADER_LINES)):
+        line = _strip_line_comment(lines[index]).strip()
+        if not line:
+            if parts:
+                break
+            continue
+        if line.startswith("#"):
+            return None
+        total_length += len(line)
+        if total_length > MAX_FUNCTION_HEADER_LENGTH or len(line) > MAX_REGEX_LINE_LENGTH:
+            return None
+        parts.append(line)
+        joined = " ".join(parts)
+        if ";" in line and "{" not in line:
+            return None
+        if "{" in line:
+            before_brace = joined.split("{", 1)[0]
+            if "=" in before_brace:
+                return None
+            return joined
+    return None
 
 
 def _find_balanced_block_end(lines: list[str], start_index: int) -> int:
