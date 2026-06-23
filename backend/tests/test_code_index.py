@@ -10,7 +10,7 @@ from app.services.code_index.evaluator import evaluate_retrieval
 from app.services.code_index.indexer import build_code_index
 from app.services.code_index.parser import parse_c_source
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import retrieve_context_for_files
+from app.services.code_index.retriever import _vector_contexts, retrieve_context_for_files
 from app.services.model_router import invoke_selected_model
 
 
@@ -232,3 +232,15 @@ def test_rag_evaluator_reports_recall_precision_and_mrr(db_session):
     assert result.precision_at_k > 0
     assert result.mrr > 0
     assert 0 <= result.token_waste_ratio <= 1
+
+
+def test_vector_contexts_keep_positive_similarity_candidates(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+    project = build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+
+    contexts = _vector_contexts(db_session, project, task.files[0].source_text, {task.files[0].relative_path}, limit=10)
+
+    assert contexts
+    assert all(context.reason == "向量相似检索" for context in contexts)

@@ -252,7 +252,7 @@ def _vector_contexts(
         if chunk.file.relative_path in target_paths and chunk.chunk_kind in {"function", "file_summary"}:
             continue
         score = _cosine_similarity(query_vector, embed_text(chunk.content))
-        if score >= 0.15:
+        if score > 0:
             scored.append((score, chunk))
     scored.sort(key=lambda item: item[0], reverse=True)
     return [_context_from_chunk(chunk, "向量相似检索", 0.5 + score) for score, chunk in scored[:limit]]

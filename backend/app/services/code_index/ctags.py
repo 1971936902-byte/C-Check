@@ -4,12 +4,42 @@ import json
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.services.code_index.parser import PARSER_VERSION, ParsedSymbol
 
 
 CTAGS_SOURCE = "universal-ctags"
+
+
+@dataclass(frozen=True)
+class CtagsProbe:
+    available: bool
+    executable: str | None = None
+    version: str | None = None
+    error: str | None = None
+
+
+def probe_ctags() -> CtagsProbe:
+    executable = shutil.which("ctags")
+    if executable is None:
+        return CtagsProbe(available=False, error="ctags executable not found")
+    try:
+        completed = subprocess.run(
+            [executable, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return CtagsProbe(available=False, executable=executable, error=str(exc))
+    output = (completed.stdout or completed.stderr or "").splitlines()
+    version = output[0].strip() if output else None
+    return CtagsProbe(available=completed.returncode == 0, executable=executable, version=version)
 
 
 def extract_ctags_symbols(relative_path: str, source_text: str, *, timeout_seconds: int = 5) -> list[ParsedSymbol]:
