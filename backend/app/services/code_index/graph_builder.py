@@ -121,10 +121,25 @@ def build_usage_edges(project: CodeProject, chunk_symbols: list[CodeSymbol], sym
         if symbol.kind != "function":
             continue
         content = "\n".join(chunk.content for chunk in symbol.chunks if chunk.chunk_kind in {"function", "function_window"})
+        for condition in (candidate for candidate in chunk_symbols if candidate.kind == "conditional"):
+            edges.append(
+                CodeEdge(
+                    project=project,
+                    source_id=symbol.id,
+                    target_id=condition.id,
+                    edge_type="FUNCTION_DEPENDS_ON_CONDITION",
+                    line=symbol.start_line,
+                    confidence=0.55,
+                    source_tool=PARSER_VERSION,
+                    metadata_json={"name": condition.name},
+                )
+            )
         for target_kinds, edge_type in (
             ({"macro"}, "FUNCTION_USES_MACRO"),
+            ({"conditional"}, "FUNCTION_DEPENDS_ON_CONDITION"),
             ({"struct", "typedef", "enum", "type"}, "FUNCTION_USES_TYPE"),
             ({"global_variable"}, "FUNCTION_USES_GLOBAL"),
+            ({"function_pointer"}, "FUNCTION_USES_CALLBACK"),
         ):
             names = [
                 name
@@ -147,6 +162,24 @@ def build_usage_edges(project: CodeProject, chunk_symbols: list[CodeSymbol], sym
                         metadata_json={"name": name},
                     )
                 )
+        for name, candidates in symbols_by_name.items():
+            if name == symbol.name or f"{name}(" not in content:
+                continue
+            target = next((candidate for candidate in candidates if candidate.kind in {"global_variable", "function_pointer"}), None)
+            if target is None:
+                continue
+            edges.append(
+                CodeEdge(
+                    project=project,
+                    source_id=symbol.id,
+                    target_id=target.id,
+                    edge_type="FUNCTION_USES_CALLBACK",
+                    line=symbol.start_line,
+                    confidence=0.70,
+                    source_tool=PARSER_VERSION,
+                    metadata_json={"name": name, "call_style": "indirect"},
+                )
+            )
     return edges
 
 

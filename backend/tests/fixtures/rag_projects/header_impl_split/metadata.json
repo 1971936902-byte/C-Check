@@ -1,5 +1,9 @@
 {
+  "case_id": "header_impl_split",
   "target": "src/driver.c:driver_entry",
+  "target_file": "src/driver.c",
   "must_retrieve": ["include/helpers.h:helper_copy", "src/helpers.c:helper_copy"],
-  "expected_edges": ["FILE_INCLUDES_FILE", "SYMBOL_DECLARED_IN"]
+  "must_not_retrieve": ["include/unused.h:helper_copy"],
+  "expected_edges": ["FILE_INCLUDES_FILE", "SYMBOL_DECLARED_IN"],
+  "gold_notes": "The header declaration and C implementation are both useful for resolving helper_copy."
 }

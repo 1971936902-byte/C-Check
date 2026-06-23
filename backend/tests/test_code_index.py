@@ -1,4 +1,6 @@
 import asyncio
+import json
+from pathlib import Path
 from time import perf_counter
 
 from app.core.config import Settings
@@ -6,12 +8,21 @@ from app.core.security import hash_password
 from app.db.models import CodeChunk, CodeEdge, CodeEmbedding, CodeProject, CodeSymbol, ModelNode, ReviewContext, ReviewFile, ReviewTask, User
 from app.schemas.model_response import FindingCategory, FindingSeverity, ReviewFinding
 from app.schemas.model_response import ModelReviewResponse
-from app.services.code_index.context_builder import build_rag_context
-from app.services.code_index.evaluator import evaluate_retrieval
+from app.services.code_index.context_builder import build_rag_context, render_rag_context
+from app.services.code_index.evaluator import (
+    GoldRetrievalCase,
+    evaluate_evidence_quality,
+    evaluate_finding_quality,
+    evaluate_gold_cases,
+    evaluate_graph_quality,
+    evaluate_retrieval,
+    measure_latency,
+)
 from app.services.code_index.indexer import build_code_index
-from app.services.code_index.parser import parse_c_source
+from app.services.code_index.keyword_search import expand_query_terms, keyword_search_chunks
+from app.services.code_index.parser import ParsedFile, ParsedSymbol, parse_c_source
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import _vector_contexts, retrieve_context_for_files
+from app.services.code_index.retriever import RetrievedContext, _vector_contexts, retrieve_context_for_files
 from app.services.model_router import invoke_selected_model
 
 
@@ -129,6 +140,32 @@ RT_WEAK rt_err_t driver_style(
 
     assert {"same_line", "pointer_return", "driver_style"} <= function_names
     assert any(call.caller_name == "driver_style" and call.callee_name == "rt_device_register" for call in parsed.calls)
+
+
+def test_parse_c_source_merges_optional_libclang_semantic_symbols(monkeypatch):
+    def fake_libclang(relative_path: str, source_text: str) -> ParsedFile:
+        return ParsedFile(
+            relative_path=relative_path,
+            line_count=1,
+            symbols=[
+                ParsedSymbol(
+                    kind="declaration",
+                    name="semantic_only",
+                    signature="int semantic_only(void);",
+                    start_line=1,
+                    end_line=1,
+                    confidence=0.96,
+                    source_tool="libclang",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("app.services.code_index.parser._libclang_file", fake_libclang)
+
+    parsed = parse_c_source("include/semantic.h", "int normal_decl(void);\n")
+
+    assert {symbol.name for symbol in parsed.symbols} >= {"semantic_only", "normal_decl"}
+    assert any(symbol.source_tool == "libclang" for symbol in parsed.symbols)
 
 
 def test_same_named_function_prefers_related_file_definition(db_session):
@@ -312,6 +349,121 @@ def test_code_index_builds_extended_edges_embeddings_and_review_units(db_session
     assert any(unit.unit_type == "callsite" for unit in units)
 
 
+def test_function_units_group_related_function_chunks(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+    project = build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+
+    units = plan_review_units(project)
+    driver_unit = next(unit for unit in units if unit.unit_type == "function" and unit.symbol_name == "driver_entry")
+
+    assert len(driver_unit.chunk_ids) >= 2
+
+
+def test_parser_indexes_function_pointers_conditionals_and_callback_edges(db_session):
+    user = User(username="callback-user", password_hash=hash_password("pw"))
+    node = ModelNode(display_name="RAG node", model_identifier="review-model", base_url="http://model-node", is_enabled=True)
+    task = ReviewTask(
+        owner=user,
+        model_node=node,
+        input_mode="folder",
+        display_name="callbacks",
+        file_count=1,
+        check_types=["memory_safety"],
+    )
+    task.files.append(
+        ReviewFile(
+            relative_path="src/callbacks.c",
+            source_text=(
+                "#ifdef USE_CALLBACK\n"
+                "typedef int (*event_cb)(int value);\n"
+                "static event_cb global_cb;\n"
+                "int invoke_cb(int value) {\n"
+                "    if (global_cb) return global_cb(value);\n"
+                "    return value;\n"
+                "}\n"
+                "#endif\n"
+            ),
+            size_bytes=180,
+        )
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    project = build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+    kinds = {symbol.kind for symbol in db_session.query(CodeSymbol).filter_by(project_id=project.id).all()}
+    edge_types = {edge.edge_type for edge in db_session.query(CodeEdge).filter_by(project_id=project.id).all()}
+
+    assert "function_pointer" in kinds
+    assert "conditional" in kinds
+    assert "FUNCTION_USES_CALLBACK" in edge_types
+    assert "FUNCTION_DEPENDS_ON_CONDITION" in edge_types
+
+
+def test_parse_cache_reuses_same_source_across_tasks(monkeypatch):
+    from app.services.code_index import parser as parser_module
+
+    parser_module._parse_c_source_cached.cache_clear()
+    call_count = 0
+    original_builtin = parser_module._parse_c_source_builtin
+
+    def counted_builtin(relative_path: str, source_text: str):
+        nonlocal call_count
+        call_count += 1
+        return original_builtin(relative_path, source_text)
+
+    monkeypatch.setattr(parser_module, "_tree_sitter_file", lambda _path, _text: None)
+    monkeypatch.setattr(parser_module, "_libclang_file", lambda _path, _text: None)
+    monkeypatch.setattr(parser_module, "_parse_c_source_builtin", counted_builtin)
+
+    source = "int cached_fn(void) { return 1; }\n"
+    first = parser_module.parse_c_source("src/cache.c", source)
+    second = parser_module.parse_c_source("src/cache.c", source)
+
+    assert first.symbols[0].name == second.symbols[0].name
+    assert call_count == 1
+
+
+def test_negative_retrieval_samples_are_not_matched(db_session):
+    user = User(username="negative-user", password_hash=hash_password("pw"))
+    node = ModelNode(display_name="RAG node", model_identifier="review-model", base_url="http://model-node", is_enabled=True)
+    task = ReviewTask(
+        owner=user,
+        model_node=node,
+        input_mode="folder",
+        display_name="negative",
+        file_count=2,
+        check_types=["memory_safety"],
+    )
+    task.files.extend(
+        [
+            ReviewFile(
+                relative_path="src/target.c",
+                source_text="int safe_target(int value) { return value + 1; }\n",
+                size_bytes=48,
+            ),
+            ReviewFile(
+                relative_path="net/unrelated.c",
+                source_text="int dangerous_unrelated(void) { char buf[4]; return buf[99]; }\n",
+                size_bytes=68,
+            ),
+        ]
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    retrieved = retrieve_context_for_files(
+        db_session,
+        task,
+        [task.files[0]],
+        settings=Settings(_env_file=None, allow_insecure_defaults=True, rag_keyword_top_k=10),
+    )
+    result = evaluate_retrieval(retrieved, set(), k=10, must_not_retrieve={"net/unrelated.c:dangerous_unrelated"})
+
+    assert result.negative_hit_rate == 0
+
+
 def test_rag_evaluator_reports_recall_precision_and_mrr(db_session):
     task = _make_task()
     db_session.add(task)
@@ -340,4 +492,140 @@ def test_vector_contexts_keep_positive_similarity_candidates(db_session):
     contexts = _vector_contexts(db_session, project, task.files[0].source_text, {task.files[0].relative_path}, limit=10)
 
     assert contexts
-    assert all(context.reason == "向量相似检索" for context in contexts)
+    assert all(context.reason == "vector" for context in contexts)
+
+
+def test_keyword_search_uses_query_expansion_and_bm25(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+    project = build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+
+    expanded = expand_query_terms({"helperCopy", "MAX_PACKET_SIZE"})
+    hits = keyword_search_chunks(db_session, project, expanded, limit=10)
+
+    assert {"helpercopy", "helper", "copy", "max_packet_size", "packet", "size"} & expanded
+    assert hits
+    assert any("bm25" in hit.reason or "symbol-exact" in hit.reason for hit in hits)
+    assert any(hit.chunk.symbol_name == "helper_copy" for hit in hits)
+
+
+def test_render_rag_context_deduplicates_and_allocates_budget():
+    duplicate_low = RetrievedContext(
+        chunk_id="chunk-1",
+        evidence_id="a.c:1:5:foo",
+        file_path="a.c",
+        symbol_name="foo",
+        start_line=1,
+        end_line=5,
+        content="int foo(void) { return bar(); }",
+        reason="call:d1",
+        score=1.0,
+    )
+    duplicate_high = RetrievedContext(
+        chunk_id="chunk-1",
+        evidence_id="a.c:1:5:foo",
+        file_path="a.c",
+        symbol_name="foo",
+        start_line=1,
+        end_line=5,
+        content="int foo(void) { return bar(); }",
+        reason="call:d1",
+        score=3.0,
+    )
+    symbol_context = RetrievedContext(
+        chunk_id="chunk-2",
+        evidence_id="types.h:3:3:cfg",
+        file_path="types.h",
+        symbol_name="cfg",
+        start_line=3,
+        end_line=3,
+        content="struct cfg { int limit; };",
+        reason="symbol:function_uses_type",
+        score=2.0,
+    )
+
+    rendered, selected = render_rag_context([duplicate_low, duplicate_high, symbol_context], max_chars=1200)
+
+    assert rendered.count("[Evidence") == 2
+    assert [context.score for context in selected] == [3.0, 2.0]
+    assert "RAG Evidence Context" in rendered
+
+
+def test_gold_evaluator_aggregates_manual_fixture_metrics(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+
+    retrieved = retrieve_context_for_files(
+        db_session,
+        task,
+        [task.files[0]],
+        settings=Settings(_env_file=None, allow_insecure_defaults=True, rag_keyword_top_k=10),
+    )
+    fixture_root = Path(__file__).parent / "fixtures" / "rag_projects"
+    metadata = json.loads((fixture_root / "simple_call" / "metadata.json").read_text(encoding="utf-8"))
+    summary = evaluate_gold_cases(
+        [
+            GoldRetrievalCase(
+                name=metadata["case_id"],
+                retrieved=retrieved,
+                must_retrieve=set(metadata["must_retrieve"]),
+                must_not_retrieve=set(metadata["must_not_retrieve"]),
+            )
+        ],
+        k=10,
+    )
+
+    assert summary.case_count == 1
+    assert summary.recall_at_k > 0
+    assert 0 <= summary.precision_at_k <= 1
+    assert 0 <= summary.ndcg_at_k <= 1
+    assert 0 <= summary.token_waste_ratio <= 1
+    assert summary.negative_hit_rate == 0
+
+
+def test_extended_rag_metrics_cover_evidence_graph_findings_and_latency(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+    build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+
+    retrieved = retrieve_context_for_files(
+        db_session,
+        task,
+        [task.files[0]],
+        settings=Settings(_env_file=None, allow_insecure_defaults=True, rag_keyword_top_k=10),
+    )
+    retrieval_result = evaluate_retrieval(retrieved, {"src/helpers.c:helper_copy"}, k=10)
+    rendered, selected = render_rag_context(retrieved, max_chars=4000)
+    evidence_result = evaluate_evidence_quality(
+        {"src/helpers.c:helper_copy"},
+        selected,
+        {"E1"},
+    )
+    edges = [
+        (edge.edge_type, edge.metadata_json.get("callee_name") or edge.metadata_json.get("symbol_name", ""), target.name if target else None)
+        for edge in db_session.query(CodeEdge).all()
+        for target in [db_session.get(CodeSymbol, edge.target_id) if edge.target_id else None]
+    ]
+    graph_result = evaluate_graph_quality(
+        edges,
+        {("helper_copy", "helper_copy")},
+        {("helper_copy", "helper_copy")},
+    )
+    finding_result = evaluate_finding_quality(
+        {"memory_safety:src/helpers.c:3"},
+        {"memory_safety:src/helpers.c:3", "input_validation:src/driver.c:3"},
+    )
+    latency = measure_latency([1.0, 3.0, 2.0, 10.0, 5.0])
+
+    assert rendered
+    assert retrieval_result.ndcg_at_k > 0
+    assert evidence_result.evidence_coverage == 1.0
+    assert 0 <= evidence_result.citation_accuracy <= 1
+    assert 0 <= graph_result.call_edge_accuracy <= 1
+    assert 0 <= graph_result.declaration_definition_match_rate <= 1
+    assert finding_result.finding_precision == 1.0
+    assert finding_result.finding_recall == 0.5
+    assert latency.p95_ms >= latency.p50_ms

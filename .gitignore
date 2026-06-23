@@ -10,3 +10,4 @@ dist/
 uploads/
 *.pyc
 *.egg-info/
+outputs/*.inspect.ndjson

@@ -1,5 +1,9 @@
 {
+  "case_id": "simple_call",
   "target": "src/driver.c:driver_entry",
+  "target_file": "src/driver.c",
   "must_retrieve": ["src/helpers.c:helper_copy"],
-  "expected_edges": ["FUNCTION_CALLS_FUNCTION", "CALLSITE_CALLS_SYMBOL"]
+  "must_not_retrieve": ["net/unused.c:helper_copy"],
+  "expected_edges": ["FUNCTION_CALLS_FUNCTION", "CALLSITE_CALLS_SYMBOL"],
+  "gold_notes": "driver_entry calls helper_copy; the implementation in src/helpers.c is required evidence."
 }

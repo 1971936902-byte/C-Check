@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 
-PARSER_VERSION = "builtin-c-parser-v1"
+PARSER_VERSION = "hybrid-c-parser-v2"
 _IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
 _CONTROL_KEYWORDS = {
     "if",
@@ -28,9 +29,11 @@ _FUNCTION_DECL_RE = re.compile(
 _GLOBAL_VAR_RE = re.compile(
     rf"^\s*[A-Za-z_][A-Za-z0-9_*\s]*\s+(?P<name>{_IDENTIFIER})\s*(?:=\s*[^;]+)?;"
 )
+_FUNCTION_POINTER_RE = re.compile(rf"^\s*(?:typedef\s+)?[\w\s*]+\(\s*\*\s*(?P<name>{_IDENTIFIER})\s*\)\s*\([^;]*\)\s*;")
 _CALL_RE = re.compile(rf"\b(?P<name>{_IDENTIFIER})\s*\(")
 _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"](?P<target>[^>"]+)[>"]')
 _MACRO_RE = re.compile(rf"^\s*#\s*define\s+(?P<name>{_IDENTIFIER})\b")
+_CONDITIONAL_RE = re.compile(rf"^\s*#\s*(?P<directive>if|ifdef|ifndef|elif)\b\s*(?P<expr>.*)")
 _TYPE_RE = re.compile(rf"^\s*(?:typedef\s+)?(?:struct|enum|union)\s+(?P<name>{_IDENTIFIER})\b")
 MAX_REGEX_LINE_LENGTH = 2000
 MAX_FUNCTION_HEADER_LINES = 12
@@ -71,18 +74,27 @@ class ParsedFile:
 
 
 def parse_c_source(relative_path: str, source_text: str) -> ParsedFile:
-    tree_sitter_parsed = _tree_sitter_file(relative_path, source_text)
-    if tree_sitter_parsed is not None:
-        fallback = _parse_c_source_builtin(relative_path, source_text)
-        return ParsedFile(
-            relative_path=relative_path,
-            line_count=max(tree_sitter_parsed.line_count, fallback.line_count),
-            includes=_merge_includes(tree_sitter_parsed.includes, fallback.includes),
-            symbols=_merge_symbols(tree_sitter_parsed.symbols, fallback.symbols),
-            calls=_merge_calls(tree_sitter_parsed.calls, fallback.calls),
-        )
-    return _parse_c_source_builtin(relative_path, source_text)
+    return _parse_c_source_cached(relative_path, source_text)
 
+
+@lru_cache(maxsize=1024)
+def _parse_c_source_cached(relative_path: str, source_text: str) -> ParsedFile:
+    tree_sitter_parsed = _tree_sitter_file(relative_path, source_text)
+    libclang_parsed = _libclang_file(relative_path, source_text)
+    fallback = _parse_c_source_builtin(relative_path, source_text)
+    parsed_sources = [source for source in (tree_sitter_parsed, libclang_parsed, fallback) if source is not None]
+    if not parsed_sources:
+        return fallback
+    primary = parsed_sources[0]
+    for supplemental in parsed_sources[1:]:
+        primary = ParsedFile(
+            relative_path=relative_path,
+            line_count=max(primary.line_count, supplemental.line_count),
+            includes=_merge_includes(primary.includes, supplemental.includes),
+            symbols=_merge_symbols(primary.symbols, supplemental.symbols),
+            calls=_merge_calls(primary.calls, supplemental.calls),
+        )
+    return primary
 
 def _parse_c_source_builtin(relative_path: str, source_text: str) -> ParsedFile:
     lines = source_text.splitlines()
@@ -91,7 +103,9 @@ def _parse_c_source_builtin(relative_path: str, source_text: str) -> ParsedFile:
     calls: list[ParsedCall] = []
 
     symbols.extend(_parse_macro_symbols(lines))
+    symbols.extend(_parse_conditional_symbols(lines))
     symbols.extend(_parse_type_symbols(lines))
+    symbols.extend(_parse_function_pointer_symbols(lines))
     symbols.extend(_parse_declaration_symbols(lines))
     symbols.extend(_parse_global_variable_symbols(lines))
     function_symbols, function_calls = _parse_functions(lines)
@@ -135,6 +149,34 @@ def _parse_macro_symbols(lines: list[str]) -> list[ParsedSymbol]:
     return symbols
 
 
+def _parse_conditional_symbols(lines: list[str]) -> list[ParsedSymbol]:
+    symbols: list[ParsedSymbol] = []
+    for line_number, line in enumerate(lines, start=1):
+        match = _CONDITIONAL_RE.match(line)
+        if not match:
+            continue
+        expr = match.group("expr").strip()
+        name = _conditional_name(match.group("directive"), expr, line_number)
+        symbols.append(
+            ParsedSymbol(
+                kind="conditional",
+                name=name,
+                signature=line.strip(),
+                start_line=line_number,
+                end_line=line_number,
+                confidence=0.55,
+            )
+        )
+    return symbols
+
+
+def _conditional_name(directive: str, expr: str, line_number: int) -> str:
+    identifier_match = re.search(_IDENTIFIER, expr)
+    if identifier_match:
+        return f"{directive}_{identifier_match.group(0)}"
+    return f"{directive}_line_{line_number}"
+
+
 def _parse_type_symbols(lines: list[str]) -> list[ParsedSymbol]:
     symbols: list[ParsedSymbol] = []
     for line_number, line in enumerate(lines, start=1):
@@ -150,6 +192,28 @@ def _parse_type_symbols(lines: list[str]) -> list[ParsedSymbol]:
                     confidence=0.65,
                 )
             )
+    return symbols
+
+
+def _parse_function_pointer_symbols(lines: list[str]) -> list[ParsedSymbol]:
+    symbols: list[ParsedSymbol] = []
+    for line_number, line in enumerate(lines, start=1):
+        stripped = _strip_line_comment(line).strip()
+        if len(stripped) > MAX_REGEX_LINE_LENGTH:
+            continue
+        match = _FUNCTION_POINTER_RE.match(stripped)
+        if not match:
+            continue
+        symbols.append(
+            ParsedSymbol(
+                kind="function_pointer",
+                name=match.group("name"),
+                signature=stripped,
+                start_line=line_number,
+                end_line=line_number,
+                confidence=0.72,
+            )
+        )
     return symbols
 
 
@@ -336,5 +400,14 @@ def _tree_sitter_file(relative_path: str, source_text: str) -> ParsedFile | None
         from app.services.code_index.tree_sitter_c import parse_with_tree_sitter
 
         return parse_with_tree_sitter(relative_path, source_text)
+    except Exception:
+        return None
+
+
+def _libclang_file(relative_path: str, source_text: str) -> ParsedFile | None:
+    try:
+        from app.services.code_index.clangd import parse_with_libclang
+
+        return parse_with_libclang(relative_path, source_text)
     except Exception:
         return None

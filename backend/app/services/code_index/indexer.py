@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.db.models import CodeFile, CodeProject, CodeSymbol, ReviewFile, ReviewTask
 from app.services.code_index.chunker import build_chunks_for_file
+from app.services.code_index.clangd import probe_clangd
 from app.services.code_index.embeddings import sync_project_embeddings, upsert_project_embeddings_to_qdrant_sync
 from app.services.code_index.graph_builder import build_include_edges, build_symbol_edges, build_usage_edges
 from app.services.code_index.parser import PARSER_VERSION, parse_c_source
@@ -117,6 +118,7 @@ def build_code_index(
         "qdrant_points": qdrant_points,
         "parser": PARSER_VERSION,
         "tree_sitter": probe_tree_sitter_c().__dict__,
+        "clang": probe_clangd().__dict__,
     }
     if qdrant_error:
         stats_json["qdrant_error"] = qdrant_error

@@ -59,18 +59,24 @@ _HIGH_RISK_IDENTIFIERS = {
     "unlock",
 }
 _SYMBOL_KIND_WEIGHT = {
-    "function": 1.0,
+    "function": 1.25,
     "function_window": 0.9,
-    "declaration": 0.72,
-    "callsite": 0.68,
-    "macro": 0.6,
-    "type": 0.56,
-    "struct": 0.56,
-    "typedef": 0.56,
-    "enum": 0.56,
-    "global_variable": 0.45,
-    "file_summary": 0.35,
+    "declaration": 0.92,
+    "callsite": 0.45,
+    "macro": 0.82,
+    "type": 0.66,
+    "struct": 0.66,
+    "typedef": 0.66,
+    "enum": 0.66,
+    "global_variable": 0.52,
+    "file_summary": 0.25,
 }
+REASON_CALL = "call"
+REASON_INCLUDE = "include"
+REASON_UPSTREAM = "upstream"
+REASON_SYMBOL = "symbol"
+REASON_KEYWORD = "keyword"
+REASON_VECTOR = "vector"
 
 
 @dataclass(frozen=True)
@@ -116,11 +122,11 @@ def retrieve_context_for_files(
         for group in candidate_groups:
             for context in group:
                 current = contexts.get(context.evidence_id)
-                if current is None or context.score > current.score:
+                if current is None or _context_merge_key(context) > _context_merge_key(current):
                     contexts[context.evidence_id] = context
 
     ranked = _rerank_contexts(db, project, list(contexts.values()), target_paths, source_text_by_path)
-    return ranked[: settings.rag_keyword_top_k]
+    return _prune_ranked_contexts(ranked, limit=settings.rag_keyword_top_k)
 
 
 def _rerank_contexts(
@@ -141,8 +147,19 @@ def _rerank_contexts(
         symbol_boost = _SYMBOL_KIND_WEIGHT.get(chunk_kind, 0.4)
         file_boost = _file_relatedness_boost(context.file_path, target_paths)
         risk_boost = _risk_api_boost(context.content, source_identifiers, source_has_high_risk_api)
+        identifier_boost = _identifier_overlap_boost(context.content, source_identifiers)
+        distance_penalty = _call_distance_penalty(context.reason)
         noise_penalty = _noise_penalty(context.symbol_name, chunk_kind)
-        score = context.score + relation_boost + symbol_boost + file_boost + risk_boost - noise_penalty
+        score = (
+            context.score
+            + relation_boost
+            + symbol_boost
+            + file_boost
+            + risk_boost
+            + identifier_boost
+            - distance_penalty
+            - noise_penalty
+        )
         rescored.append(
             RetrievedContext(
                 chunk_id=context.chunk_id,
@@ -157,6 +174,71 @@ def _rerank_contexts(
             )
         )
     return sorted(rescored, key=attrgetter("score"), reverse=True)
+
+
+def _prune_ranked_contexts(contexts: list[RetrievedContext], *, limit: int) -> list[RetrievedContext]:
+    if not contexts:
+        return []
+    hard_limit = max(2, min(limit, 4))
+    bucket_caps = {
+        REASON_CALL: 3,
+        REASON_SYMBOL: 2,
+        REASON_INCLUDE: 1,
+        REASON_UPSTREAM: 1,
+        REASON_KEYWORD: 1,
+        REASON_VECTOR: 1,
+    }
+    selected: list[RetrievedContext] = []
+    bucket_counts: dict[str, int] = {}
+
+    strong_buckets = {REASON_CALL, REASON_SYMBOL}
+    for context in contexts:
+        bucket = _reason_bucket(context.reason)
+        if bucket not in strong_buckets:
+            continue
+        if bucket_counts.get(bucket, 0) >= bucket_caps.get(bucket, 1):
+            continue
+        selected.append(context)
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        if len(selected) >= hard_limit:
+            return selected
+
+    strong_symbols = {context.symbol_name for context in selected if context.symbol_name}
+    top_score = contexts[0].score
+    weak_score_floor = top_score - 2.2
+    for context in contexts:
+        if context in selected:
+            continue
+        bucket = _reason_bucket(context.reason)
+        if bucket in strong_buckets:
+            continue
+        if bucket == REASON_INCLUDE and selected:
+            continue
+        if context.symbol_name and context.symbol_name in strong_symbols:
+            continue
+        if bucket == REASON_VECTOR and selected:
+            continue
+        if bucket in {REASON_KEYWORD, REASON_VECTOR} and context.score < weak_score_floor:
+            continue
+        if bucket_counts.get(bucket, 0) >= bucket_caps.get(bucket, 1):
+            continue
+        selected.append(context)
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        if len(selected) >= hard_limit:
+            break
+    return selected
+
+
+def _context_merge_key(context: RetrievedContext) -> tuple[int, float]:
+    priority = {
+        REASON_CALL: 6,
+        REASON_SYMBOL: 5,
+        REASON_INCLUDE: 4,
+        REASON_UPSTREAM: 3,
+        REASON_KEYWORD: 2,
+        REASON_VECTOR: 1,
+    }.get(_reason_bucket(context.reason), 0)
+    return priority, context.score
 
 
 def _direct_call_contexts(
@@ -185,7 +267,7 @@ def _direct_call_contexts(
     for edge_depth, edge in all_edges:
         chunk = chunks_by_symbol.get(edge.target_id or "")
         if chunk:
-            contexts.append(_context_from_chunk(chunk, "调用关系", 2.5 + edge.confidence - (0.1 * (edge_depth - 1))))
+            contexts.append(_context_from_chunk(chunk, f"{REASON_CALL}:d{edge_depth}", 2.5 + edge.confidence - (0.25 * (edge_depth - 1))))
     return contexts
 
 
@@ -236,7 +318,7 @@ def _include_contexts(db: Session, project: CodeProject, relative_path: str) -> 
             )
         )
         if chunk:
-            contexts.append(_context_from_chunk(chunk, "include关系", 1.8))
+            contexts.append(_context_from_chunk(chunk, REASON_INCLUDE, 1.8))
     return contexts
 
 
@@ -257,7 +339,7 @@ def _upstream_contexts(
         )
     ).all()
     return [
-        _context_from_chunk(chunk, "上游调用者", 1.8 + edge.confidence)
+        _context_from_chunk(chunk, REASON_UPSTREAM, 1.8 + edge.confidence)
         for edge in edges
         if (chunk := chunks_by_symbol.get(edge.source_id))
     ]
@@ -289,7 +371,7 @@ def _usage_contexts(
         )
     ).all()
     return [
-        _context_from_chunk(chunk, "声明/宏/类型/全局变量", 1.5 + edge.confidence)
+        _context_from_chunk(chunk, f"{REASON_SYMBOL}:{edge.edge_type.lower()}", 1.5 + edge.confidence)
         for edge in edges
         if (chunk := chunks_by_symbol.get(edge.target_id or ""))
     ]
@@ -306,9 +388,9 @@ def _keyword_contexts(
     contexts: list[RetrievedContext] = []
     for hit in keyword_search_chunks(db, project, identifiers, limit=limit):
         chunk = hit.chunk
-        if chunk.file and chunk.file.relative_path in target_paths and chunk.chunk_kind == "function":
+        if chunk.file and chunk.file.relative_path in target_paths:
             continue
-        contexts.append(_context_from_chunk(chunk, f"关键词检索:{hit.reason}", 0.4 + hit.score))
+        contexts.append(_context_from_chunk(chunk, f"{REASON_KEYWORD}:{hit.reason}", 0.4 + hit.score))
     return sorted(contexts, key=attrgetter("score"), reverse=True)[:limit]
 
 
@@ -321,15 +403,18 @@ def _vector_contexts(
     limit: int,
 ) -> list[RetrievedContext]:
     query_vector = embed_text(source_text)
+    source_identifiers = _identifiers(source_text)
     scored: list[tuple[float, CodeChunk]] = []
     for chunk in db.scalars(select(CodeChunk).where(CodeChunk.project_id == project.id)).all():
         if chunk.file.relative_path in target_paths and chunk.chunk_kind in {"function", "file_summary"}:
+            continue
+        if source_identifiers and not (_identifiers(chunk.content) & source_identifiers):
             continue
         score = _cosine_similarity(query_vector, embed_text(chunk.content))
         if score > 0:
             scored.append((score, chunk))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [_context_from_chunk(chunk, "向量相似检索", 0.5 + score) for score, chunk in scored[:limit]]
+    return [_context_from_chunk(chunk, REASON_VECTOR, 0.5 + score) for score, chunk in scored[:limit]]
 
 
 def _chunks_by_symbol(db: Session, project: CodeProject) -> dict[str, CodeChunk]:
@@ -351,29 +436,35 @@ def _chunks_by_id(db: Session, project: CodeProject) -> dict[str, CodeChunk]:
 
 
 def _relation_boost(reason: str) -> float:
-    if reason == "调用关系":
+    bucket = _reason_bucket(reason)
+    if bucket == REASON_CALL:
         return 3.0
-    if reason == "include关系":
-        return 1.4
-    if reason == "声明/宏/类型/全局变量":
-        return 1.2
-    if reason == "上游调用者":
+    if bucket == REASON_SYMBOL:
+        return 1.65
+    if bucket == REASON_INCLUDE:
+        return 0.95
+    if bucket == REASON_UPSTREAM:
         return 0.9
-    if reason.startswith("关键词检索"):
-        return 0.2
-    if reason == "向量相似检索":
+    if bucket == REASON_KEYWORD:
+        return 0.1
+    if bucket == REASON_VECTOR:
         return 0.1
     return 0.0
 
 
 def _kind_from_reason(reason: str) -> str:
-    if reason == "include关系":
+    bucket = _reason_bucket(reason)
+    if bucket == REASON_INCLUDE:
         return "file_summary"
-    if reason == "调用关系":
+    if bucket == REASON_CALL:
         return "function"
-    if reason == "向量相似检索":
+    if bucket == REASON_VECTOR:
         return "function"
     return "symbol"
+
+
+def _reason_bucket(reason: str) -> str:
+    return reason.split(":", 1)[0]
 
 
 def _file_relatedness_boost(file_path: str, target_paths: set[str]) -> float:
@@ -402,6 +493,20 @@ def _risk_api_boost(content: str, source_identifiers: set[str], source_has_high_
     risk_hits = identifiers & _HIGH_RISK_IDENTIFIERS
     source_overlap = identifiers & source_identifiers & _HIGH_RISK_IDENTIFIERS
     return (0.35 * len(risk_hits)) + (0.55 * len(source_overlap)) + (0.25 if source_has_high_risk_api and risk_hits else 0.0)
+
+
+def _identifier_overlap_boost(content: str, source_identifiers: set[str]) -> float:
+    if not source_identifiers:
+        return 0.0
+    overlap = _identifiers(content) & source_identifiers
+    return min(1.2, 0.12 * len(overlap))
+
+
+def _call_distance_penalty(reason: str) -> float:
+    match = re.search(r":d(\d+)", reason)
+    if not match:
+        return 0.0
+    return max(0, int(match.group(1)) - 1) * 0.45
 
 
 def _noise_penalty(symbol_name: str | None, chunk_kind: str) -> float:

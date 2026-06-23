@@ -16,7 +16,18 @@ def build_chunks_for_file(
     chunks: list[CodeChunk] = [_file_summary_chunk(project, code_file, review_file, parsed)]
     symbol_by_name = {symbol.name: symbol for symbol in symbols}
     for symbol in symbols:
-        if symbol.kind in {"function", "macro", "type", "struct", "typedef", "enum", "declaration", "global_variable"}:
+        if symbol.kind in {
+            "function",
+            "macro",
+            "conditional",
+            "type",
+            "struct",
+            "typedef",
+            "enum",
+            "declaration",
+            "global_variable",
+            "function_pointer",
+        }:
             chunks.append(_symbol_chunk(project, code_file, symbol, review_file.source_text, parsed))
             if symbol.kind == "function" and symbol.end_line - symbol.start_line > 80:
                 chunks.extend(_sliding_window_chunks(project, code_file, symbol, review_file.source_text))
@@ -28,7 +39,11 @@ def build_chunks_for_file(
 
 def _file_summary_chunk(project: CodeProject, code_file: CodeFile, source: ReviewFile, parsed: ParsedFile) -> CodeChunk:
     functions = [symbol.name for symbol in parsed.symbols if symbol.kind == "function"][:30]
-    declarations = [symbol.name for symbol in parsed.symbols if symbol.kind in {"declaration", "macro", "type", "struct", "typedef", "enum"}][:30]
+    declarations = [
+        symbol.name
+        for symbol in parsed.symbols
+        if symbol.kind in {"declaration", "macro", "conditional", "type", "struct", "typedef", "enum", "function_pointer"}
+    ][:30]
     includes = [include.target for include in parsed.includes][:30]
     content = "\n".join(
         [
@@ -78,6 +93,16 @@ def _symbol_chunk(
         for symbol_name in parsed.symbols
         if symbol_name.kind == "global_variable" and symbol_name.name in content and symbol_name.name != symbol.name
     )
+    used_callbacks = sorted(
+        symbol_name.name
+        for symbol_name in parsed.symbols
+        if symbol_name.kind == "function_pointer" and symbol_name.name in content and symbol_name.name != symbol.name
+    )
+    used_conditionals = sorted(
+        symbol_name.name
+        for symbol_name in parsed.symbols
+        if symbol_name.kind == "conditional" and symbol_name.name.split("_", 1)[-1] in content and symbol_name.name != symbol.name
+    )
     return _chunk(
         project,
         code_file,
@@ -93,6 +118,8 @@ def _symbol_chunk(
             "used_macros": used_macros,
             "used_types": used_types,
             "used_globals": used_globals,
+            "used_callbacks": used_callbacks,
+            "used_conditionals": used_conditionals,
             "source_tool": symbol.source_tool,
         },
     )

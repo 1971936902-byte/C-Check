@@ -1,5 +1,9 @@
 {
+  "case_id": "macro_limit",
   "target": "src/copy.c:copy_payload",
+  "target_file": "src/copy.c",
   "must_retrieve": ["include/config.h:MAX_PACKET_SIZE"],
-  "expected_edges": ["FUNCTION_USES_MACRO"]
+  "must_not_retrieve": ["include/unused.h:MAX_PACKET_SIZE"],
+  "expected_edges": ["FUNCTION_USES_MACRO"],
+  "gold_notes": "copy_payload must retrieve the packet size macro that bounds the copy operation."
 }
