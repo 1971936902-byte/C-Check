@@ -71,6 +71,7 @@ def parse_c_source(relative_path: str, source_text: str) -> ParsedFile:
     function_symbols, function_calls = _parse_functions(lines)
     symbols.extend(function_symbols)
     calls.extend(function_calls)
+    symbols = _merge_symbols(symbols, _ctags_symbols(relative_path, source_text))
 
     return ParsedFile(
         relative_path=relative_path,
@@ -115,7 +116,7 @@ def _parse_type_symbols(lines: list[str]) -> list[ParsedSymbol]:
         if match:
             symbols.append(
                 ParsedSymbol(
-                    kind="type",
+                    kind="struct" if line.lstrip().startswith("struct") else "type",
                     name=match.group("name"),
                     signature=line.strip(),
                     start_line=line_number,
@@ -180,3 +181,24 @@ def _find_balanced_block_end(lines: list[str], start_index: int) -> int:
 
 def _strip_line_comment(line: str) -> str:
     return line.split("//", 1)[0]
+
+
+def _ctags_symbols(relative_path: str, source_text: str) -> list[ParsedSymbol]:
+    try:
+        from app.services.code_index.ctags import extract_ctags_symbols
+
+        return extract_ctags_symbols(relative_path, source_text)
+    except Exception:
+        return []
+
+
+def _merge_symbols(primary: list[ParsedSymbol], supplemental: list[ParsedSymbol]) -> list[ParsedSymbol]:
+    merged = list(primary)
+    seen = {(symbol.kind, symbol.name, symbol.start_line) for symbol in merged}
+    for symbol in supplemental:
+        key = (symbol.kind, symbol.name, symbol.start_line)
+        if key in seen:
+            continue
+        merged.append(symbol)
+        seen.add(key)
+    return merged

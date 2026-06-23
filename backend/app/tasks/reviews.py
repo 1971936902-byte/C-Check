@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from time import monotonic
 
 from app.core.config import get_settings
-from app.db.models import Report, ReviewTask, TaskStatus
+from app.db.models import CodeEdge, CodeSymbol, Report, ReviewEvidence, ReviewTask, TaskStatus
 from app.db.session import SessionLocal
 from app.schemas.model_response import CodeLine, CodeLineKind, ModelReviewResponse
 from app.services.model_router import ModelInvocationError, invoke_selected_model, truncate_model_log
@@ -150,8 +150,56 @@ def _enrich_missing_code_snippets(task: ReviewTask, result: ModelReviewResponse)
     return result.model_copy(update={"findings": enriched_findings})
 
 
+def _valid_evidence_keys(task: ReviewTask) -> set[str]:
+    return {evidence.evidence_key for context in task.review_contexts for evidence in context.evidence_items}
+
+
+def _call_chain_exists(task: ReviewTask, call_chain: list[str]) -> bool:
+    if len(call_chain) < 2 or task.code_project is None:
+        return True
+    symbols_by_name: dict[str, list[CodeSymbol]] = {}
+    for symbol in task.code_project.symbols:
+        symbols_by_name.setdefault(symbol.name, []).append(symbol)
+    for caller, callee in zip(call_chain, call_chain[1:]):
+        caller_ids = {symbol.id for symbol in symbols_by_name.get(caller, [])}
+        callee_ids = {symbol.id for symbol in symbols_by_name.get(callee, [])}
+        if not caller_ids or not callee_ids:
+            return False
+        if not any(
+            edge.edge_type == "FUNCTION_CALLS_FUNCTION"
+            and edge.source_id in caller_ids
+            and edge.target_id in callee_ids
+            for edge in task.code_project.edges
+        ):
+            return False
+    return True
+
+
+def _validate_finding_evidence(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
+    valid_keys = _valid_evidence_keys(task)
+    if not valid_keys and task.code_project is None:
+        return result
+    changed = False
+    findings = []
+    for finding in result.findings:
+        updates = {}
+        if finding.evidence_ids:
+            evidence_ids = [evidence_id for evidence_id in finding.evidence_ids if evidence_id in valid_keys]
+            if evidence_ids != finding.evidence_ids:
+                updates["evidence_ids"] = evidence_ids
+                changed = True
+        if finding.call_chain and not _call_chain_exists(task, finding.call_chain):
+            updates["call_chain"] = []
+            changed = True
+        findings.append(finding.model_copy(update=updates) if updates else finding)
+    return result.model_copy(update={"findings": findings}) if changed else result
+
+
 def _postprocess_review_result(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
-    return _enrich_missing_code_snippets(task, _filter_unanchored_findings(task, result))
+    return _validate_finding_evidence(
+        task,
+        _enrich_missing_code_snippets(task, _filter_unanchored_findings(task, result)),
+    )
 
 
 def _retry_instruction(attempt: int, exc: Exception) -> str:

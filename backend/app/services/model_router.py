@@ -44,11 +44,13 @@ Return exactly one compact JSON object. No Markdown.
 Top-level keys: summary, score, findings.
 Use Chinese. Keep summary under 80 Chinese chars.
 Return at most 3 findings for this request, only concrete C defects.
-Each finding uses: severity, category, title, description, file_path, line, remediation, code_snippet, fixed_snippet.
+Each finding uses: severity, category, title, description, file_path, line, evidence_ids, call_chain, confidence, remediation, code_snippet, fixed_snippet.
 Keep title under 40 chars. Keep description and remediation under 120 Chinese chars each.
 The line value must point to the exact visible statement or declaration causing the issue.
 Do not use pure data initializer rows, lookup tables, font/bitmap tables, or comments as finding locations.
 Use code_snippet/fixed_snippet as [] unless one line is essential; then include at most one line.
+Use evidence_ids as [] unless Evidence E1/E2 etc directly supports the finding.
+Use call_chain as [] unless the finding depends on an inter-function call path.
 Use lowercase enum values exactly. Use null for line only when no precise line exists.
 """
 
@@ -706,6 +708,19 @@ def _normalize_model_contract(value: Any) -> Any:
                     line = {**line, "line": fallback_line}
                 normalized_lines.append(line)
             finding[snippet_key] = normalized_lines
+        if not isinstance(finding.get("evidence_ids"), list):
+            finding["evidence_ids"] = []
+        else:
+            finding["evidence_ids"] = [
+                item for item in finding["evidence_ids"] if isinstance(item, str) and item.startswith("E")
+            ][:12]
+        if not isinstance(finding.get("call_chain"), list):
+            finding["call_chain"] = []
+        else:
+            finding["call_chain"] = [item for item in finding["call_chain"] if isinstance(item, str) and item][:16]
+        confidence = finding.get("confidence")
+        if confidence is not None and not isinstance(confidence, (int, float)):
+            finding["confidence"] = None
     return value
 
 

@@ -66,13 +66,22 @@ def render_markdown(report: Report) -> str:
                 "",
                 f"- Category: `{finding['category']}`",
                 f"- Location: `{location}`",
-                "",
+            "",
                 finding["description"],
                 "",
-                f"**Remediation:** {finding['remediation']}",
+            f"**Remediation:** {finding['remediation']}",
                 "",
             ]
         )
+        evidence_ids = finding.get("evidence_ids") or []
+        call_chain = finding.get("call_chain") or []
+        confidence = finding.get("confidence")
+        if evidence_ids:
+            lines.extend([f"- Evidence: `{', '.join(evidence_ids)}`", ""])
+        if call_chain:
+            lines.extend([f"- Call chain: `{ ' -> '.join(call_chain) }`", ""])
+        if confidence is not None:
+            lines.extend([f"- Confidence: `{confidence:.2f}`", ""])
         for title, snippet in (
             ("Problematic code", finding.get("code_snippet", [])),
             ("Suggested code", finding.get("fixed_snippet", [])),

@@ -154,6 +154,7 @@ class ReviewTask(TimestampMixin, Base):
     files: Mapped[list[ReviewFile]] = relationship(back_populates="task", cascade="all, delete-orphan")
     report: Mapped[Report | None] = relationship(back_populates="task", cascade="all, delete-orphan")
     code_project: Mapped[CodeProject | None] = relationship(back_populates="task", cascade="all, delete-orphan")
+    review_contexts: Mapped[list[ReviewContext]] = relationship(back_populates="task", cascade="all, delete-orphan")
 
     @property
     def report_id(self) -> str | None:
@@ -318,3 +319,47 @@ class CodeChunk(TimestampMixin, Base):
     project: Mapped[CodeProject] = relationship(back_populates="chunks")
     file: Mapped[CodeFile] = relationship(back_populates="chunks")
     symbol: Mapped[CodeSymbol | None] = relationship(back_populates="chunks")
+
+
+class ReviewContext(TimestampMixin, Base):
+    __tablename__ = "review_contexts"
+    __table_args__ = (
+        Index("ix_review_contexts_task_id", "task_id"),
+        Index("ix_review_contexts_project_id", "project_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    task_id: Mapped[str] = mapped_column(ForeignKey("review_tasks.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("code_projects.id", ondelete="SET NULL"))
+    context_text: Mapped[str] = mapped_column(Text().with_variant(mysql.LONGTEXT(), "mysql"), nullable=False)
+    token_estimate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    task: Mapped[ReviewTask] = relationship(back_populates="review_contexts")
+    evidence_items: Mapped[list[ReviewEvidence]] = relationship(
+        back_populates="context", cascade="all, delete-orphan"
+    )
+
+
+class ReviewEvidence(TimestampMixin, Base):
+    __tablename__ = "review_evidence"
+    __table_args__ = (
+        Index("ix_review_evidence_context_id", "context_id"),
+        Index("ix_review_evidence_task_key", "task_id", "evidence_key"),
+        Index("ix_review_evidence_chunk_id", "chunk_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    task_id: Mapped[str] = mapped_column(ForeignKey("review_tasks.id", ondelete="CASCADE"), nullable=False)
+    context_id: Mapped[str] = mapped_column(ForeignKey("review_contexts.id", ondelete="CASCADE"), nullable=False)
+    chunk_id: Mapped[str | None] = mapped_column(ForeignKey("code_chunks.id", ondelete="SET NULL"))
+    evidence_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    file_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    symbol_name: Mapped[str | None] = mapped_column(String(255))
+    start_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(128), nullable=False)
+    score: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    context: Mapped[ReviewContext] = relationship(back_populates="evidence_items")

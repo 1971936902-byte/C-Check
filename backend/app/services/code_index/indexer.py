@@ -7,8 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import CodeChunk, CodeEdge, CodeFile, CodeProject, CodeSymbol, ReviewFile, ReviewTask
+from app.db.models import CodeEdge, CodeFile, CodeProject, CodeSymbol, ReviewFile, ReviewTask
+from app.services.code_index.chunker import build_chunks_for_file
 from app.services.code_index.parser import PARSER_VERSION, parse_c_source
+from app.services.code_index.tree_sitter_c import probe_tree_sitter_c
 
 
 def build_code_index(
@@ -36,7 +38,7 @@ def build_code_index(
     db.add(project)
     db.flush()
 
-    parsed_by_file: dict[str, tuple[ReviewFile, CodeFile, object]] = {}
+    parsed_by_file: dict[str, tuple[ReviewFile, CodeFile, object, list[CodeSymbol]]] = {}
     symbol_by_file_and_name: dict[tuple[str, str], CodeSymbol] = {}
     symbols_by_name: dict[str, list[CodeSymbol]] = defaultdict(list)
     symbol_count = 0
@@ -56,7 +58,7 @@ def build_code_index(
         )
         db.add(code_file)
         db.flush()
-        parsed_by_file[review_file.relative_path] = (review_file, code_file, parsed)
+        file_symbols: list[CodeSymbol] = []
         for parsed_symbol in parsed.symbols:
             symbol = CodeSymbol(
                 project=project,
@@ -72,16 +74,17 @@ def build_code_index(
             )
             db.add(symbol)
             db.flush()
+            file_symbols.append(symbol)
             symbol_count += 1
             symbol_by_file_and_name[(review_file.relative_path, parsed_symbol.name)] = symbol
             symbols_by_name[parsed_symbol.name].append(symbol)
-            if parsed_symbol.kind in {"function", "macro", "type"}:
-                chunk = _make_chunk(project, code_file, symbol, review_file.source_text)
-                db.add(chunk)
-                chunk_count += 1
+        parsed_by_file[review_file.relative_path] = (review_file, code_file, parsed, file_symbols)
+        for chunk in build_chunks_for_file(project, code_file, review_file, parsed, file_symbols):
+            db.add(chunk)
+            chunk_count += 1
 
     db.flush()
-    for review_file, code_file, parsed in parsed_by_file.values():
+    for review_file, code_file, parsed, _file_symbols in parsed_by_file.values():
         for include in parsed.includes:
             db.add(
                 CodeEdge(
@@ -138,6 +141,7 @@ def build_code_index(
         "chunks": chunk_count,
         "edges": edge_count,
         "parser": PARSER_VERSION,
+        "tree_sitter": probe_tree_sitter_c().__dict__,
     }
     db.flush()
     return project
@@ -148,26 +152,6 @@ def load_or_build_code_index(db: Session, task: ReviewTask, *, settings: Setting
     if project:
         task.code_project = project
     return build_code_index(db, task, settings=settings)
-
-
-def _make_chunk(project: CodeProject, code_file: CodeFile, symbol: CodeSymbol, source_text: str) -> CodeChunk:
-    lines = source_text.splitlines()
-    content = "\n".join(lines[symbol.start_line - 1 : symbol.end_line])
-    if not content:
-        content = symbol.signature or symbol.name
-    return CodeChunk(
-        project=project,
-        file=code_file,
-        symbol=symbol,
-        chunk_kind=symbol.kind,
-        symbol_name=symbol.name,
-        start_line=symbol.start_line,
-        end_line=symbol.end_line,
-        content=content,
-        content_hash=_hash_text(content),
-        token_estimate=max(1, len(content) // 4),
-        metadata_json={"source_tool": symbol.source_tool},
-    )
 
 
 def _task_source_hash(files: list[ReviewFile]) -> str:
