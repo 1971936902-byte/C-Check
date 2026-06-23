@@ -1,0 +1,5 @@
+{
+  "target": "src/copy.c:copy_payload",
+  "must_retrieve": ["include/config.h:MAX_PACKET_SIZE"],
+  "expected_edges": ["FUNCTION_USES_MACRO"]
+}

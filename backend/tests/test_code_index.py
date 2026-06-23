@@ -2,12 +2,15 @@ import asyncio
 
 from app.core.config import Settings
 from app.core.security import hash_password
-from app.db.models import CodeChunk, CodeEdge, CodeProject, CodeSymbol, ModelNode, ReviewContext, ReviewFile, ReviewTask, User
+from app.db.models import CodeChunk, CodeEdge, CodeEmbedding, CodeProject, CodeSymbol, ModelNode, ReviewContext, ReviewFile, ReviewTask, User
 from app.schemas.model_response import FindingCategory, FindingSeverity, ReviewFinding
 from app.schemas.model_response import ModelReviewResponse
 from app.services.code_index.context_builder import build_rag_context
+from app.services.code_index.evaluator import evaluate_retrieval
 from app.services.code_index.indexer import build_code_index
 from app.services.code_index.parser import parse_c_source
+from app.services.code_index.planner import plan_review_units
+from app.services.code_index.retriever import retrieve_context_for_files
 from app.services.model_router import invoke_selected_model
 
 
@@ -24,7 +27,7 @@ def _make_task() -> ReviewTask:
         model_node=node,
         input_mode="folder",
         display_name="driver",
-        file_count=2,
+        file_count=4,
         check_types=["memory_safety"],
     )
     task.files.extend(
@@ -33,11 +36,23 @@ def _make_task() -> ReviewTask:
                 relative_path="src/driver.c",
                 source_text=(
                     '#include "helpers.h"\n'
+                    '#include "config.h"\n'
                     "int driver_entry(int value) {\n"
+                    "    if (value > MAX_PACKET_SIZE) return -1;\n"
                     "    return helper_copy(value);\n"
                     "}\n"
                 ),
                 size_bytes=88,
+            ),
+            ReviewFile(
+                relative_path="include/helpers.h",
+                source_text="int helper_copy(int value);\n",
+                size_bytes=24,
+            ),
+            ReviewFile(
+                relative_path="include/config.h",
+                source_text="#define MAX_PACKET_SIZE 64\n",
+                size_bytes=27,
             ),
             ReviewFile(
                 relative_path="src/helpers.c",
@@ -76,9 +91,9 @@ def test_build_code_index_persists_graph_entities(db_session):
     db_session.commit()
 
     assert db_session.query(CodeProject).count() == 1
-    assert project.stats_json["files"] == 2
+    assert project.stats_json["files"] == 4
     assert db_session.query(CodeSymbol).filter_by(name="helper_copy", kind="function").one()
-    assert db_session.query(CodeChunk).filter_by(chunk_kind="file_summary").count() == 2
+    assert db_session.query(CodeChunk).filter_by(chunk_kind="file_summary").count() == 4
     assert db_session.query(CodeChunk).filter_by(chunk_kind="callsite").count() >= 1
     call_edge = db_session.query(CodeEdge).filter_by(edge_type="FUNCTION_CALLS_FUNCTION").one()
     assert call_edge.metadata_json["callee_name"] == "helper_copy"
@@ -111,7 +126,7 @@ def test_invoke_selected_model_adds_rag_context_to_prompt(monkeypatch, db_sessio
 
     async def fake_invoke_model(*, prompt, files, **_kwargs):
         captured_prompts.append(prompt)
-        assert len(files) == 2
+        assert len(files) == 4
         return ModelReviewResponse(summary="ok", score=100, findings=[])
 
     monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
@@ -180,3 +195,40 @@ def test_postprocess_review_result_removes_invalid_evidence_and_call_chain(db_se
 
     assert postprocessed.findings[0].evidence_ids == ["E1"]
     assert postprocessed.findings[0].call_chain == []
+
+
+def test_code_index_builds_extended_edges_embeddings_and_review_units(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+
+    project = build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+
+    edge_types = {edge.edge_type for edge in db_session.query(CodeEdge).all()}
+    assert "CALLSITE_CALLS_SYMBOL" in edge_types
+    assert "SYMBOL_DECLARED_IN" in edge_types
+    assert "SYMBOL_DEFINED_IN" in edge_types
+    assert "FUNCTION_USES_MACRO" in edge_types
+    assert db_session.query(CodeEmbedding).count() >= db_session.query(CodeChunk).count()
+    units = plan_review_units(project)
+    assert any(unit.unit_type == "function" and unit.symbol_name == "driver_entry" for unit in units)
+    assert any(unit.unit_type == "callsite" for unit in units)
+
+
+def test_rag_evaluator_reports_recall_precision_and_mrr(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+
+    retrieved = retrieve_context_for_files(
+        db_session,
+        task,
+        [task.files[0]],
+        settings=Settings(_env_file=None, allow_insecure_defaults=True, rag_keyword_top_k=10),
+    )
+    result = evaluate_retrieval(retrieved, {"helper_copy"}, k=10)
+
+    assert result.recall_at_k > 0
+    assert result.precision_at_k > 0
+    assert result.mrr > 0
+    assert 0 <= result.token_waste_ratio <= 1

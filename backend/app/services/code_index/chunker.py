@@ -18,6 +18,8 @@ def build_chunks_for_file(
     for symbol in symbols:
         if symbol.kind in {"function", "macro", "type", "struct", "typedef", "enum", "declaration", "global_variable"}:
             chunks.append(_symbol_chunk(project, code_file, symbol, review_file.source_text, parsed))
+            if symbol.kind == "function" and symbol.end_line - symbol.start_line > 80:
+                chunks.extend(_sliding_window_chunks(project, code_file, symbol, review_file.source_text))
     for call in parsed.calls:
         caller = symbol_by_name.get(call.caller_name)
         chunks.append(_callsite_chunk(project, code_file, caller, review_file.source_text, call.callee_name, call.line))
@@ -71,6 +73,11 @@ def _symbol_chunk(
         for symbol_name in parsed.symbols
         if symbol_name.kind in {"type", "struct", "typedef", "enum"} and symbol_name.name in content and symbol_name.name != symbol.name
     )
+    used_globals = sorted(
+        symbol_name.name
+        for symbol_name in parsed.symbols
+        if symbol_name.kind == "global_variable" and symbol_name.name in content and symbol_name.name != symbol.name
+    )
     return _chunk(
         project,
         code_file,
@@ -85,9 +92,50 @@ def _symbol_chunk(
             "called_symbols": called_symbols,
             "used_macros": used_macros,
             "used_types": used_types,
+            "used_globals": used_globals,
             "source_tool": symbol.source_tool,
         },
     )
+
+
+def _sliding_window_chunks(
+    project: CodeProject,
+    code_file: CodeFile,
+    symbol: CodeSymbol,
+    source_text: str,
+    *,
+    window_lines: int = 60,
+    overlap_lines: int = 10,
+) -> list[CodeChunk]:
+    lines = source_text.splitlines()
+    chunks: list[CodeChunk] = []
+    cursor = symbol.start_line
+    while cursor <= symbol.end_line:
+        end = min(symbol.end_line, cursor + window_lines - 1)
+        content_lines = [symbol.signature or symbol.name]
+        content_lines.extend(lines[cursor - 1 : end])
+        content = "\n".join(content_lines)
+        chunks.append(
+            _chunk(
+                project,
+                code_file,
+                symbol,
+                "function_window",
+                symbol.name,
+                cursor,
+                end,
+                content,
+                {
+                    "symbol_kind": symbol.kind,
+                    "window_of": symbol.name,
+                    "source_tool": symbol.source_tool,
+                },
+            )
+        )
+        if end >= symbol.end_line:
+            break
+        cursor = max(cursor + 1, end - overlap_lines + 1)
+    return chunks
 
 
 def _callsite_chunk(

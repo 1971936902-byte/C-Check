@@ -7,8 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import CodeEdge, CodeFile, CodeProject, CodeSymbol, ReviewFile, ReviewTask
+from app.db.models import CodeFile, CodeProject, CodeSymbol, ReviewFile, ReviewTask
 from app.services.code_index.chunker import build_chunks_for_file
+from app.services.code_index.embeddings import sync_project_embeddings, upsert_project_embeddings_to_qdrant_sync
+from app.services.code_index.graph_builder import build_include_edges, build_symbol_edges, build_usage_edges
 from app.services.code_index.parser import PARSER_VERSION, parse_c_source
 from app.services.code_index.tree_sitter_c import probe_tree_sitter_c
 
@@ -85,64 +87,40 @@ def build_code_index(
 
     db.flush()
     for review_file, code_file, parsed, _file_symbols in parsed_by_file.values():
-        for include in parsed.includes:
-            db.add(
-                CodeEdge(
-                    project=project,
-                    source_id=code_file.id,
-                    target_id=None,
-                    edge_type="FILE_INCLUDES_FILE",
-                    line=include.line,
-                    confidence=0.7,
-                    source_tool=PARSER_VERSION,
-                    metadata_json={"include": include.target},
-                )
-            )
+        for edge in build_include_edges(project, code_file, parsed):
+            db.add(edge)
             edge_count += 1
-        for parsed_symbol in parsed.symbols:
-            symbol = symbol_by_file_and_name.get((review_file.relative_path, parsed_symbol.name))
-            if not symbol:
-                continue
-            db.add(
-                CodeEdge(
-                    project=project,
-                    source_id=code_file.id,
-                    target_id=symbol.id,
-                    edge_type="FILE_CONTAINS_SYMBOL",
-                    line=parsed_symbol.start_line,
-                    confidence=parsed_symbol.confidence,
-                    source_tool=PARSER_VERSION,
-                    metadata_json={"symbol_name": parsed_symbol.name, "symbol_kind": parsed_symbol.kind},
-                )
-            )
-            edge_count += 1
-        for call in parsed.calls:
-            source_symbol = symbol_by_file_and_name.get((review_file.relative_path, call.caller_name))
-            if not source_symbol:
-                continue
-            target_symbol = _best_symbol_match(symbols_by_name.get(call.callee_name, []), review_file.relative_path)
-            db.add(
-                CodeEdge(
-                    project=project,
-                    source_id=source_symbol.id,
-                    target_id=target_symbol.id if target_symbol else None,
-                    edge_type="FUNCTION_CALLS_FUNCTION",
-                    line=call.line,
-                    confidence=0.85 if target_symbol else 0.45,
-                    source_tool=PARSER_VERSION,
-                    metadata_json={"callee_name": call.callee_name},
-                )
-            )
+        for edge in build_symbol_edges(project, code_file, parsed, _file_symbols, symbols_by_name):
+            db.add(edge)
             edge_count += 1
 
-    project.stats_json = {
+    db.flush()
+    for _review_file, _code_file, _parsed, file_symbols in parsed_by_file.values():
+        for edge in build_usage_edges(project, file_symbols, symbols_by_name):
+            db.add(edge)
+            edge_count += 1
+
+    sync_project_embeddings(db, project, settings=settings)
+    qdrant_points = 0
+    qdrant_error = None
+    if settings.rag_qdrant_url:
+        try:
+            qdrant_points = upsert_project_embeddings_to_qdrant_sync(db, project, settings=settings)
+        except Exception as exc:
+            qdrant_error = str(exc)
+    stats_json = {
         "files": len(task.files),
         "symbols": symbol_count,
         "chunks": chunk_count,
         "edges": edge_count,
+        "embeddings": len(project.chunks),
+        "qdrant_points": qdrant_points,
         "parser": PARSER_VERSION,
         "tree_sitter": probe_tree_sitter_c().__dict__,
     }
+    if qdrant_error:
+        stats_json["qdrant_error"] = qdrant_error
+    project.stats_json = stats_json
     db.flush()
     return project
 
@@ -170,13 +148,3 @@ def _hash_text(text: str) -> str:
 
 def _language_for_path(path: str) -> str:
     return "c_header" if path.lower().endswith(".h") else "c"
-
-
-def _best_symbol_match(symbols: list[CodeSymbol], caller_path: str) -> CodeSymbol | None:
-    if not symbols:
-        return None
-    for symbol in symbols:
-        if symbol.file and symbol.file.relative_path == caller_path:
-            return symbol
-    functions = [symbol for symbol in symbols if symbol.kind == "function"]
-    return functions[0] if functions else symbols[0]

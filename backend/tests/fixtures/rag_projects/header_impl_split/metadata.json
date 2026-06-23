@@ -1,0 +1,5 @@
+{
+  "target": "src/driver.c:driver_entry",
+  "must_retrieve": ["include/helpers.h:helper_copy", "src/helpers.c:helper_copy"],
+  "expected_edges": ["FILE_INCLUDES_FILE", "SYMBOL_DECLARED_IN"]
+}

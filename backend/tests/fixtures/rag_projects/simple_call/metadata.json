@@ -1,0 +1,5 @@
+{
+  "target": "src/driver.c:driver_entry",
+  "must_retrieve": ["src/helpers.c:helper_copy"],
+  "expected_edges": ["FUNCTION_CALLS_FUNCTION", "CALLSITE_CALLS_SYMBOL"]
+}

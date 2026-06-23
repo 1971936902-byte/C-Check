@@ -225,6 +225,7 @@ class CodeProject(TimestampMixin, Base):
     symbols: Mapped[list[CodeSymbol]] = relationship(back_populates="project", cascade="all, delete-orphan")
     edges: Mapped[list[CodeEdge]] = relationship(back_populates="project", cascade="all, delete-orphan")
     chunks: Mapped[list[CodeChunk]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    embeddings: Mapped[list[CodeEmbedding]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class CodeFile(TimestampMixin, Base):
@@ -319,6 +320,27 @@ class CodeChunk(TimestampMixin, Base):
     project: Mapped[CodeProject] = relationship(back_populates="chunks")
     file: Mapped[CodeFile] = relationship(back_populates="chunks")
     symbol: Mapped[CodeSymbol | None] = relationship(back_populates="chunks")
+
+
+class CodeEmbedding(TimestampMixin, Base):
+    __tablename__ = "code_embeddings"
+    __table_args__ = (
+        Index("ix_code_embeddings_project_model", "project_id", "embedding_model"),
+        Index("ix_code_embeddings_chunk_model", "chunk_id", "embedding_model"),
+        Index("ix_code_embeddings_vector_id", "vector_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("code_projects.id", ondelete="CASCADE"), nullable=False)
+    chunk_id: Mapped[str] = mapped_column(ForeignKey("code_chunks.id", ondelete="CASCADE"), nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    vector_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    vector_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    project: Mapped[CodeProject] = relationship(back_populates="embeddings")
+    chunk: Mapped[CodeChunk] = relationship()
 
 
 class ReviewContext(TimestampMixin, Base):

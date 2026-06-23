@@ -21,6 +21,13 @@ _FUNCTION_HEADER_RE = re.compile(
     rf"^\s*(?P<prefix>(?:static\s+|inline\s+|extern\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+|enum\s+|union\s+|[A-Za-z_][A-Za-z0-9_*\s]+)+?)"
     rf"\s+(?P<name>{_IDENTIFIER})\s*\([^;]*\)\s*\{{"
 )
+_FUNCTION_DECL_RE = re.compile(
+    rf"^\s*(?P<prefix>(?:static\s+|inline\s+|extern\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+|enum\s+|union\s+|[A-Za-z_][A-Za-z0-9_*\s]+)+?)"
+    rf"\s+(?P<name>{_IDENTIFIER})\s*\([^;{{}}]*\)\s*;"
+)
+_GLOBAL_VAR_RE = re.compile(
+    rf"^\s*(?:extern\s+|static\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+|enum\s+|union\s+|[A-Za-z_][A-Za-z0-9_*\s]+)+\s+(?P<name>{_IDENTIFIER})\s*(?:=\s*[^;]+)?;"
+)
 _CALL_RE = re.compile(rf"\b(?P<name>{_IDENTIFIER})\s*\(")
 _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"](?P<target>[^>"]+)[>"]')
 _MACRO_RE = re.compile(rf"^\s*#\s*define\s+(?P<name>{_IDENTIFIER})\b")
@@ -61,6 +68,20 @@ class ParsedFile:
 
 
 def parse_c_source(relative_path: str, source_text: str) -> ParsedFile:
+    tree_sitter_parsed = _tree_sitter_file(relative_path, source_text)
+    if tree_sitter_parsed is not None:
+        fallback = _parse_c_source_builtin(relative_path, source_text)
+        return ParsedFile(
+            relative_path=relative_path,
+            line_count=max(tree_sitter_parsed.line_count, fallback.line_count),
+            includes=_merge_includes(tree_sitter_parsed.includes, fallback.includes),
+            symbols=_merge_symbols(tree_sitter_parsed.symbols, fallback.symbols),
+            calls=_merge_calls(tree_sitter_parsed.calls, fallback.calls),
+        )
+    return _parse_c_source_builtin(relative_path, source_text)
+
+
+def _parse_c_source_builtin(relative_path: str, source_text: str) -> ParsedFile:
     lines = source_text.splitlines()
     includes = _parse_includes(lines)
     symbols: list[ParsedSymbol] = []
@@ -68,6 +89,8 @@ def parse_c_source(relative_path: str, source_text: str) -> ParsedFile:
 
     symbols.extend(_parse_macro_symbols(lines))
     symbols.extend(_parse_type_symbols(lines))
+    symbols.extend(_parse_declaration_symbols(lines))
+    symbols.extend(_parse_global_variable_symbols(lines))
     function_symbols, function_calls = _parse_functions(lines)
     symbols.extend(function_symbols)
     calls.extend(function_calls)
@@ -124,6 +147,47 @@ def _parse_type_symbols(lines: list[str]) -> list[ParsedSymbol]:
                     confidence=0.65,
                 )
             )
+    return symbols
+
+
+def _parse_declaration_symbols(lines: list[str]) -> list[ParsedSymbol]:
+    symbols: list[ParsedSymbol] = []
+    for line_number, line in enumerate(lines, start=1):
+        match = _FUNCTION_DECL_RE.match(_strip_line_comment(line))
+        if not match or match.group("name") in _CONTROL_KEYWORDS:
+            continue
+        symbols.append(
+            ParsedSymbol(
+                kind="declaration",
+                name=match.group("name"),
+                signature=line.strip(),
+                start_line=line_number,
+                end_line=line_number,
+                confidence=0.70,
+            )
+        )
+    return symbols
+
+
+def _parse_global_variable_symbols(lines: list[str]) -> list[ParsedSymbol]:
+    symbols: list[ParsedSymbol] = []
+    for line_number, line in enumerate(lines, start=1):
+        stripped = _strip_line_comment(line).strip()
+        if not stripped or stripped.startswith("#") or "(" in stripped or stripped.startswith(("typedef", "return")):
+            continue
+        match = _GLOBAL_VAR_RE.match(stripped)
+        if not match or match.group("name") in _CONTROL_KEYWORDS:
+            continue
+        symbols.append(
+            ParsedSymbol(
+                kind="global_variable",
+                name=match.group("name"),
+                signature=stripped,
+                start_line=line_number,
+                end_line=line_number,
+                confidence=0.60,
+            )
+        )
     return symbols
 
 
@@ -202,3 +266,34 @@ def _merge_symbols(primary: list[ParsedSymbol], supplemental: list[ParsedSymbol]
         merged.append(symbol)
         seen.add(key)
     return merged
+
+
+def _merge_includes(primary: list[ParsedInclude], supplemental: list[ParsedInclude]) -> list[ParsedInclude]:
+    merged = list(primary)
+    seen = {(include.target, include.line) for include in merged}
+    for include in supplemental:
+        key = (include.target, include.line)
+        if key not in seen:
+            merged.append(include)
+            seen.add(key)
+    return merged
+
+
+def _merge_calls(primary: list[ParsedCall], supplemental: list[ParsedCall]) -> list[ParsedCall]:
+    merged = list(primary)
+    seen = {(call.caller_name, call.callee_name, call.line) for call in merged}
+    for call in supplemental:
+        key = (call.caller_name, call.callee_name, call.line)
+        if key not in seen:
+            merged.append(call)
+            seen.add(key)
+    return merged
+
+
+def _tree_sitter_file(relative_path: str, source_text: str) -> ParsedFile | None:
+    try:
+        from app.services.code_index.tree_sitter_c import parse_with_tree_sitter
+
+        return parse_with_tree_sitter(relative_path, source_text)
+    except Exception:
+        return None

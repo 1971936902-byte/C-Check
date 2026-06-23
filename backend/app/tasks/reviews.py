@@ -195,6 +195,37 @@ def _validate_finding_evidence(task: ReviewTask, result: ModelReviewResponse) ->
     return result.model_copy(update={"findings": findings}) if changed else result
 
 
+def _link_findings_to_evidence(task: ReviewTask, result: ModelReviewResponse) -> None:
+    if task.code_project is None:
+        return
+    evidence_by_key = {
+        evidence.evidence_key: evidence
+        for context in task.review_contexts
+        for evidence in context.evidence_items
+    }
+    for index, finding in enumerate(result.findings, start=1):
+        for evidence_key in finding.evidence_ids:
+            evidence = evidence_by_key.get(evidence_key)
+            if evidence is None:
+                continue
+            task.code_project.edges.append(
+                CodeEdge(
+                    project=task.code_project,
+                    source_id=f"finding:{index}",
+                    target_id=evidence.id,
+                    edge_type="FINDING_EVIDENCED_BY",
+                    line=finding.line,
+                    confidence=finding.confidence if finding.confidence is not None else 0.7,
+                    source_tool="model-output-validator",
+                    metadata_json={
+                        "finding_index": index,
+                        "evidence_key": evidence_key,
+                        "title": finding.title,
+                    },
+                )
+            )
+
+
 def _postprocess_review_result(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
     return _validate_finding_evidence(
         task,
@@ -292,6 +323,7 @@ def run_review_task(task_id: str) -> None:
                     return
                 result = _postprocess_review_result(task, result)
                 report = build_report(task, result)
+                _link_findings_to_evidence(task, result)
                 db.add(report)
                 task.status = TaskStatus.COMPLETED
                 task.progress = 100

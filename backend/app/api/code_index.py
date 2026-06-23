@@ -11,7 +11,10 @@ from app.core.config import get_settings
 from app.db.models import CodeEdge, CodeProject, CodeSymbol, ReviewEvidence, ReviewTask, User
 from app.db.session import get_db
 from app.services.code_index.context_builder import build_rag_context
+from app.services.code_index.evaluator import evaluate_retrieval
 from app.services.code_index.indexer import build_code_index
+from app.services.code_index.planner import plan_review_units
+from app.services.code_index.retriever import retrieve_context_for_files
 
 
 router = APIRouter(prefix="/code-index", tags=["code-index"])
@@ -56,6 +59,23 @@ class EvidenceResponse(BaseModel):
     end_line: int
     reason: str
     score: float
+
+
+class ReviewUnitResponse(BaseModel):
+    unit_id: str
+    unit_type: str
+    file_path: str
+    symbol_name: str | None
+    start_line: int
+    end_line: int
+    chunk_ids: list[str]
+
+
+class RetrievalEvaluationResponse(BaseModel):
+    recall_at_k: float
+    precision_at_k: float
+    mrr: float
+    token_waste_ratio: float
 
 
 def _owned_task(db: Session, task_id: str, current_user: User) -> ReviewTask:
@@ -122,6 +142,32 @@ def list_graph(
         )
         for edge in project.edges
     ]
+
+
+@router.get("/{task_id}/review-units", response_model=list[ReviewUnitResponse])
+def list_review_units(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[ReviewUnitResponse]:
+    task = _owned_task(db, task_id, current_user)
+    project = _project_or_404(task)
+    return [ReviewUnitResponse(**unit.__dict__) for unit in plan_review_units(project)]
+
+
+@router.get("/{task_id}/evaluation", response_model=RetrievalEvaluationResponse)
+def evaluate_context(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    must_retrieve: str = "",
+    k: int = 10,
+) -> RetrievalEvaluationResponse:
+    task = _owned_task(db, task_id, current_user)
+    retrieved = retrieve_context_for_files(db, task, task.files, settings=get_settings())
+    expected = {item.strip() for item in must_retrieve.split(",") if item.strip()}
+    result = evaluate_retrieval(retrieved, expected, k=k)
+    return RetrievalEvaluationResponse(**result.__dict__)
 
 
 @review_context_router.post("/{task_id}/contexts/preview", response_model=ContextPreviewResponse)
