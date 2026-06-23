@@ -14,7 +14,7 @@ from app.services.code_index.context_builder import build_rag_context
 from app.services.code_index.evaluator import evaluate_retrieval
 from app.services.code_index.indexer import build_code_index
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import retrieve_context_for_files
+from app.services.code_index.retriever import retrieve_context_diagnostics, retrieve_context_for_files
 
 
 router = APIRouter(prefix="/code-index", tags=["code-index"])
@@ -76,6 +76,20 @@ class RetrievalEvaluationResponse(BaseModel):
     precision_at_k: float
     mrr: float
     token_waste_ratio: float
+
+
+class CodeIndexObservabilityResponse(BaseModel):
+    enabled: bool
+    project_id: str | None = None
+    stats: dict = {}
+    target_files: list[str] = []
+    raw_candidate_count: int = 0
+    selected_count: int = 0
+    rejected_count: int = 0
+    bucket_counts: dict[str, int] = {}
+    selected: list[dict] = []
+    rejected: list[dict] = []
+    budget: dict = {}
 
 
 def _owned_task(db: Session, task_id: str, current_user: User) -> ReviewTask:
@@ -168,6 +182,19 @@ def evaluate_context(
     expected = {item.strip() for item in must_retrieve.split(",") if item.strip()}
     result = evaluate_retrieval(retrieved, expected, k=k)
     return RetrievalEvaluationResponse(**result.__dict__)
+
+
+@router.get("/{task_id}/observability", response_model=CodeIndexObservabilityResponse)
+def observability(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> CodeIndexObservabilityResponse:
+    task = _owned_task(db, task_id, current_user)
+    if not get_settings().rag_observability_enabled:
+        return CodeIndexObservabilityResponse(enabled=False)
+    diagnostics = retrieve_context_diagnostics(db, task, task.files, settings=get_settings())
+    return CodeIndexObservabilityResponse(**diagnostics)
 
 
 @review_context_router.post("/{task_id}/contexts/preview", response_model=ContextPreviewResponse)

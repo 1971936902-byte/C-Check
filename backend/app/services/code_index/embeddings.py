@@ -4,6 +4,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -37,6 +38,16 @@ def embed_text(text: str, *, dimension: int = DEFAULT_DIMENSION) -> list[float]:
     return [value / norm for value in vector]
 
 
+def embed_text_with_settings(text: str, settings: Settings | None = None) -> list[float]:
+    settings = settings or get_settings()
+    if settings.rag_embedding_backend.lower() in {"openai", "openai-compatible", "http"} and settings.rag_embedding_base_url:
+        try:
+            return _embed_text_remote(text, settings)
+        except Exception:
+            return embed_text(text, dimension=settings.rag_embedding_dimension)
+    return embed_text(text, dimension=settings.rag_embedding_dimension)
+
+
 def sync_project_embeddings(
     db: Session,
     project: CodeProject,
@@ -56,7 +67,7 @@ def sync_project_embeddings(
     }
     embedded: list[EmbeddedChunk] = []
     for chunk in project.chunks:
-        vector = embed_text(chunk.content)
+        vector = embed_text_with_settings(chunk.content, settings)
         vector_hash = _vector_hash(vector)
         vector_id = f"{project.id}:{chunk.id}:{embedding_model}"
         current = existing.get(chunk.id)
@@ -133,6 +144,27 @@ def _tokens(text: str) -> list[str]:
     import re
 
     return [token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*|\d+", text)]
+
+
+def _embed_text_remote(text: str, settings: Settings) -> list[float]:
+    headers = {"Content-Type": "application/json"}
+    if settings.rag_embedding_api_key:
+        headers["Authorization"] = f"Bearer {settings.rag_embedding_api_key}"
+    payload = {"model": settings.rag_embedding_model, "input": text[:16000]}
+    with httpx.Client(timeout=settings.rag_embedding_timeout_seconds) as client:
+        response = client.post(
+            f"{settings.rag_embedding_base_url.rstrip('/')}/v1/embeddings",
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+    vector = data.get("data", [{}])[0].get("embedding")
+    if not isinstance(vector, list) or not vector:
+        raise ValueError("embedding response missing data[0].embedding")
+    values = [float(item) for item in vector]
+    norm = math.sqrt(sum(value * value for value in values)) or 1.0
+    return [value / norm for value in values]
 
 
 def _vector_hash(vector: list[float]) -> str:

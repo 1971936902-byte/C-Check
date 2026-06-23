@@ -56,6 +56,23 @@ def build_symbol_edges(
                     metadata_json={"symbol_name": parsed_symbol.name},
                 )
             )
+        if parsed_symbol.kind == "callback_binding":
+            target = _best_symbol_match(
+                [candidate for candidate in symbols_by_name.get(parsed_symbol.name, []) if candidate.kind == "function"],
+                code_file.relative_path,
+            )
+            edges.append(
+                CodeEdge(
+                    project=project,
+                    source_id=symbol.id,
+                    target_id=target.id if target else None,
+                    edge_type="CALLBACK_BINDING_TARGETS_FUNCTION",
+                    line=parsed_symbol.start_line,
+                    confidence=0.70 if target else 0.45,
+                    source_tool=PARSER_VERSION,
+                    metadata_json={"callback_name": parsed_symbol.name},
+                )
+            )
     for call in parsed.calls:
         edges.extend(_call_edges(project, code_file, call, symbol_by_name, symbols_by_name))
     return edges

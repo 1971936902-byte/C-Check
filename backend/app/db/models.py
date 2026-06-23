@@ -343,6 +343,21 @@ class CodeEmbedding(TimestampMixin, Base):
     chunk: Mapped[CodeChunk] = relationship()
 
 
+class CodeParseCache(TimestampMixin, Base):
+    __tablename__ = "code_parse_cache"
+    __table_args__ = (
+        Index("ix_code_parse_cache_key", "content_hash", "parser_version", "settings_hash", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    settings_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    parsed_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class ReviewContext(TimestampMixin, Base):
     __tablename__ = "review_contexts"
     __table_args__ = (

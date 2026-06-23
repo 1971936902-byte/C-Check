@@ -57,9 +57,18 @@ class Settings(BaseSettings):
     rag_keyword_top_k: int = Field(default=8, ge=1, le=100)
     rag_graph_max_depth: int = Field(default=1, ge=0, le=3)
     rag_context_max_chars: int = Field(default=12000, ge=1000, le=100000)
+    rag_embedding_backend: str = "hashing"
+    rag_embedding_base_url: str | None = None
+    rag_embedding_api_key: str | None = None
+    rag_embedding_model: str = "hashing-code-embedding-v1"
+    rag_embedding_dimension: int = Field(default=128, ge=16, le=4096)
+    rag_embedding_timeout_seconds: int = Field(default=30, ge=1, le=300)
     rag_qdrant_url: str | None = None
     rag_qdrant_api_key: str | None = None
     rag_qdrant_collection: str = "c_check_code_chunks"
+    rag_cache_enabled: bool = True
+    rag_review_units_enabled: bool = True
+    rag_observability_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False
     model_deployment_script: Path = REPOSITORY_ROOT / "deploy" / "models" / "deploy-vllm-model.sh"

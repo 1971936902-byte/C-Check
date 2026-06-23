@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.models import CodeChunk, CodeEdge, CodeFile, CodeProject, CodeSymbol, ReviewFile, ReviewTask
-from app.services.code_index.embeddings import embed_text
+from app.services.code_index.embeddings import embed_text_with_settings
 from app.services.code_index.indexer import load_or_build_code_index
 from app.services.code_index.keyword_search import keyword_search_chunks
+from app.services.code_index.qdrant import QdrantCodeIndexClient
 
 
 _IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
@@ -117,7 +118,8 @@ def retrieve_context_for_files(
             _upstream_contexts(db, project, source_file.relative_path, chunks_by_symbol),
             _usage_contexts(db, project, source_file.relative_path, chunks_by_symbol),
             _keyword_contexts(db, project, identifiers, target_paths, limit=settings.rag_keyword_top_k),
-            _vector_contexts(db, project, source_file.source_text, target_paths, limit=settings.rag_keyword_top_k),
+            _qdrant_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
+            _vector_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
         ]
         for group in candidate_groups:
             for context in group:
@@ -127,6 +129,59 @@ def retrieve_context_for_files(
 
     ranked = _rerank_contexts(db, project, list(contexts.values()), target_paths, source_text_by_path)
     return _prune_ranked_contexts(ranked, limit=settings.rag_keyword_top_k)
+
+
+def retrieve_context_diagnostics(
+    db: Session,
+    task: ReviewTask,
+    files: list[ReviewFile],
+    *,
+    settings: Settings | None = None,
+) -> dict:
+    settings = settings or get_settings()
+    if not settings.rag_enabled or not files:
+        return {"enabled": False, "selected": [], "rejected": []}
+    project = load_or_build_code_index(db, task, settings=settings)
+    target_paths = {file.relative_path for file in files}
+    chunks_by_symbol = _chunks_by_symbol(db, project)
+    source_text_by_path = {file.relative_path: file.source_text for file in files}
+    contexts: dict[str, RetrievedContext] = {}
+    for source_file in files:
+        identifiers = _identifiers(source_file.source_text)
+        graph_depth = max(settings.rag_graph_max_depth, 2 if _has_high_risk_api(source_file.source_text) else 1)
+        for group in (
+            _include_contexts(db, project, source_file.relative_path),
+            _direct_call_contexts(db, project, source_file.relative_path, chunks_by_symbol, max_depth=graph_depth),
+            _upstream_contexts(db, project, source_file.relative_path, chunks_by_symbol),
+            _usage_contexts(db, project, source_file.relative_path, chunks_by_symbol),
+            _keyword_contexts(db, project, identifiers, target_paths, limit=settings.rag_keyword_top_k),
+            _qdrant_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
+            _vector_contexts(db, project, source_file.source_text, target_paths, limit=settings.rag_keyword_top_k, settings=settings),
+        ):
+            for context in group:
+                current = contexts.get(context.evidence_id)
+                if current is None or _context_merge_key(context) > _context_merge_key(current):
+                    contexts[context.evidence_id] = context
+    ranked = _rerank_contexts(db, project, list(contexts.values()), target_paths, source_text_by_path)
+    selected = _prune_ranked_contexts(ranked, limit=settings.rag_keyword_top_k)
+    selected_ids = {context.evidence_id for context in selected}
+    rejected = [context for context in ranked if context.evidence_id not in selected_ids]
+    return {
+        "enabled": True,
+        "project_id": project.id,
+        "stats": project.stats_json,
+        "target_files": sorted(target_paths),
+        "raw_candidate_count": len(contexts),
+        "selected_count": len(selected),
+        "rejected_count": len(rejected),
+        "bucket_counts": _bucket_counts(ranked),
+        "selected": [_context_to_diagnostic(context) for context in selected],
+        "rejected": [_context_to_diagnostic(context) for context in rejected[:20]],
+        "budget": {
+            "top_k": settings.rag_keyword_top_k,
+            "context_max_chars": settings.rag_context_max_chars,
+        },
+    }
 
 
 def _rerank_contexts(
@@ -187,6 +242,7 @@ def _prune_ranked_contexts(contexts: list[RetrievedContext], *, limit: int) -> l
         REASON_UPSTREAM: 1,
         REASON_KEYWORD: 1,
         REASON_VECTOR: 1,
+        "qdrant": 1,
     }
     selected: list[RetrievedContext] = []
     bucket_counts: dict[str, int] = {}
@@ -237,8 +293,29 @@ def _context_merge_key(context: RetrievedContext) -> tuple[int, float]:
         REASON_UPSTREAM: 3,
         REASON_KEYWORD: 2,
         REASON_VECTOR: 1,
+        "qdrant": 2,
     }.get(_reason_bucket(context.reason), 0)
     return priority, context.score
+
+
+def _bucket_counts(contexts: list[RetrievedContext]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for context in contexts:
+        bucket = _reason_bucket(context.reason)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
+
+
+def _context_to_diagnostic(context: RetrievedContext) -> dict:
+    return {
+        "evidence_id": context.evidence_id,
+        "file_path": context.file_path,
+        "symbol_name": context.symbol_name,
+        "start_line": context.start_line,
+        "end_line": context.end_line,
+        "reason": context.reason,
+        "score": round(context.score, 4),
+    }
 
 
 def _direct_call_contexts(
@@ -401,8 +478,10 @@ def _vector_contexts(
     target_paths: set[str],
     *,
     limit: int,
+    settings: Settings | None = None,
 ) -> list[RetrievedContext]:
-    query_vector = embed_text(source_text)
+    settings = settings or get_settings()
+    query_vector = embed_text_with_settings(source_text, settings)
     source_identifiers = _identifiers(source_text)
     scored: list[tuple[float, CodeChunk]] = []
     for chunk in db.scalars(select(CodeChunk).where(CodeChunk.project_id == project.id)).all():
@@ -410,11 +489,51 @@ def _vector_contexts(
             continue
         if source_identifiers and not (_identifiers(chunk.content) & source_identifiers):
             continue
-        score = _cosine_similarity(query_vector, embed_text(chunk.content))
+        score = _cosine_similarity(query_vector, embed_text_with_settings(chunk.content, settings))
         if score > 0:
             scored.append((score, chunk))
     scored.sort(key=lambda item: item[0], reverse=True)
     return [_context_from_chunk(chunk, REASON_VECTOR, 0.5 + score) for score, chunk in scored[:limit]]
+
+
+def _qdrant_contexts(
+    db: Session,
+    project: CodeProject,
+    source_text: str,
+    target_paths: set[str],
+    *,
+    settings: Settings,
+    limit: int,
+) -> list[RetrievedContext]:
+    client = QdrantCodeIndexClient(settings)
+    if not client.enabled:
+        return []
+    try:
+        results = client.search_sync(
+            embed_text_with_settings(source_text, settings),
+            project_id=project.id,
+            limit=limit,
+        )
+    except Exception:
+        return []
+    chunks_by_id = _chunks_by_id(db, project)
+    source_identifiers = _identifiers(source_text)
+    contexts: list[RetrievedContext] = []
+    for item in results:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        chunk_id = payload.get("chunk_id")
+        chunk = chunks_by_id.get(str(chunk_id)) if chunk_id else None
+        if chunk is None:
+            continue
+        if chunk.file.relative_path in target_paths and chunk.chunk_kind in {"function", "file_summary"}:
+            continue
+        if source_identifiers and not (_identifiers(chunk.content) & source_identifiers):
+            continue
+        score = float(item.get("score") or 0.0)
+        contexts.append(_context_from_chunk(chunk, "qdrant", 0.7 + score))
+    return sorted(contexts, key=attrgetter("score"), reverse=True)[:limit]
 
 
 def _chunks_by_symbol(db: Session, project: CodeProject) -> dict[str, CodeChunk]:
@@ -449,6 +568,8 @@ def _relation_boost(reason: str) -> float:
         return 0.1
     if bucket == REASON_VECTOR:
         return 0.1
+    if bucket == "qdrant":
+        return 0.25
     return 0.0
 
 
@@ -458,7 +579,7 @@ def _kind_from_reason(reason: str) -> str:
         return "file_summary"
     if bucket == REASON_CALL:
         return "function"
-    if bucket == REASON_VECTOR:
+    if bucket in {REASON_VECTOR, "qdrant"}:
         return "function"
     return "symbol"
 

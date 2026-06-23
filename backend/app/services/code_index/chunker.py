@@ -27,6 +27,7 @@ def build_chunks_for_file(
             "declaration",
             "global_variable",
             "function_pointer",
+            "callback_binding",
         }:
             chunks.append(_symbol_chunk(project, code_file, symbol, review_file.source_text, parsed))
             if symbol.kind == "function" and symbol.end_line - symbol.start_line > 80:
@@ -42,7 +43,7 @@ def _file_summary_chunk(project: CodeProject, code_file: CodeFile, source: Revie
     declarations = [
         symbol.name
         for symbol in parsed.symbols
-        if symbol.kind in {"declaration", "macro", "conditional", "type", "struct", "typedef", "enum", "function_pointer"}
+        if symbol.kind in {"declaration", "macro", "conditional", "type", "struct", "typedef", "enum", "function_pointer", "callback_binding"}
     ][:30]
     includes = [include.target for include in parsed.includes][:30]
     content = "\n".join(

@@ -5,7 +5,7 @@ from time import perf_counter
 
 from app.core.config import Settings
 from app.core.security import hash_password
-from app.db.models import CodeChunk, CodeEdge, CodeEmbedding, CodeProject, CodeSymbol, ModelNode, ReviewContext, ReviewFile, ReviewTask, User
+from app.db.models import CodeChunk, CodeEdge, CodeEmbedding, CodeParseCache, CodeProject, CodeSymbol, ModelNode, ReviewContext, ReviewFile, ReviewTask, User
 from app.schemas.model_response import FindingCategory, FindingSeverity, ReviewFinding
 from app.schemas.model_response import ModelReviewResponse
 from app.services.code_index.context_builder import build_rag_context, render_rag_context
@@ -22,7 +22,7 @@ from app.services.code_index.indexer import build_code_index
 from app.services.code_index.keyword_search import expand_query_terms, keyword_search_chunks
 from app.services.code_index.parser import ParsedFile, ParsedSymbol, parse_c_source
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import RetrievedContext, _vector_contexts, retrieve_context_for_files
+from app.services.code_index.retriever import RetrievedContext, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files
 from app.services.model_router import invoke_selected_model
 
 
@@ -401,6 +401,40 @@ def test_parser_indexes_function_pointers_conditionals_and_callback_edges(db_ses
     assert "FUNCTION_DEPENDS_ON_CONDITION" in edge_types
 
 
+def test_parser_indexes_struct_callback_bindings(db_session):
+    user = User(username="ops-user", password_hash=hash_password("pw"))
+    node = ModelNode(display_name="RAG node", model_identifier="review-model", base_url="http://model-node", is_enabled=True)
+    task = ReviewTask(
+        owner=user,
+        model_node=node,
+        input_mode="folder",
+        display_name="ops",
+        file_count=1,
+        check_types=["memory_safety"],
+    )
+    task.files.append(
+        ReviewFile(
+            relative_path="drivers/ops.c",
+            source_text=(
+                "static int driver_open(void) { return 0; }\n"
+                "static const struct file_ops ops = {\n"
+                "    .open = driver_open,\n"
+                "};\n"
+            ),
+            size_bytes=120,
+        )
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    project = build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+    assert db_session.query(CodeSymbol).filter_by(project_id=project.id, kind="callback_binding", name="driver_open").one()
+    edge = db_session.query(CodeEdge).filter_by(project_id=project.id, edge_type="CALLBACK_BINDING_TARGETS_FUNCTION").one()
+    target = db_session.get(CodeSymbol, edge.target_id)
+    assert target is not None
+    assert target.name == "driver_open"
+
+
 def test_parse_cache_reuses_same_source_across_tasks(monkeypatch):
     from app.services.code_index import parser as parser_module
 
@@ -423,6 +457,21 @@ def test_parse_cache_reuses_same_source_across_tasks(monkeypatch):
 
     assert first.symbols[0].name == second.symbols[0].name
     assert call_count == 1
+
+
+def test_persistent_parse_cache_reuses_symbols_across_tasks(db_session):
+    first = _make_task()
+    second = _make_task()
+    second.owner.username = "rag-user-2"
+    db_session.add_all([first, second])
+    db_session.commit()
+
+    first_project = build_code_index(db_session, first, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+    second_project = build_code_index(db_session, second, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+
+    assert first_project.stats_json["parse_cache_misses"] >= 1
+    assert second_project.stats_json["parse_cache_hits"] >= 1
+    assert db_session.query(CodeParseCache).count() >= 1
 
 
 def test_negative_retrieval_samples_are_not_matched(db_session):
@@ -495,6 +544,38 @@ def test_vector_contexts_keep_positive_similarity_candidates(db_session):
     assert all(context.reason == "vector" for context in contexts)
 
 
+def test_qdrant_contexts_use_payload_chunk_ids(monkeypatch, db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+    project = build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+    helper_chunk = db_session.query(CodeChunk).filter_by(project_id=project.id, symbol_name="helper_copy", chunk_kind="function").one()
+
+    class FakeQdrantClient:
+        enabled = True
+
+        def __init__(self, _settings):
+            pass
+
+        def search_sync(self, *_args, **_kwargs):
+            return [{"score": 0.95, "payload": {"chunk_id": helper_chunk.id}}]
+
+    monkeypatch.setattr("app.services.code_index.retriever.QdrantCodeIndexClient", FakeQdrantClient)
+
+    contexts = _qdrant_contexts(
+        db_session,
+        project,
+        task.files[0].source_text,
+        {task.files[0].relative_path},
+        settings=Settings(_env_file=None, allow_insecure_defaults=True, rag_qdrant_url="http://qdrant"),
+        limit=5,
+    )
+
+    assert contexts
+    assert contexts[0].reason == "qdrant"
+    assert contexts[0].symbol_name == "helper_copy"
+
+
 def test_keyword_search_uses_query_expansion_and_bm25(db_session):
     task = _make_task()
     db_session.add(task)
@@ -550,6 +631,42 @@ def test_render_rag_context_deduplicates_and_allocates_budget():
     assert rendered.count("[Evidence") == 2
     assert [context.score for context in selected] == [3.0, 2.0]
     assert "RAG Evidence Context" in rendered
+
+
+def test_review_unit_payloads_prepare_function_units(db_session):
+    from app.services.model_router import _rag_review_unit_files
+
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+
+    unit_files = _rag_review_unit_files(
+        db_session,
+        task,
+        Settings(_env_file=None, allow_insecure_defaults=True, rag_review_units_enabled=True),
+    )
+
+    assert unit_files
+    assert any("REVIEW UNIT" in item.source_text and "driver_entry" in item.source_text for item in unit_files)
+    assert all(not item.relative_path.startswith("review-unit/") for item in unit_files)
+
+
+def test_retrieve_context_diagnostics_reports_pruned_evidence(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+
+    diagnostics = retrieve_context_diagnostics(
+        db_session,
+        task,
+        [task.files[0]],
+        settings=Settings(_env_file=None, allow_insecure_defaults=True, rag_keyword_top_k=10),
+    )
+
+    assert diagnostics["enabled"] is True
+    assert diagnostics["selected_count"] >= 1
+    assert diagnostics["raw_candidate_count"] >= diagnostics["selected_count"]
+    assert "budget" in diagnostics
 
 
 def test_gold_evaluator_aggregates_manual_fixture_metrics(db_session):

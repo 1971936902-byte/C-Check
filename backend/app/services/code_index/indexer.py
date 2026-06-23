@@ -12,6 +12,7 @@ from app.services.code_index.chunker import build_chunks_for_file
 from app.services.code_index.clangd import probe_clangd
 from app.services.code_index.embeddings import sync_project_embeddings, upsert_project_embeddings_to_qdrant_sync
 from app.services.code_index.graph_builder import build_include_edges, build_symbol_edges, build_usage_edges
+from app.services.code_index.parse_cache import load_cached_parse, store_cached_parse
 from app.services.code_index.parser import PARSER_VERSION, parse_c_source
 from app.services.code_index.tree_sitter_c import probe_tree_sitter_c
 
@@ -47,16 +48,36 @@ def build_code_index(
     symbol_count = 0
     chunk_count = 0
     edge_count = 0
+    parse_cache_hits = 0
+    parse_cache_misses = 0
 
     for review_file in task.files:
-        parsed = parse_c_source(review_file.relative_path, review_file.source_text)
+        file_content_hash = _hash_text(review_file.source_text)
+        parsed = load_cached_parse(
+            db,
+            relative_path=review_file.relative_path,
+            content_hash=file_content_hash,
+            settings=settings,
+        )
+        if parsed is None:
+            parsed = parse_c_source(review_file.relative_path, review_file.source_text)
+            store_cached_parse(
+                db,
+                relative_path=review_file.relative_path,
+                content_hash=file_content_hash,
+                parsed=parsed,
+                settings=settings,
+            )
+            parse_cache_misses += 1
+        else:
+            parse_cache_hits += 1
         code_file = CodeFile(
             project=project,
             review_file_id=review_file.id,
             relative_path=review_file.relative_path,
             language=_language_for_path(review_file.relative_path),
             size_bytes=review_file.size_bytes,
-            content_hash=_hash_text(review_file.source_text),
+            content_hash=file_content_hash,
             line_count=parsed.line_count,
         )
         db.add(code_file)
@@ -116,6 +137,8 @@ def build_code_index(
         "edges": edge_count,
         "embeddings": len(project.chunks),
         "qdrant_points": qdrant_points,
+        "parse_cache_hits": parse_cache_hits,
+        "parse_cache_misses": parse_cache_misses,
         "parser": PARSER_VERSION,
         "tree_sitter": probe_tree_sitter_c().__dict__,
         "clang": probe_clangd().__dict__,

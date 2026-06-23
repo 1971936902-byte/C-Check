@@ -27,9 +27,36 @@ class QdrantCodeIndexClient:
     def enabled(self) -> bool:
         return bool(self.url)
 
+    async def ensure_collection(self, *, vector_size: int) -> None:
+        if not self.enabled:
+            return
+        headers = {"api-key": self.api_key} if self.api_key else {}
+        payload = {"vectors": {"size": vector_size, "distance": "Cosine"}}
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.put(
+                f"{self.url}/collections/{self.collection}",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+
+    def ensure_collection_sync(self, *, vector_size: int) -> None:
+        if not self.enabled:
+            return
+        headers = {"api-key": self.api_key} if self.api_key else {}
+        payload = {"vectors": {"size": vector_size, "distance": "Cosine"}}
+        with httpx.Client(timeout=30) as client:
+            response = client.put(
+                f"{self.url}/collections/{self.collection}",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+
     async def upsert_points(self, points: list[QdrantPoint]) -> None:
         if not self.enabled or not points:
             return
+        await self.ensure_collection(vector_size=len(points[0].vector))
         headers = {"api-key": self.api_key} if self.api_key else {}
         payload = {
             "points": [
@@ -48,6 +75,7 @@ class QdrantCodeIndexClient:
     def upsert_points_sync(self, points: list[QdrantPoint]) -> None:
         if not self.enabled or not points:
             return
+        self.ensure_collection_sync(vector_size=len(points[0].vector))
         headers = {"api-key": self.api_key} if self.api_key else {}
         payload = {
             "points": [
@@ -79,6 +107,31 @@ class QdrantCodeIndexClient:
         }
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
+                f"{self.url}/collections/{self.collection}/points/search",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        result = data.get("result", [])
+        return result if isinstance(result, list) else []
+
+    def search_sync(self, vector: list[float], *, project_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+        headers = {"api-key": self.api_key} if self.api_key else {}
+        payload = {
+            "vector": vector,
+            "limit": limit,
+            "with_payload": True,
+            "filter": {
+                "must": [
+                    {"key": "project_id", "match": {"value": project_id}},
+                ]
+            },
+        }
+        with httpx.Client(timeout=30) as client:
+            response = client.post(
                 f"{self.url}/collections/{self.collection}/points/search",
                 headers=headers,
                 json=payload,

@@ -30,6 +30,7 @@ _GLOBAL_VAR_RE = re.compile(
     rf"^\s*[A-Za-z_][A-Za-z0-9_*\s]*\s+(?P<name>{_IDENTIFIER})\s*(?:=\s*[^;]+)?;"
 )
 _FUNCTION_POINTER_RE = re.compile(rf"^\s*(?:typedef\s+)?[\w\s*]+\(\s*\*\s*(?P<name>{_IDENTIFIER})\s*\)\s*\([^;]*\)\s*;")
+_CALLBACK_BINDING_RE = re.compile(rf"\.\s*(?P<field>{_IDENTIFIER})\s*=\s*&?\s*(?P<target>{_IDENTIFIER})\b")
 _CALL_RE = re.compile(rf"\b(?P<name>{_IDENTIFIER})\s*\(")
 _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"](?P<target>[^>"]+)[>"]')
 _MACRO_RE = re.compile(rf"^\s*#\s*define\s+(?P<name>{_IDENTIFIER})\b")
@@ -106,6 +107,7 @@ def _parse_c_source_builtin(relative_path: str, source_text: str) -> ParsedFile:
     symbols.extend(_parse_conditional_symbols(lines))
     symbols.extend(_parse_type_symbols(lines))
     symbols.extend(_parse_function_pointer_symbols(lines))
+    symbols.extend(_parse_callback_binding_symbols(lines))
     symbols.extend(_parse_declaration_symbols(lines))
     symbols.extend(_parse_global_variable_symbols(lines))
     function_symbols, function_calls = _parse_functions(lines)
@@ -214,6 +216,29 @@ def _parse_function_pointer_symbols(lines: list[str]) -> list[ParsedSymbol]:
                 confidence=0.72,
             )
         )
+    return symbols
+
+
+def _parse_callback_binding_symbols(lines: list[str]) -> list[ParsedSymbol]:
+    symbols: list[ParsedSymbol] = []
+    for line_number, line in enumerate(lines, start=1):
+        stripped = _strip_line_comment(line).strip()
+        if len(stripped) > MAX_REGEX_LINE_LENGTH:
+            continue
+        for match in _CALLBACK_BINDING_RE.finditer(stripped):
+            target = match.group("target")
+            if target in _CONTROL_KEYWORDS:
+                continue
+            symbols.append(
+                ParsedSymbol(
+                    kind="callback_binding",
+                    name=target,
+                    signature=stripped,
+                    start_line=line_number,
+                    end_line=line_number,
+                    confidence=0.68,
+                )
+            )
     return symbols
 
 

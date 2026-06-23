@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import shutil
+import json
+import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ def parse_with_libclang(relative_path: str, source_text: str):
         "-D__attribute__(x)=",
         "-D__declspec(x)=",
     ]
+    args.extend(_compile_command_args(relative_path))
     try:
         index = cindex.Index.create()
         translation_unit = index.parse(
@@ -168,3 +172,61 @@ def _signature_for_lines(lines: list[str], start_line: int, end_line: int, fallb
     if ";" in snippet:
         snippet = snippet.split(";", 1)[0].strip() + ";"
     return snippet or fallback
+
+
+def _compile_command_args(relative_path: str) -> list[str]:
+    compile_commands = _find_compile_commands(Path.cwd())
+    if compile_commands is None:
+        return []
+    try:
+        entries = json.loads(compile_commands.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    wanted = relative_path.replace("\\", "/")
+    best_entry = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        file_name = str(entry.get("file") or "").replace("\\", "/")
+        if file_name.endswith(wanted) or wanted.endswith(file_name):
+            best_entry = entry
+            break
+    if best_entry is None:
+        return []
+    raw_args = best_entry.get("arguments")
+    if isinstance(raw_args, list):
+        tokens = [str(item) for item in raw_args]
+    else:
+        command = str(best_entry.get("command") or "")
+        tokens = shlex.split(command, posix=False) if command else []
+    return _filter_compile_args(tokens)
+
+
+def _find_compile_commands(start: Path) -> Path | None:
+    for path in [start, *start.parents]:
+        candidate = path / "compile_commands.json"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _filter_compile_args(tokens: list[str]) -> list[str]:
+    kept: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token in {"-c"}:
+            continue
+        if token == "-o":
+            index += 1
+            continue
+        if token in {"-I", "-D", "-U", "-isystem"} and index < len(tokens):
+            kept.extend([token, tokens[index]])
+            index += 1
+            continue
+        if token.startswith(("-I", "-D", "-U", "-std=", "-isystem")):
+            kept.append(token)
+    return kept

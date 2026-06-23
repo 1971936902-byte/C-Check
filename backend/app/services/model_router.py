@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import ModelNode, ReviewFile, ReviewTask, TaskStatus
+from app.db.models import CodeChunk, ModelNode, ReviewFile, ReviewTask, TaskStatus
 from app.schemas.model_response import ModelReviewResponse
 from app.services.check_types import check_types_prompt
 
@@ -875,10 +875,11 @@ async def invoke_selected_model(
         db.commit()
 
     if _should_chunk(task.files, settings) or (len(dispatch_pool.nodes) > 1 and len(task.files) > 1):
+        dispatch_files: Sequence[ReviewFile] = _rag_review_unit_files(db, task, settings) or task.files
         return await _invoke_chunked_review(
             node=task.model_node,
             dispatch_pool=dispatch_pool,
-            files=task.files,
+            files=dispatch_files,
             prompt=scoped_prompt,
             retry_instruction=retry_instruction,
             settings=settings,
@@ -898,7 +899,7 @@ async def invoke_selected_model(
         return await _invoke_chunked_review(
             node=task.model_node,
             dispatch_pool=dispatch_pool,
-            files=task.files,
+            files=_rag_review_unit_files(db, task, settings) or task.files,
             prompt=scoped_prompt,
             retry_instruction=retry_instruction,
             settings=settings,
@@ -922,6 +923,64 @@ def _with_rag_context(db: Session, task: ReviewTask, prompt: str, settings: Sett
     if not rag_context:
         return prompt
     return f"{prompt}\n\n{rag_context}"
+
+
+def _rag_review_unit_files(db: Session, task: ReviewTask, settings: Settings) -> list[ReviewFile]:
+    if not settings.rag_enabled or not settings.rag_review_units_enabled:
+        return []
+    try:
+        from app.services.code_index.indexer import load_or_build_code_index
+        from app.services.code_index.planner import plan_review_units
+
+        project = load_or_build_code_index(db, task, settings=settings)
+        chunks_by_id = {chunk.id: chunk for chunk in db.query(CodeChunk).filter_by(project_id=project.id).all()}
+        units = [unit for unit in plan_review_units(project) if unit.unit_type == "function"]
+    except Exception:
+        return []
+    if not units:
+        return []
+    unit_files: list[ReviewFile] = []
+    for unit in units:
+        parts: list[str] = [
+            f"===== REVIEW UNIT: {unit.unit_id} =====",
+            f"File: {unit.file_path}",
+            f"Symbol: {unit.symbol_name or ''}",
+            f"Lines: {unit.start_line}-{unit.end_line}",
+        ]
+        seen_chunks: set[str] = set()
+        for chunk_id in unit.chunk_ids:
+            chunk = chunks_by_id.get(chunk_id)
+            if chunk is None or chunk.id in seen_chunks:
+                continue
+            seen_chunks.add(chunk.id)
+            parts.append(
+                "\n".join(
+                    [
+                        f"\n--- CHUNK: {chunk.chunk_kind} {chunk.file.relative_path}:{chunk.start_line}-{chunk.end_line} {chunk.symbol_name or ''}".rstrip(),
+                        chunk.content,
+                    ]
+                )
+            )
+        source_text = "\n".join(parts)
+        unit_files.append(
+            ReviewFile(
+                relative_path=unit.file_path,
+                source_text=source_text,
+                size_bytes=len(source_text.encode("utf-8", errors="ignore")),
+            )
+        )
+    task.model_log = truncate_model_log(
+        "\n\n".join(
+            part
+            for part in [
+                task.model_log,
+                f"[RAG] Prepared {len(unit_files)} function review unit(s) for model dispatch.",
+            ]
+            if part
+        )
+    )
+    db.commit()
+    return unit_files
 
 
 async def check_model_health(node: ModelNode, settings: Settings | None = None) -> dict[str, Any]:
