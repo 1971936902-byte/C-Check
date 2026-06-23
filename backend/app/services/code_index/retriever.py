@@ -34,6 +34,43 @@ _COMMON_IDENTIFIERS = {
     "struct",
     "typedef",
 }
+_HIGH_RISK_IDENTIFIERS = {
+    "memcpy",
+    "memmove",
+    "strcpy",
+    "strncpy",
+    "sprintf",
+    "snprintf",
+    "scanf",
+    "sscanf",
+    "malloc",
+    "calloc",
+    "realloc",
+    "free",
+    "open",
+    "close",
+    "fopen",
+    "fclose",
+    "read",
+    "write",
+    "recv",
+    "send",
+    "lock",
+    "unlock",
+}
+_SYMBOL_KIND_WEIGHT = {
+    "function": 1.0,
+    "function_window": 0.9,
+    "declaration": 0.72,
+    "callsite": 0.68,
+    "macro": 0.6,
+    "type": 0.56,
+    "struct": 0.56,
+    "typedef": 0.56,
+    "enum": 0.56,
+    "global_variable": 0.45,
+    "file_summary": 0.35,
+}
 
 
 @dataclass(frozen=True)
@@ -63,6 +100,7 @@ def retrieve_context_for_files(
     target_paths = {file.relative_path for file in files}
     chunks_by_symbol = _chunks_by_symbol(db, project)
     contexts: dict[str, RetrievedContext] = {}
+    source_text_by_path = {file.relative_path: file.source_text for file in files}
 
     for source_file in files:
         identifiers = _identifiers(source_file.source_text)
@@ -81,8 +119,44 @@ def retrieve_context_for_files(
                 if current is None or context.score > current.score:
                     contexts[context.evidence_id] = context
 
-    ranked = sorted(contexts.values(), key=attrgetter("score"), reverse=True)
+    ranked = _rerank_contexts(db, project, list(contexts.values()), target_paths, source_text_by_path)
     return ranked[: settings.rag_keyword_top_k]
+
+
+def _rerank_contexts(
+    db: Session,
+    project: CodeProject,
+    contexts: list[RetrievedContext],
+    target_paths: set[str],
+    source_text_by_path: dict[str, str],
+) -> list[RetrievedContext]:
+    chunks_by_id = _chunks_by_id(db, project)
+    source_identifiers = set().union(*(_identifiers(text) for text in source_text_by_path.values())) if source_text_by_path else set()
+    source_has_high_risk_api = any(_has_high_risk_api(text) for text in source_text_by_path.values())
+    rescored: list[RetrievedContext] = []
+    for context in contexts:
+        chunk = chunks_by_id.get(context.chunk_id or "")
+        chunk_kind = chunk.chunk_kind if chunk else _kind_from_reason(context.reason)
+        relation_boost = _relation_boost(context.reason)
+        symbol_boost = _SYMBOL_KIND_WEIGHT.get(chunk_kind, 0.4)
+        file_boost = _file_relatedness_boost(context.file_path, target_paths)
+        risk_boost = _risk_api_boost(context.content, source_identifiers, source_has_high_risk_api)
+        noise_penalty = _noise_penalty(context.symbol_name, chunk_kind)
+        score = context.score + relation_boost + symbol_boost + file_boost + risk_boost - noise_penalty
+        rescored.append(
+            RetrievedContext(
+                chunk_id=context.chunk_id,
+                evidence_id=context.evidence_id,
+                file_path=context.file_path,
+                symbol_name=context.symbol_name,
+                start_line=context.start_line,
+                end_line=context.end_line,
+                content=context.content,
+                reason=context.reason,
+                score=score,
+            )
+        )
+    return sorted(rescored, key=attrgetter("score"), reverse=True)
 
 
 def _direct_call_contexts(
@@ -267,6 +341,77 @@ def _chunks_by_symbol(db: Session, project: CodeProject) -> dict[str, CodeChunk]
         if chunk.symbol_id and (chunk.symbol_id not in by_symbol or chunk.chunk_kind == "function"):
             by_symbol[chunk.symbol_id] = chunk
     return by_symbol
+
+
+def _chunks_by_id(db: Session, project: CodeProject) -> dict[str, CodeChunk]:
+    return {
+        chunk.id: chunk
+        for chunk in db.scalars(select(CodeChunk).where(CodeChunk.project_id == project.id)).all()
+    }
+
+
+def _relation_boost(reason: str) -> float:
+    if reason == "调用关系":
+        return 3.0
+    if reason == "include关系":
+        return 1.4
+    if reason == "声明/宏/类型/全局变量":
+        return 1.2
+    if reason == "上游调用者":
+        return 0.9
+    if reason.startswith("关键词检索"):
+        return 0.2
+    if reason == "向量相似检索":
+        return 0.1
+    return 0.0
+
+
+def _kind_from_reason(reason: str) -> str:
+    if reason == "include关系":
+        return "file_summary"
+    if reason == "调用关系":
+        return "function"
+    if reason == "向量相似检索":
+        return "function"
+    return "symbol"
+
+
+def _file_relatedness_boost(file_path: str, target_paths: set[str]) -> float:
+    return max((_path_relatedness(file_path, target_path) for target_path in target_paths), default=0.0)
+
+
+def _path_relatedness(left: str, right: str) -> float:
+    left_parts = [part for part in left.replace("\\", "/").split("/") if part]
+    right_parts = [part for part in right.replace("\\", "/").split("/") if part]
+    if not left_parts or not right_parts:
+        return 0.0
+    common_prefix = 0
+    for left_part, right_part in zip(left_parts, right_parts):
+        if left_part != right_part:
+            break
+        common_prefix += 1
+    left_stem = left_parts[-1].rsplit(".", 1)[0]
+    right_stem = right_parts[-1].rsplit(".", 1)[0]
+    stem_bonus = 1.0 if left_stem == right_stem else 0.0
+    same_parent_bonus = 0.7 if len(left_parts) > 1 and len(right_parts) > 1 and left_parts[-2] == right_parts[-2] else 0.0
+    return min(2.0, (common_prefix * 0.35) + stem_bonus + same_parent_bonus)
+
+
+def _risk_api_boost(content: str, source_identifiers: set[str], source_has_high_risk_api: bool) -> float:
+    identifiers = _identifiers(content)
+    risk_hits = identifiers & _HIGH_RISK_IDENTIFIERS
+    source_overlap = identifiers & source_identifiers & _HIGH_RISK_IDENTIFIERS
+    return (0.35 * len(risk_hits)) + (0.55 * len(source_overlap)) + (0.25 if source_has_high_risk_api and risk_hits else 0.0)
+
+
+def _noise_penalty(symbol_name: str | None, chunk_kind: str) -> float:
+    if not symbol_name:
+        return 0.0
+    if chunk_kind in {"global_variable", "macro"} and (len(symbol_name) <= 4 or symbol_name.startswith("_")):
+        return 0.8
+    if symbol_name in {"err", "ret", "tmp", "value", "parent", "start", "config", "callback"}:
+        return 1.2
+    return 0.0
 
 
 def _function_symbol_ids_for_file(db: Session, project: CodeProject, relative_path: str) -> set[str]:

@@ -19,11 +19,11 @@ _CONTROL_KEYWORDS = {
 }
 _FUNCTION_HEADER_RE = re.compile(
     rf"^\s*(?P<prefix>[A-Za-z_][A-Za-z0-9_*\s]*?)"
-    rf"\s+(?P<name>{_IDENTIFIER})\s*\([^;]*\)\s*\{{"
+    rf"[\s*]+(?P<name>{_IDENTIFIER})\s*\([^;]*\)\s*\{{"
 )
 _FUNCTION_DECL_RE = re.compile(
     rf"^\s*(?P<prefix>[A-Za-z_][A-Za-z0-9_*\s]*?)"
-    rf"\s+(?P<name>{_IDENTIFIER})\s*\([^;{{}}]*\)\s*;"
+    rf"[\s*]+(?P<name>{_IDENTIFIER})\s*\([^;{{}}]*\)\s*;"
 )
 _GLOBAL_VAR_RE = re.compile(
     rf"^\s*[A-Za-z_][A-Za-z0-9_*\s]*\s+(?P<name>{_IDENTIFIER})\s*(?:=\s*[^;]+)?;"
@@ -232,7 +232,7 @@ def _parse_functions(lines: list[str]) -> tuple[list[ParsedSymbol], list[ParsedC
                 confidence=0.85,
             )
         )
-        for body_index in range(index + 1, end_index + 1):
+        for body_index in range(index, end_index + 1):
             for call_match in _CALL_RE.finditer(_strip_line_comment(lines[body_index])):
                 callee = call_match.group("name")
                 if callee in _CONTROL_KEYWORDS or callee == name:

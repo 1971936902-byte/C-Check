@@ -107,6 +107,78 @@ def test_parse_c_source_handles_driver_style_file_without_regex_backtracking():
     assert any(call.callee_name == "rt_device_register" for call in parsed.calls)
 
 
+def test_parse_c_source_extracts_common_function_definition_styles():
+    source = """
+static inline int same_line(int value) { return value; }
+
+char *pointer_return(const char *input)
+{
+    return (char *)input;
+}
+
+RT_WEAK rt_err_t driver_style(
+        struct rt_device *dev,
+        int flags)
+{
+    return rt_device_register(dev, "demo", flags);
+}
+"""
+
+    parsed = parse_c_source("src/styles.c", source)
+    function_names = {symbol.name for symbol in parsed.symbols if symbol.kind == "function"}
+
+    assert {"same_line", "pointer_return", "driver_style"} <= function_names
+    assert any(call.caller_name == "driver_style" and call.callee_name == "rt_device_register" for call in parsed.calls)
+
+
+def test_same_named_function_prefers_related_file_definition(db_session):
+    user = User(username="same-name-user", password_hash=hash_password("pw"))
+    node = ModelNode(display_name="RAG node", model_identifier="review-model", base_url="http://model-node", is_enabled=True)
+    task = ReviewTask(
+        owner=user,
+        model_node=node,
+        input_mode="folder",
+        display_name="same-name",
+        file_count=3,
+        check_types=["memory_safety"],
+    )
+    task.files.extend(
+        [
+            ReviewFile(
+                relative_path="drivers/foo.c",
+                source_text='int init_device(void);\nint run(void) { return init_device(); }\n',
+                size_bytes=64,
+            ),
+            ReviewFile(
+                relative_path="drivers/foo_helpers.c",
+                source_text="int init_device(void) { return 1; }\n",
+                size_bytes=36,
+            ),
+            ReviewFile(
+                relative_path="net/foo_helpers.c",
+                source_text="int init_device(void) { return 2; }\n",
+                size_bytes=36,
+            ),
+        ]
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+    edge = db_session.query(CodeEdge).filter_by(edge_type="FUNCTION_CALLS_FUNCTION").one()
+    target = db_session.get(CodeSymbol, edge.target_id)
+    contexts = retrieve_context_for_files(
+        db_session,
+        task,
+        [task.files[0]],
+        settings=Settings(_env_file=None, allow_insecure_defaults=True, rag_keyword_top_k=5),
+    )
+
+    assert target is not None
+    assert target.file.relative_path == "drivers/foo_helpers.c"
+    assert contexts[0].file_path == "drivers/foo_helpers.c"
+
+
 def test_build_code_index_persists_graph_entities(db_session):
     task = _make_task()
     db_session.add(task)

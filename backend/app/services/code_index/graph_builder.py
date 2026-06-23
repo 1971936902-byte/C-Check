@@ -153,8 +153,29 @@ def build_usage_edges(project: CodeProject, chunk_symbols: list[CodeSymbol], sym
 def _best_symbol_match(symbols: list[CodeSymbol], caller_path: str) -> CodeSymbol | None:
     if not symbols:
         return None
-    for symbol in symbols:
-        if symbol.file and symbol.file.relative_path == caller_path:
-            return symbol
-    functions = [symbol for symbol in symbols if symbol.kind == "function"]
-    return functions[0] if functions else symbols[0]
+    return max(
+        symbols,
+        key=lambda symbol: (
+            10 if symbol.kind == "function" else 0,
+            5 if symbol.file and symbol.file.relative_path == caller_path else 0,
+            2 if symbol.kind == "declaration" else 0,
+            _path_relatedness(caller_path, symbol.file.relative_path if symbol.file else ""),
+            symbol.confidence,
+        ),
+    )
+
+
+def _path_relatedness(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    left_parts = [part for part in left.replace("\\", "/").split("/") if part]
+    right_parts = [part for part in right.replace("\\", "/").split("/") if part]
+    common_prefix = 0
+    for left_part, right_part in zip(left_parts, right_parts):
+        if left_part != right_part:
+            break
+        common_prefix += 1
+    left_stem = left_parts[-1].rsplit(".", 1)[0] if left_parts else ""
+    right_stem = right_parts[-1].rsplit(".", 1)[0] if right_parts else ""
+    stem_bonus = 1.0 if left_stem and left_stem == right_stem else 0.0
+    return common_prefix + stem_bonus
