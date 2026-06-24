@@ -43,7 +43,7 @@ RESPONSE_CONTRACT = """
 Return exactly one compact JSON object. No Markdown.
 Top-level keys: summary, score, findings.
 Use Chinese. Keep summary under 80 Chinese chars.
-Return at most 3 findings for this request, only concrete C defects.
+Return up to 12 high-value findings for this request, only concrete C defects.
 Each finding uses: severity, category, title, description, file_path, line, evidence_ids, call_chain, confidence, remediation, code_snippet, fixed_snippet.
 Keep title under 40 chars. Keep description and remediation under 120 Chinese chars each.
 The line value must point to the exact visible statement or declaration causing the issue.
@@ -52,6 +52,16 @@ Use code_snippet/fixed_snippet as [] unless one line is essential; then include 
 Use evidence_ids as [] unless Evidence E1/E2 etc directly supports the finding.
 Use call_chain as [] unless the finding depends on an inter-function call path.
 Use lowercase enum values exactly. Use null for line only when no precise line exists.
+Before producing findings, internally scan these categories in order:
+1. integer overflow, integer underflow, truncation, divide-by-zero, and unsafe size calculations;
+2. memcpy/memmove/strcpy-style copy bounds, fixed-array or heap out-of-bounds read/write, and malloc(n) followed by access at [n];
+3. malloc/free lifetime issues: double free, use-after-free, dangling pointer, and free followed by read/write;
+4. resource leaks: pointer overwritten with 0/NULL before free, missing free/close/unlock on visible paths;
+5. resource exhaustion: infinite recursion, large recursive stack frames, unbounded allocation loops, and input-controlled huge allocation.
+If different defect categories appear in the same function, report them separately.
+Do not stop after the first obvious memcpy, malloc, or free issue.
+Do not merge double free with use-after-free, or out-of-bounds read with out-of-bounds write.
+Dedupe exact duplicates, but preserve different consequences from the same root cause.
 """
 
 
@@ -697,6 +707,53 @@ def _normalize_model_contract(value: Any) -> Any:
     for finding in findings:
         if not isinstance(finding, dict):
             continue
+        severity = finding.get("severity")
+        if isinstance(severity, str):
+            normalized_severity = {
+                "高": "high",
+                "高危": "high",
+                "严重": "high",
+                "中": "medium",
+                "中危": "medium",
+                "中等": "medium",
+                "低": "low",
+                "低危": "low",
+                "建议": "suggestion",
+                "提示": "suggestion",
+            }.get(severity.strip())
+            if normalized_severity is not None:
+                finding["severity"] = normalized_severity
+        category = finding.get("category")
+        if isinstance(category, str):
+            normalized_category = {
+                "内存安全": "memory_safety",
+                "内存安全问题": "memory_safety",
+                "缓冲区溢出": "buffer_overflow",
+                "堆缓冲区溢出": "buffer_overflow",
+                "栈缓冲区溢出": "buffer_overflow",
+                "指针安全": "pointer_safety",
+                "空指针": "pointer_safety",
+                "野指针": "pointer_safety",
+                "资源泄漏": "resource_leak",
+                "内存泄漏": "resource_leak",
+                "逻辑错误": "logic",
+                "逻辑": "logic",
+                "安全": "security",
+                "输入校验": "input_validation",
+                "输入验证": "input_validation",
+                "整数安全": "integer_safety",
+                "整数溢出": "integer_safety",
+                "整数溢出与类型转换": "integer_safety",
+                "并发": "concurrency",
+                "并发与线程安全": "concurrency",
+                "性能": "performance",
+                "代码风格": "style",
+                "可维护性": "maintainability",
+                "兼容性": "compatibility",
+                "可移植性": "portability",
+            }.get(category.strip())
+            if normalized_category is not None:
+                finding["category"] = normalized_category
         fallback_line = finding.get("line")
         if not isinstance(fallback_line, int):
             fallback_line = None
@@ -706,7 +763,11 @@ def _normalize_model_contract(value: Any) -> Any:
                 continue
             normalized_lines = []
             for line in snippet:
-                if not isinstance(line, dict):
+                if isinstance(line, str):
+                    if fallback_line is None:
+                        continue
+                    line = {"line": fallback_line, "content": line, "kind": "context"}
+                elif not isinstance(line, dict):
                     continue
                 if line.get("kind") not in {"context", "removed", "added"}:
                     line = {**line, "kind": "context"}
@@ -729,6 +790,8 @@ def _normalize_model_contract(value: Any) -> Any:
         confidence = finding.get("confidence")
         if confidence is not None and not isinstance(confidence, (int, float)):
             finding["confidence"] = None
+        elif isinstance(confidence, (int, float)) and confidence > 1:
+            finding["confidence"] = max(0, min(1, float(confidence) / 100))
     return value
 
 

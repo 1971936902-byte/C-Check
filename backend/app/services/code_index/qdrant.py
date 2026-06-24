@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +40,8 @@ class QdrantCodeIndexClient:
                 headers=headers,
                 json=payload,
             )
+            if response.status_code == 409:
+                return
             response.raise_for_status()
 
     def ensure_collection_sync(self, *, vector_size: int) -> None:
@@ -51,6 +55,8 @@ class QdrantCodeIndexClient:
                 headers=headers,
                 json=payload,
             )
+            if response.status_code == 409:
+                return
             response.raise_for_status()
 
     async def upsert_points(self, points: list[QdrantPoint]) -> None:
@@ -60,7 +66,11 @@ class QdrantCodeIndexClient:
         headers = {"api-key": self.api_key} if self.api_key else {}
         payload = {
             "points": [
-                {"id": point.point_id, "vector": point.vector, "payload": point.payload}
+                {
+                    "id": _qdrant_point_id(point.point_id),
+                    "vector": point.vector,
+                    "payload": _qdrant_payload(point),
+                }
                 for point in points
             ]
         }
@@ -79,7 +89,11 @@ class QdrantCodeIndexClient:
         headers = {"api-key": self.api_key} if self.api_key else {}
         payload = {
             "points": [
-                {"id": point.point_id, "vector": point.vector, "payload": point.payload}
+                {
+                    "id": _qdrant_point_id(point.point_id),
+                    "vector": point.vector,
+                    "payload": _qdrant_payload(point),
+                }
                 for point in points
             ]
         }
@@ -140,3 +154,18 @@ class QdrantCodeIndexClient:
             data = response.json()
         result = data.get("result", [])
         return result if isinstance(result, list) else []
+
+
+def _qdrant_point_id(point_id: str) -> str:
+    """Convert internal vector ids into Qdrant-compatible UUID point ids."""
+    try:
+        return str(uuid.UUID(str(point_id)))
+    except (ValueError, TypeError, AttributeError):
+        digest = hashlib.sha256(str(point_id).encode("utf-8", errors="ignore")).digest()
+        return str(uuid.UUID(bytes=digest[:16], version=5))
+
+
+def _qdrant_payload(point: QdrantPoint) -> dict[str, Any]:
+    payload = dict(point.payload)
+    payload.setdefault("vector_id", point.point_id)
+    return payload

@@ -24,6 +24,17 @@ export interface ResourceSnapshot { captured_at: string; system: SystemResource;
 export interface AdminUser extends User { created_at: string }
 export interface Prompt { id: string; version: number; body: string; is_active: boolean; creator_id?: string | null; created_at: string }
 export interface AdminTask { id: string; owner_id: string; model_node_id: string; display_name: string; status: TaskStatus; progress: number; queue_priority?: number; queued_ahead_count?: number | null; finding_count: number; error_message?: string | null; created_at: string }
+export interface CodeIndexSymbol {
+  id: string; kind: string; name: string; file_path: string; start_line: number; end_line: number; confidence: number; source_tool: string
+}
+export interface CodeIndexEdge {
+  id: string; edge_type: string; source_id: string; target_id?: string | null; line?: number | null; confidence: number; metadata: Record<string, unknown>
+}
+export interface CodeIndexObservability {
+  enabled: boolean; project_id?: string | null; stats: Record<string, unknown>; target_files: string[]
+  raw_candidate_count: number; selected_count: number; rejected_count: number; bucket_counts: Record<string, number>
+  selected: Record<string, unknown>[]; rejected: Record<string, unknown>[]; budget: Record<string, unknown>
+}
 export interface ReviewTaskPage { items: ReviewTask[]; total: number }
 export type ModelDeploymentStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'manual_required'
 export interface ModelCatalogItem {

@@ -144,6 +144,50 @@ def test_parse_response_normalizes_unknown_snippet_kind_to_context():
     assert parsed.findings[0].fixed_snippet[0].kind.value == "context"
 
 
+def test_parse_response_normalizes_chinese_enums_confidence_and_string_snippets():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "发现多个问题",
+                                "score": 85,
+                                "findings": [
+                                    {
+                                        "severity": "高",
+                                        "category": "整数溢出与类型转换",
+                                        "title": "整数溢出",
+                                        "description": "整数相加可能溢出，导致后续分配大小错误。",
+                                        "file_path": "dvcp.c",
+                                        "line": 54,
+                                        "evidence_ids": ["E1", "bad"],
+                                        "call_chain": [],
+                                        "confidence": 90,
+                                        "remediation": "分配前检查整数运算是否溢出。",
+                                        "code_snippet": ["int size1 = img.width + img.height;"],
+                                        "fixed_snippet": [],
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    finding = parsed.findings[0]
+    assert finding.severity.value == "high"
+    assert finding.category.value == "integer_safety"
+    assert finding.confidence == 0.9
+    assert finding.evidence_ids == ["E1"]
+    assert finding.code_snippet[0].line == 54
+    assert finding.code_snippet[0].content == "int size1 = img.width + img.height;"
+
+
 def test_parse_response_rejects_nested_finding_from_truncated_response():
     content = """
 {

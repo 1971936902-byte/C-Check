@@ -8,7 +8,7 @@ from time import monotonic
 from app.core.config import get_settings
 from app.db.models import CodeEdge, CodeSymbol, Report, ReviewEvidence, ReviewTask, TaskStatus
 from app.db.session import SessionLocal
-from app.schemas.model_response import CodeLine, CodeLineKind, ModelReviewResponse
+from app.schemas.model_response import CodeLine, CodeLineKind, ModelReviewResponse, ReviewFinding
 from app.services.model_router import ModelInvocationError, invoke_selected_model, truncate_model_log
 from app.services.reports import build_report
 from app.worker import celery_app
@@ -111,6 +111,59 @@ def _finding_has_actionable_anchor(task: ReviewTask, file_path: str, line_number
     if line_number < 1 or line_number > len(lines):
         return False
     return _line_has_actionable_c_anchor(lines[line_number - 1])
+
+
+def _nearest_actionable_line(task: ReviewTask, finding: ReviewFinding, *, radius: int = 4) -> int | None:
+    if finding.line is None:
+        return None
+    source = _source_file_for_finding(task, finding.file_path)
+    if source is None:
+        return None
+    lines = source.source_text.splitlines()
+    if finding.line < 1 or finding.line > len(lines):
+        return None
+    original_line = lines[finding.line - 1]
+    if _line_has_actionable_c_anchor(original_line):
+        return finding.line
+    if DATA_ONLY_LINE_PATTERN.match(original_line.strip()):
+        return None
+
+    snippet_contents = {
+        item.content.strip()
+        for item in finding.code_snippet
+        if item.content and _line_has_actionable_c_anchor(item.content)
+    }
+    if snippet_contents:
+        for index, line in enumerate(lines, start=1):
+            if line.strip() in snippet_contents:
+                return index
+
+    start = max(1, finding.line - radius)
+    end = min(len(lines), finding.line + radius)
+    for distance in range(1, radius + 1):
+        candidates = [finding.line + distance, finding.line - distance]
+        for candidate in candidates:
+            if candidate < start or candidate > end:
+                continue
+            if _line_has_actionable_c_anchor(lines[candidate - 1]):
+                return candidate
+    return None
+
+
+def _normalize_finding_anchors(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
+    normalized = []
+    changed = False
+    for finding in result.findings:
+        if _finding_has_actionable_anchor(task, finding.file_path, finding.line):
+            normalized.append(finding)
+            continue
+        anchor = _nearest_actionable_line(task, finding)
+        if anchor is None:
+            normalized.append(finding)
+            continue
+        normalized.append(finding.model_copy(update={"line": anchor}))
+        changed = True
+    return result.model_copy(update={"findings": normalized}) if changed else result
 
 
 def _filter_unanchored_findings(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
@@ -229,7 +282,7 @@ def _link_findings_to_evidence(task: ReviewTask, result: ModelReviewResponse) ->
 def _postprocess_review_result(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
     return _validate_finding_evidence(
         task,
-        _enrich_missing_code_snippets(task, _filter_unanchored_findings(task, result)),
+        _enrich_missing_code_snippets(task, _filter_unanchored_findings(task, _normalize_finding_anchors(task, result))),
     )
 
 
@@ -239,7 +292,8 @@ def _retry_instruction(attempt: int, exc: Exception) -> str:
             "The previous model output backend JSON schema audit failed.",
             "Return exactly one smaller complete JSON object only. Do not include Markdown, comments, prose, or extra keys.",
             "The object must contain exactly: summary, score, findings. Every finding must match the required enum values and field types.",
-            "Return at most 3 findings. Keep descriptions, remediation, and snippets short. Escape all quotes/newlines as valid JSON strings.",
+            "Return up to 12 high-value findings. Keep descriptions, remediation, and snippets short. Escape all quotes/newlines as valid JSON strings.",
+            "Internally scan integer, bounds, lifetime, leak, and exhaustion categories before selecting findings.",
             f"Audit failure from attempt {attempt}:",
         ]
         if isinstance(exc, ModelInvocationError):

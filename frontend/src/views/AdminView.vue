@@ -2,9 +2,9 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CirclePlus, Connection, Download, Refresh } from '@element-plus/icons-vue'
-import { adminApi, errorMessage } from '../api/client'
+import { adminApi, codeIndexApi, errorMessage } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
-import type { AdminTask, AdminUser, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, ResourceSnapshot, TaskStatus } from '../types'
+import type { AdminTask, AdminUser, CodeIndexEdge, CodeIndexObservability, CodeIndexSymbol, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, ResourceSnapshot, TaskStatus } from '../types'
 import { validateModel, validateNewUser, validatePrompt } from './form-validation'
 
 const active = ref('dashboard')
@@ -16,6 +16,12 @@ const modelCatalog = ref<ModelCatalogItem[]>([])
 const modelDeployments = ref<ModelDeployment[]>([])
 const prompts = ref<Prompt[]>([])
 const tasks = ref<AdminTask[]>([])
+const ragTaskId = ref('')
+const ragSymbols = ref<CodeIndexSymbol[]>([])
+const ragEdges = ref<CodeIndexEdge[]>([])
+const ragObservability = ref<CodeIndexObservability>()
+const ragLoading = ref(false)
+const selectedGraphNodeId = ref('')
 const resourceSamples = ref<ResourceSnapshot[]>([])
 const taskStatus = ref<TaskStatus | ''>('')
 const loading = ref(false)
@@ -110,11 +116,101 @@ const succeededDeploymentNodeIds = computed(() => new Set(
 const deployedModelNodes = computed(() => models.value
   .filter((model) => model.is_enabled && (model.is_default || succeededDeploymentNodeIds.value.has(model.id)))
   .sort((a, b) => Number(b.is_default) - Number(a.is_default) || a.display_name.localeCompare(b.display_name)))
+const indexedTasks = computed(() => tasks.value.filter((task) => ['completed', 'running', 'failed'].includes(task.status)))
+const selectedRagTask = computed(() => tasks.value.find((task) => task.id === ragTaskId.value))
+const selectedGraphNode = computed(() => graphNodes.value.find((node) => node.id === selectedGraphNodeId.value))
+const ragStats = computed(() => {
+  const stats = ragObservability.value?.stats || {}
+  return {
+    files: Number(stats.files || 0),
+    symbols: Number(stats.symbols || ragSymbols.value.length),
+    edges: Number(stats.edges || ragEdges.value.length),
+    chunks: Number(stats.chunks || 0),
+    embeddings: Number(stats.embeddings || 0),
+    qdrant_points: Number(stats.qdrant_points || 0),
+  }
+})
+const graphSymbolCounts = computed(() => countBy(ragSymbols.value.map((symbol) => symbol.kind)))
+const graphEdgeCounts = computed(() => countBy(ragEdges.value.map((edge) => edge.edge_type)))
+const graphToolCounts = computed(() => countBy(ragSymbols.value.map((symbol) => symbol.source_tool)))
+const graphSymbolCountEntries = computed(() => Object.entries(graphSymbolCounts.value).sort((a, b) => b[1] - a[1]))
+const graphEdgeCountEntries = computed(() => Object.entries(graphEdgeCounts.value).sort((a, b) => b[1] - a[1]))
+const graphToolCountEntries = computed(() => Object.entries(graphToolCounts.value).sort((a, b) => b[1] - a[1]))
+const graphBucketEntries = computed(() => Object.entries(ragObservability.value?.bucket_counts || {}).sort((a, b) => b[1] - a[1]))
+const symbolById = computed(() => new Map(ragSymbols.value.map((symbol) => [symbol.id, symbol])))
+const visibleSymbols = computed(() => {
+  const rank: Record<string, number> = { function: 0, declaration: 1, macro: 2, typedef: 3, struct: 4, enum: 5, global_variable: 6 }
+  return [...ragSymbols.value]
+    .sort((a, b) => (rank[a.kind] ?? 20) - (rank[b.kind] ?? 20) || a.file_path.localeCompare(b.file_path) || a.start_line - b.start_line)
+    .slice(0, 80)
+})
+const graphNodes = computed(() => {
+  const symbols = visibleSymbols.value
+  const filePaths = [...new Set(symbols.map((symbol) => symbol.file_path))].slice(0, 24)
+  const nodes: Array<{ id: string; label: string; kind: string; file_path?: string; line?: number; source_tool?: string; x: number; y: number }> = []
+  const width = 920
+  const height = 390
+  filePaths.forEach((file, index) => {
+    const y = 58 + index * Math.max(26, Math.min(54, 280 / Math.max(1, filePaths.length - 1)))
+    nodes.push({ id: `file:${file}`, label: compactPath(file), kind: 'file', file_path: file, x: 110, y })
+  })
+  symbols.forEach((symbol, index) => {
+    const angle = (index / Math.max(1, symbols.length)) * Math.PI * 2
+    const ring = 1 + (index % 3) * 0.18
+    const x = width * 0.62 + Math.cos(angle) * 230 * ring
+    const y = height * 0.5 + Math.sin(angle) * 140 * ring
+    nodes.push({ id: symbol.id, label: symbol.name, kind: symbol.kind, file_path: symbol.file_path, line: symbol.start_line, source_tool: symbol.source_tool, x, y })
+  })
+  return nodes
+})
+const graphNodeIds = computed(() => new Set(graphNodes.value.map((node) => node.id)))
+const graphLinks = computed(() => {
+  const links: Array<{ id: string; source: string; target: string; edge_type: string; line?: number | null }> = []
+  for (const symbol of visibleSymbols.value) {
+    const fileId = `file:${symbol.file_path}`
+    if (graphNodeIds.value.has(fileId)) links.push({ id: `file-edge:${symbol.id}`, source: fileId, target: symbol.id, edge_type: 'FILE_CONTAINS_SYMBOL' })
+  }
+  for (const edge of ragEdges.value) {
+    if (edge.target_id && graphNodeIds.value.has(edge.source_id) && graphNodeIds.value.has(edge.target_id)) {
+      links.push({ id: edge.id, source: edge.source_id, target: edge.target_id, edge_type: edge.edge_type, line: edge.line })
+    }
+  }
+  return links.slice(0, 160)
+})
+const graphNodePosition = computed(() => new Map(graphNodes.value.map((node) => [node.id, node])))
 
 const isDefaultCatalogModel = (item: ModelCatalogItem) => {
   const model = defaultModel.value
   if (!model) return false
   return model.model_identifier === item.model_identifier || model.model_identifier === item.default_served_model_name
+}
+
+const countBy = (values: string[]) => values.reduce<Record<string, number>>((acc, value) => {
+  const key = value || 'unknown'
+  acc[key] = (acc[key] || 0) + 1
+  return acc
+}, {})
+
+const compactPath = (path: string) => {
+  const parts = path.split(/[\\/]/).filter(Boolean)
+  if (parts.length <= 2) return path
+  return `${parts[0]}/.../${parts[parts.length - 1]}`
+}
+
+const nodeClass = (kind: string) => {
+  if (kind === 'file') return 'graph-node-file'
+  if (kind === 'function') return 'graph-node-function'
+  if (kind === 'declaration') return 'graph-node-declaration'
+  if (kind === 'macro') return 'graph-node-macro'
+  return 'graph-node-symbol'
+}
+
+const edgeColor = (type: string) => {
+  if (type === 'FUNCTION_CALLS_FUNCTION') return '#3d82c4'
+  if (type === 'FILE_CONTAINS_SYMBOL') return '#9fb6c9'
+  if (type.includes('INCLUDES')) return '#75a66b'
+  if (type.includes('USES')) return '#d19a45'
+  return '#8d9fb1'
 }
 
 const isDeployedCatalogModel = (item: ModelCatalogItem) => {
@@ -205,6 +301,7 @@ async function load() {
     modelTableKey.value += 1
     prompts.value = p.data
     tasks.value = t.data
+    if (!ragTaskId.value && t.data.length) ragTaskId.value = t.data.find((task) => task.status === 'completed')?.id || t.data[0].id
   } catch (e) {
     ElMessage.error(errorMessage(e))
   } finally {
@@ -225,6 +322,36 @@ async function loadResources(silent = false) {
     if (!silent) ElMessage.error(errorMessage(e))
   } finally {
     resourceLoading.value = false
+  }
+}
+
+async function loadRagGraph() {
+  if (!ragTaskId.value) {
+    ragSymbols.value = []
+    ragEdges.value = []
+    ragObservability.value = undefined
+    selectedGraphNodeId.value = ''
+    return
+  }
+  ragLoading.value = true
+  try {
+    const [symbols, graph, observability] = await Promise.all([
+      codeIndexApi.symbols(ragTaskId.value),
+      codeIndexApi.graph(ragTaskId.value),
+      codeIndexApi.observability(ragTaskId.value),
+    ])
+    ragSymbols.value = symbols.data
+    ragEdges.value = graph.data
+    ragObservability.value = observability.data
+    selectedGraphNodeId.value = graphNodes.value[0]?.id || ''
+  } catch (e) {
+    ragSymbols.value = []
+    ragEdges.value = []
+    ragObservability.value = undefined
+    selectedGraphNodeId.value = ''
+    ElMessage.error(errorMessage(e))
+  } finally {
+    ragLoading.value = false
   }
 }
 
@@ -429,7 +556,11 @@ watch(active, (value) => {
     return
   }
   if (value === 'resources') loadResources(true)
+  if (value === 'rag-graph') loadRagGraph()
   startDeploymentTimer()
+})
+watch(ragTaskId, () => {
+  if (active.value === 'rag-graph') loadRagGraph()
 })
 watch(autoRefresh, startResourceTimer)
 onMounted(async () => { await Promise.all([load(), loadResources(true)]); startResourceTimer(); startDeploymentTimer() })
@@ -669,6 +800,108 @@ onUnmounted(() => {
             <el-table-column label="创建时间" width="180"><template #default="{ row }">{{ date(row.created_at) }}</template></el-table-column>
             <el-table-column label="操作" width="210"><template #default="{ row }"><el-button link type="primary" :disabled="row.is_active" @click="activatePrompt(row.id)">启用</el-button><el-button link type="primary" @click="openPrompt(row)">修改</el-button><el-button link type="danger" :disabled="row.is_active || prompts.length <= 1" @click="removePrompt(row)">删除</el-button></template></el-table-column>
           </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="RAG 图谱" name="rag-graph">
+          <div class="table-tools rag-graph-tools">
+            <div>
+              <span>选择已创建索引的审查任务</span>
+              <el-select v-model="ragTaskId" filterable placeholder="请选择任务">
+                <el-option v-for="task in indexedTasks" :key="task.id" :label="`${task.display_name} · ${task.status}`" :value="task.id" />
+              </el-select>
+            </div>
+            <el-button :icon="Refresh" :loading="ragLoading" :disabled="!ragTaskId" @click="loadRagGraph">刷新图谱</el-button>
+          </div>
+
+          <el-empty v-if="!ragTaskId" description="暂无可查看的审查任务" />
+          <el-alert v-else-if="ragObservability && !ragObservability.enabled" title="RAG 可观测性未启用" type="warning" :closable="false" />
+          <div v-else v-loading="ragLoading" class="rag-graph-view">
+            <section class="rag-summary-grid">
+              <article><span>文件</span><b>{{ ragStats.files }}</b></article>
+              <article><span>符号</span><b>{{ ragStats.symbols }}</b></article>
+              <article><span>关系边</span><b>{{ ragStats.edges }}</b></article>
+              <article><span>切片</span><b>{{ ragStats.chunks }}</b></article>
+              <article><span>向量</span><b>{{ ragStats.embeddings }}</b></article>
+              <article><span>Qdrant 点</span><b>{{ ragStats.qdrant_points }}</b></article>
+            </section>
+
+            <section class="rag-graph-layout">
+              <article class="rag-canvas-card">
+                <div class="section-heading">
+                  <div><h2>索引图结构</h2><p>{{ selectedRagTask?.display_name || '未选择任务' }}，展示最多 80 个高价值节点和 160 条关系边。</p></div>
+                </div>
+                <svg class="rag-graph-canvas" viewBox="0 0 920 390" role="img" aria-label="RAG 索引图结构">
+                  <defs>
+                    <marker id="rag-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8d9fb1" />
+                    </marker>
+                  </defs>
+                  <g>
+                    <line
+                      v-for="link in graphLinks"
+                      :key="link.id"
+                      :x1="graphNodePosition.get(link.source)?.x"
+                      :y1="graphNodePosition.get(link.source)?.y"
+                      :x2="graphNodePosition.get(link.target)?.x"
+                      :y2="graphNodePosition.get(link.target)?.y"
+                      :stroke="edgeColor(link.edge_type)"
+                      stroke-width="1.4"
+                      stroke-opacity="0.58"
+                      marker-end="url(#rag-arrow)"
+                    />
+                  </g>
+                  <g>
+                    <g
+                      v-for="node in graphNodes"
+                      :key="node.id"
+                      class="rag-graph-node"
+                      :class="[nodeClass(node.kind), { 'is-selected': selectedGraphNodeId === node.id }]"
+                      :transform="`translate(${node.x}, ${node.y})`"
+                      @click="selectedGraphNodeId = node.id"
+                    >
+                      <circle :r="node.kind === 'file' ? 15 : 10" />
+                      <text :x="node.kind === 'file' ? 20 : 14" y="4">{{ node.label }}</text>
+                    </g>
+                  </g>
+                </svg>
+              </article>
+
+              <aside class="rag-side-panel">
+                <article class="rag-detail-card">
+                  <h3>节点详情</h3>
+                  <template v-if="selectedGraphNode">
+                    <b>{{ selectedGraphNode.label }}</b>
+                    <small>{{ selectedGraphNode.kind }}</small>
+                    <p>{{ selectedGraphNode.file_path || '--' }}<span v-if="selectedGraphNode.line">:{{ selectedGraphNode.line }}</span></p>
+                    <p v-if="selectedGraphNode.source_tool">来源：{{ selectedGraphNode.source_tool }}</p>
+                  </template>
+                  <el-empty v-else description="点击图中节点查看详情" />
+                </article>
+                <article class="rag-detail-card">
+                  <h3>符号来源</h3>
+                  <div v-for="[name, count] in graphToolCountEntries" :key="name" class="rag-stat-row"><span>{{ name }}</span><b>{{ count }}</b></div>
+                </article>
+                <article class="rag-detail-card">
+                  <h3>符号类型</h3>
+                  <div v-for="[name, count] in graphSymbolCountEntries.slice(0, 8)" :key="name" class="rag-stat-row"><span>{{ name }}</span><b>{{ count }}</b></div>
+                </article>
+              </aside>
+            </section>
+
+            <section class="rag-lower-grid">
+              <article class="rag-detail-card">
+                <h3>关系类型</h3>
+                <div v-for="[name, count] in graphEdgeCountEntries.slice(0, 10)" :key="name" class="rag-stat-row"><span>{{ name }}</span><b>{{ count }}</b></div>
+              </article>
+              <article class="rag-detail-card">
+                <h3>检索候选</h3>
+                <div class="rag-stat-row"><span>原始候选</span><b>{{ ragObservability?.raw_candidate_count || 0 }}</b></div>
+                <div class="rag-stat-row"><span>选中证据</span><b>{{ ragObservability?.selected_count || 0 }}</b></div>
+                <div class="rag-stat-row"><span>剪掉证据</span><b>{{ ragObservability?.rejected_count || 0 }}</b></div>
+                <div v-for="[name, count] in graphBucketEntries.slice(0, 6)" :key="name" class="rag-stat-row"><span>{{ name }}</span><b>{{ count }}</b></div>
+              </article>
+            </section>
+          </div>
         </el-tab-pane>
 
         <el-tab-pane label="任务监控" name="tasks">

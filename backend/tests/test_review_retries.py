@@ -69,6 +69,53 @@ def test_run_review_task_retries_and_persists_model_log(db_session_factory, monk
     get_settings.cache_clear()
 
 
+def test_postprocess_reanchors_finding_from_comment_to_nearby_code(db_session_factory):
+    from app.schemas.model_response import ModelReviewResponse
+    from app.tasks.reviews import _postprocess_review_result
+
+    source = "\n".join(
+        [
+            "int f(int n) {",
+            "  // heap buffer overflow",
+            "  char *p = malloc(n);",
+            "  memcpy(p, input, 1024);",
+            "  return 0;",
+            "}",
+        ]
+    )
+    task_id = _create_task(db_session_factory, source_text=source)
+    result = ModelReviewResponse.model_validate(
+        {
+            "summary": "发现问题",
+            "score": 30,
+            "findings": [
+                {
+                    "severity": "high",
+                    "category": "buffer_overflow",
+                    "title": "堆缓冲区溢出",
+                    "description": "memcpy 可能写超过 malloc 分配的空间。",
+                    "file_path": "snippet.c",
+                    "line": 2,
+                    "evidence_ids": [],
+                    "call_chain": [],
+                    "confidence": 0.9,
+                    "remediation": "按目标缓冲区大小限制拷贝长度。",
+                    "code_snippet": [],
+                    "fixed_snippet": [],
+                }
+            ],
+        }
+    )
+
+    with db_session_factory() as db:
+        task = db.get(ReviewTask, task_id)
+        processed = _postprocess_review_result(task, result)
+
+    assert len(processed.findings) == 1
+    assert processed.findings[0].line == 3
+    assert processed.findings[0].code_snippet
+
+
 def test_run_review_task_reports_audit_failure_after_max_attempts(db_session_factory, monkeypatch):
     from app.core.config import get_settings
     import app.tasks.reviews as review_tasks
