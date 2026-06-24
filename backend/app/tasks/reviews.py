@@ -79,7 +79,7 @@ ACTIONABLE_C_ANCHOR_PATTERN = re.compile(
     r"strcat|strncat|sprintf|snprintf|scanf|fscanf|sscanf|fgets|gets|"
     r"open|fopen|close|fclose|read|write|recv|send|lock|unlock"
     r")\b|[A-Za-z_]\w*\s*\(|[A-Za-z_]\w*\s*(?:->|\.)[A-Za-z_]\w*|"
-    r"[A-Za-z_]\w*\s*(?:=|\+=|-=|\*=|/=|%=|<<=|>>=|&=|\|=|\^=|\+\+|--)"
+    r"[A-Za-z_]\w*\s*(?:\[[^\]]+\]\s*)?(?:=|\+=|-=|\*=|/=|%=|<<=|>>=|&=|\|=|\^=|\+\+|--)"
 )
 
 
