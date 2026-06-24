@@ -221,6 +221,59 @@ def test_parse_response_normalizes_model_category_aliases():
     assert parsed.findings[0].category.value == "maintainability"
 
 
+def test_parse_response_normalizes_type_safety_category_aliases():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "model used type category aliases",
+                                "score": 85,
+                                "findings": [
+                                    {
+                                        "severity": "low",
+                                        "category": "type_safety",
+                                        "title": "type mismatch",
+                                        "description": "model used a non-schema type safety category",
+                                        "file_path": "ctest_mid/stm32f10x_can.c",
+                                        "line": 118,
+                                        "evidence_ids": [],
+                                        "call_chain": [],
+                                        "confidence": 0.9,
+                                        "remediation": "use compatible types",
+                                        "code_snippet": [],
+                                        "fixed_snippet": [],
+                                    },
+                                    {
+                                        "severity": "medium",
+                                        "category": "type_conversion",
+                                        "title": "implicit conversion",
+                                        "description": "model used a non-schema type conversion category",
+                                        "file_path": "ctest_mid/stm32f10x_can.c",
+                                        "line": 120,
+                                        "evidence_ids": [],
+                                        "call_chain": [],
+                                        "confidence": 0.8,
+                                        "remediation": "check conversion range before casting",
+                                        "code_snippet": [],
+                                        "fixed_snippet": [],
+                                    },
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    assert parsed.findings[0].category.value == "compatibility"
+    assert parsed.findings[1].category.value == "integer_safety"
+
+
 def test_parse_response_normalizes_pointer_category_and_confidence_aliases():
     parsed = _parse_response(
         {

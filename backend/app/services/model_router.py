@@ -715,11 +715,13 @@ def _category_from_text(value: str) -> str | None:
         return "resource_leak"
     if any(token in normalized for token in ("整数", "溢出", "下溢", "除零", "divide by zero")):
         return "integer_safety"
+    if any(token in normalized for token in ("类型转换", "隐式转换", "强制转换", "type conversion", "implicit cast")):
+        return "integer_safety"
     if any(token in normalized for token in ("输入", "参数", "校验", "验证", "断言", "argument", "parameter")):
         return "input_validation"
     if any(token in normalized for token in ("并发", "线程", "竞态", "死锁", "concurrency", "race")):
         return "concurrency"
-    if any(token in normalized for token in ("兼容", "移植", "平台", "compatibility")):
+    if any(token in normalized for token in ("兼容", "移植", "平台", "类型安全", "类型不匹配", "compatibility", "type safety", "type mismatch")):
         return "compatibility"
     if any(token in normalized for token in ("安全", "漏洞", "注入", "security")):
         return "security"
@@ -783,6 +785,12 @@ def _normalize_model_contract(value: Any) -> Any:
                 "overflow": "integer_safety",
                 "integer_overflow": "integer_safety",
                 "integer_underflow": "integer_safety",
+                "type_conversion": "integer_safety",
+                "implicit_cast": "integer_safety",
+                "integer_conversion": "integer_safety",
+                "cast_overflow": "integer_safety",
+                "type_safety": "compatibility",
+                "type_mismatch": "compatibility",
                 "out_of_bounds": "buffer_overflow",
                 "out-of-bounds": "buffer_overflow",
                 "double_free": "memory_safety",
