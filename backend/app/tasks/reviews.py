@@ -292,7 +292,7 @@ def _retry_instruction(attempt: int, exc: Exception) -> str:
             "The previous model output backend JSON schema audit failed.",
             "Return exactly one smaller complete JSON object only. Do not include Markdown, comments, prose, or extra keys.",
             "The object must contain exactly: summary, score, findings. Every finding must match the required enum values and field types.",
-            "Return up to 12 high-value findings. Keep descriptions, remediation, and snippets short. Escape all quotes/newlines as valid JSON strings.",
+            "Return up to 5 high-value findings. Keep descriptions, remediation, and snippets short. Escape all quotes/newlines as valid JSON strings.",
             "Internally scan integer, bounds, lifetime, leak, and exhaustion categories before selecting findings.",
             f"Audit failure from attempt {attempt}:",
         ]

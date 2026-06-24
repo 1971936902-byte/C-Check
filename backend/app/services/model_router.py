@@ -44,7 +44,7 @@ RESPONSE_CONTRACT = """
 Return exactly one compact JSON object. No Markdown.
 Top-level keys: summary, score, findings.
 Use Chinese. Keep summary under 80 Chinese chars.
-Return up to 12 high-value findings for this request, only concrete C defects.
+Return up to 5 high-value findings for this request, only concrete C defects.
 Each finding uses: severity, category, title, description, file_path, line, evidence_ids, call_chain, confidence, remediation, code_snippet, fixed_snippet.
 Keep title under 40 chars. Keep description and remediation under 120 Chinese chars each.
 The line value must point to the exact visible statement or declaration causing the issue.
