@@ -22,6 +22,7 @@ from app.services.check_types import check_types_prompt
 MAX_MODEL_LOG_CHARS = 12000
 RESPONSE_REQUIRED_KEYS = {"summary", "score", "findings"}
 STRUCTURED_RESPONSE_SCHEMA_NAME = "c_review_response"
+MAX_MODEL_SNIPPET_LINES = 5
 TOKEN_BUDGET_SAFETY_MARGIN = 128
 INPUT_TOKEN_SAFETY_MARGIN = 512
 MIN_RETRY_OUTPUT_TOKENS = 128
@@ -776,7 +777,7 @@ def _normalize_model_contract(value: Any) -> Any:
                         continue
                     line = {**line, "line": fallback_line}
                 normalized_lines.append(line)
-            finding[snippet_key] = normalized_lines
+            finding[snippet_key] = normalized_lines[:MAX_MODEL_SNIPPET_LINES]
         if not isinstance(finding.get("evidence_ids"), list):
             finding["evidence_ids"] = []
         else:

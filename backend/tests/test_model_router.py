@@ -144,6 +144,45 @@ def test_parse_response_normalizes_unknown_snippet_kind_to_context():
     assert parsed.findings[0].fixed_snippet[0].kind.value == "context"
 
 
+def test_parse_response_truncates_overlong_snippets_before_schema_validation():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "fix snippet is too long",
+                                "score": 80,
+                                "findings": [
+                                    {
+                                        "severity": "medium",
+                                        "category": "logic",
+                                        "title": "long fix",
+                                        "description": "model returned too many fixed snippet lines",
+                                        "file_path": "src/main.c",
+                                        "line": 92,
+                                        "remediation": "keep the snippet short",
+                                        "code_snippet": [],
+                                        "fixed_snippet": [
+                                            {"line": 92 + index, "content": f"line {index}", "kind": "context"}
+                                            for index in range(9)
+                                        ],
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    assert len(parsed.findings[0].fixed_snippet) == 5
+    assert parsed.findings[0].fixed_snippet[-1].content == "line 4"
+
+
 def test_parse_response_normalizes_chinese_enums_confidence_and_string_snippets():
     parsed = _parse_response(
         {
