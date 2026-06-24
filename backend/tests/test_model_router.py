@@ -274,6 +274,73 @@ def test_parse_response_normalizes_type_safety_category_aliases():
     assert parsed.findings[1].category.value == "integer_safety"
 
 
+def test_parse_response_sanitizes_malformed_but_usable_findings():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "",
+                                "score": "105",
+                                "findings": [
+                                    {
+                                        "severity": "critical",
+                                        "category": "unknown_model_category",
+                                        "title": "custom category",
+                                        "description": "存在资源泄漏风险",
+                                        "file_path": "",
+                                        "line": "42",
+                                        "evidence_ids": "E1",
+                                        "call_chain": "init->open",
+                                        "confidence": "95%",
+                                        "remediation": "",
+                                        "code_snippet": "handle = open(path);",
+                                        "fixed_snippet": [
+                                            {"line": None, "content": "close(handle);", "kind": "comment"},
+                                            {"line": 43, "content": ""},
+                                            123,
+                                        ],
+                                        "unexpected": "ignored",
+                                    },
+                                    {
+                                        "severity": "strange",
+                                        "category": "totally_new_category",
+                                        "title": "",
+                                        "description": "",
+                                        "file_path": None,
+                                        "line": None,
+                                        "remediation": None,
+                                        "code_snippet": [],
+                                        "fixed_snippet": [],
+                                    },
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    assert parsed.summary == "审查完成。"
+    assert parsed.score == 100
+    assert parsed.findings[0].severity.value == "high"
+    assert parsed.findings[0].category.value == "resource_leak"
+    assert parsed.findings[0].file_path == "unknown.c"
+    assert parsed.findings[0].line == 42
+    assert parsed.findings[0].evidence_ids == ["E1"]
+    assert parsed.findings[0].call_chain == ["init->open"]
+    assert parsed.findings[0].confidence == 0.95
+    assert parsed.findings[0].code_snippet[0].line == 42
+    assert parsed.findings[0].fixed_snippet[0].kind.value == "context"
+    assert parsed.findings[1].severity.value == "low"
+    assert parsed.findings[1].category.value == "logic"
+    assert parsed.findings[1].title == "模型发现的问题"
+
+
 def test_parse_response_normalizes_pointer_category_and_confidence_aliases():
     parsed = _parse_response(
         {
@@ -557,7 +624,7 @@ def test_invoke_model_requests_json_schema_structured_output(monkeypatch):
     assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 2000
 
 
-def test_parse_response_rejects_too_many_findings_for_audit():
+def test_parse_response_truncates_too_many_findings_for_audit():
     finding = {
         "severity": "low",
         "category": "maintainability",
@@ -575,11 +642,9 @@ def test_parse_response_rejects_too_many_findings_for_audit():
         "findings": [finding for _ in range(2001)],
     }
 
-    with pytest.raises(ModelInvocationError) as raised:
-        _parse_response({"choices": [{"message": {"content": json.dumps(content)}}]})
+    parsed = _parse_response({"choices": [{"message": {"content": json.dumps(content)}}]})
 
-    assert "invalid structured response" in str(raised.value)
-    assert "at most 2000 items" in (raised.value.details or "")
+    assert len(parsed.findings) == 2000
 
 
 def test_invoke_model_keeps_http_error_response_body(monkeypatch):

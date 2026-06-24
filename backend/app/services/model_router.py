@@ -17,6 +17,7 @@ from app.core.config import Settings, get_settings
 from app.db.models import CodeChunk, ModelNode, ReviewFile, ReviewTask, TaskStatus
 from app.schemas.model_response import ModelReviewResponse
 from app.services.check_types import check_types_prompt
+from app.services.model_output_sanitizer import ModelOutputSanitizer
 
 
 MAX_MODEL_LOG_CHARS = 12000
@@ -31,6 +32,7 @@ MIN_CHUNK_CONTEXT_CHARS = 1000
 CHUNK_PROMPT_CHAR_MARGIN = 512
 CHUNK_LINE_PREFIX_WIDTH = 6
 SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "suggestion": 3}
+MODEL_OUTPUT_SANITIZER = ModelOutputSanitizer()
 TOKEN_BUDGET_PATTERN = re.compile(
     r"maximum context length is (?P<context>\d+) tokens and your request has (?P<input>\d+) input tokens",
     re.IGNORECASE,
@@ -729,6 +731,7 @@ def _category_from_text(value: str) -> str | None:
 
 
 def _normalize_model_contract(value: Any) -> Any:
+    return MODEL_OUTPUT_SANITIZER.sanitize(value)
     if not isinstance(value, dict):
         return value
     findings = value.get("findings")
