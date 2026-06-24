@@ -261,6 +261,53 @@ def test_parse_response_normalizes_pointer_category_and_confidence_aliases():
     assert finding.confidence == 0.9
 
 
+def test_parse_response_normalizes_natural_language_categories():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "natural language categories",
+                                "score": 85,
+                                "findings": [
+                                    {
+                                        "severity": "low",
+                                        "category": "代码规范与可维护性",
+                                        "title": "duplicate block",
+                                        "description": "model returned a natural-language maintainability category",
+                                        "file_path": "ctest_mid/stm32f10x_can.c",
+                                        "line": 110,
+                                        "remediation": "extract a helper",
+                                        "code_snippet": [],
+                                        "fixed_snippet": [],
+                                    },
+                                    {
+                                        "severity": "low",
+                                        "category": "性能隐患",
+                                        "title": "resource pressure",
+                                        "description": "model returned a natural-language performance category",
+                                        "file_path": "ctest_mid/stm32f10x_can.c",
+                                        "line": 120,
+                                        "remediation": "reduce repeated work",
+                                        "code_snippet": [],
+                                        "fixed_snippet": [],
+                                    },
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    assert parsed.findings[0].category.value == "maintainability"
+    assert parsed.findings[1].category.value == "performance"
+
+
 def test_parse_response_normalizes_chinese_enums_confidence_and_string_snippets():
     parsed = _parse_response(
         {

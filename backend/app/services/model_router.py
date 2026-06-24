@@ -699,6 +699,33 @@ def _extract_json_object(content: str) -> str:
     return stripped
 
 
+def _category_from_text(value: str) -> str | None:
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if any(token in normalized for token in ("可维护", "维护性", "代码规范", "代码质量", "重复代码", "重复块")):
+        return "maintainability"
+    if any(token in normalized for token in ("性能", "效率", "耗时", "资源耗尽", "栈耗尽", "堆耗尽")):
+        return "performance"
+    if any(token in normalized for token in ("空指针", "野指针", "悬空指针", "null pointer", "null-pointer")):
+        return "pointer_safety"
+    if any(token in normalized for token in ("越界", "缓冲区", "buffer overflow", "out of bounds")):
+        return "buffer_overflow"
+    if any(token in normalized for token in ("内存泄漏", "资源泄漏", "未释放", "memory leak", "resource leak")):
+        return "resource_leak"
+    if any(token in normalized for token in ("整数", "溢出", "下溢", "除零", "divide by zero")):
+        return "integer_safety"
+    if any(token in normalized for token in ("输入", "参数", "校验", "验证", "断言", "argument", "parameter")):
+        return "input_validation"
+    if any(token in normalized for token in ("并发", "线程", "竞态", "死锁", "concurrency", "race")):
+        return "concurrency"
+    if any(token in normalized for token in ("兼容", "移植", "平台", "compatibility")):
+        return "compatibility"
+    if any(token in normalized for token in ("安全", "漏洞", "注入", "security")):
+        return "security"
+    return None
+
+
 def _normalize_model_contract(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
@@ -794,6 +821,8 @@ def _normalize_model_contract(value: Any) -> Any:
                 "兼容性": "compatibility",
                 "可移植性": "portability",
             }.get(category.strip())
+            if normalized_category is None:
+                normalized_category = _category_from_text(category)
             if normalized_category is not None:
                 finding["category"] = normalized_category
         fallback_line = finding.get("line")
