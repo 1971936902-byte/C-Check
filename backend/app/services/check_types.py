@@ -16,6 +16,16 @@ CHECK_TYPE_LABELS = {
     "maintainability": "代码规范与可维护性",
 }
 ALL_CHECK_TYPES = list(CHECK_TYPE_LABELS)
+DEFAULT_FAST_CHECK_TYPES = {
+    "memory_safety",
+    "buffer_overflow",
+    "pointer_safety",
+    "resource_leak",
+    "concurrency",
+    "logic",
+    "input_validation",
+    "integer_safety",
+}
 
 
 def validate_check_types(check_types: list[str] | None) -> list[str]:
@@ -29,5 +39,17 @@ def validate_check_types(check_types: list[str] | None) -> list[str]:
 
 
 def check_types_prompt(check_types: list[str]) -> str:
-    labels = [CHECK_TYPE_LABELS[item] for item in validate_check_types(check_types)]
-    return "本次审查需要重点覆盖以下检查类型：\n" + "\n".join(f"- {label}" for label in labels)
+    selected = [item for item in validate_check_types(check_types) if item in DEFAULT_FAST_CHECK_TYPES]
+    if not selected:
+        selected = [
+            "buffer_overflow",
+            "pointer_safety",
+            "memory_safety",
+            "resource_leak",
+            "integer_safety",
+            "input_validation",
+            "concurrency",
+            "logic",
+        ]
+    labels = [CHECK_TYPE_LABELS[item] for item in selected]
+    return "默认快速审查仅关注以下高价值 C 缺陷类型：\n" + "\n".join(f"- {label}" for label in labels)

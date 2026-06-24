@@ -1,6 +1,6 @@
 from app.core.security import hash_password
 from app.db.models import ModelNode, ReviewFile, ReviewTask, TaskStatus, User
-from app.schemas.model_response import ModelReviewResponse
+from app.schemas.model_response import FindingCategory, FindingSeverity, ModelReviewResponse
 from app.services.model_router import ModelInvocationError
 
 
@@ -114,6 +114,51 @@ def test_postprocess_reanchors_finding_from_comment_to_nearby_code(db_session_fa
     assert len(processed.findings) == 1
     assert processed.findings[0].line == 3
     assert processed.findings[0].code_snippet
+
+
+def test_postprocess_downgrades_null_pointer_findings_to_suggestions(db_session_factory):
+    from app.tasks.reviews import _postprocess_review_result
+
+    source = "\n".join(
+        [
+            "void f(void) {",
+            "  CAN->TSR = CAN_TSR_RQCP0;",
+            "}",
+        ]
+    )
+    task_id = _create_task(db_session_factory, source_text=source)
+    result = ModelReviewResponse.model_validate(
+        {
+            "summary": "发现问题",
+            "score": 30,
+            "findings": [
+                {
+                    "severity": "high",
+                    "category": "pointer_safety",
+                    "title": "CAN 指针可能为空",
+                    "description": "CAN 指针未初始化可能导致空指针访问。",
+                    "file_path": "snippet.c",
+                    "line": 2,
+                    "evidence_ids": [],
+                    "call_chain": [],
+                    "confidence": 0.9,
+                    "remediation": "检查 CAN 指针。",
+                    "code_snippet": [],
+                    "fixed_snippet": [],
+                }
+            ],
+        }
+    )
+
+    with db_session_factory() as db:
+        task = db.get(ReviewTask, task_id)
+        processed = _postprocess_review_result(task, result)
+
+    finding = processed.findings[0]
+    assert finding.severity == FindingSeverity.SUGGESTION
+    assert finding.category == FindingCategory.MAINTAINABILITY
+    assert finding.confidence == 0.45
+    assert "固定映射地址" in finding.remediation
 
 
 def test_run_review_task_reports_audit_failure_after_max_attempts(db_session_factory, monkeypatch):

@@ -22,7 +22,7 @@ from app.services.code_index.indexer import build_code_index
 from app.services.code_index.keyword_search import expand_query_terms, keyword_search_chunks
 from app.services.code_index.parser import ParsedFile, ParsedSymbol, parse_c_source
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import RetrievedContext, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files, retrieve_missing_symbol_contexts
+from app.services.code_index.retriever import RetrievedContext, _is_low_value_rag_identifier, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files, retrieve_missing_symbol_contexts
 from app.services.model_router import invoke_selected_model
 
 
@@ -281,6 +281,14 @@ def test_missing_symbol_context_resolves_calls_macros_and_globals(db_session):
     assert "helper_copy" in rendered
     assert "MAX_PACKET_SIZE" in rendered
     assert "shared_counter" in rendered
+
+
+def test_default_rag_query_filters_low_value_embedded_identifiers():
+    assert _is_low_value_rag_identifier("CAN")
+    assert _is_low_value_rag_identifier("CAN_TSR_RQCP0")
+    assert _is_low_value_rag_identifier("IS_CAN_MODE")
+    assert _is_low_value_rag_identifier("uint32_t")
+    assert not _is_low_value_rag_identifier("helper_copy")
 
 
 def test_invoke_selected_model_adds_rag_context_to_prompt(monkeypatch, db_session_factory):

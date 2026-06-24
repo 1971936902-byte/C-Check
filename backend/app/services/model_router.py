@@ -15,14 +15,14 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.models import CodeChunk, ModelNode, ReviewFile, ReviewTask, TaskStatus
-from app.schemas.model_response import ModelReviewResponse
+from app.schemas.model_response import CompactModelReviewResponse, ModelReviewResponse
 from app.services.check_types import check_types_prompt
 from app.services.model_output_sanitizer import ModelOutputSanitizer
 
 
 MAX_MODEL_LOG_CHARS = 12000
 RESPONSE_REQUIRED_KEYS = {"summary", "score", "findings"}
-STRUCTURED_RESPONSE_SCHEMA_NAME = "c_review_response"
+STRUCTURED_RESPONSE_SCHEMA_NAME = "c_review_fast_response"
 MAX_MODEL_SNIPPET_LINES = 5
 TOKEN_BUDGET_SAFETY_MARGIN = 128
 INPUT_TOKEN_SAFETY_MARGIN = 512
@@ -45,22 +45,27 @@ VLLM_TOKEN_BUDGET_PATTERN = re.compile(
 RESPONSE_CONTRACT = """
 Return exactly one compact JSON object. No Markdown.
 Top-level keys: summary, score, findings.
-Use Chinese. Keep summary under 80 Chinese chars.
-Return up to 5 high-value findings for this request, only concrete C defects.
-Each finding uses: severity, category, title, description, file_path, line, evidence_ids, call_chain, confidence, remediation, code_snippet, fixed_snippet.
-Keep title under 40 chars. Keep description and remediation under 120 Chinese chars each.
+Use Chinese. Keep summary under 50 Chinese chars.
+Return up to 4 high-value findings for this request, ordered by severity and confidence.
+Each finding uses exactly: severity, category, title, file_path, line, confidence.
+Do not output description, remediation, code_snippet, fixed_snippet, evidence_ids, or call_chain; the backend fills source snippets by file_path and line.
+Keep title under 24 Chinese chars. Make it direct and specific.
 The line value must point to the exact visible statement or declaration causing the issue.
 Do not use pure data initializer rows, lookup tables, font/bitmap tables, or comments as finding locations.
-Use code_snippet/fixed_snippet as [] unless one line is essential; then include at most one line.
-Use evidence_ids as [] unless Evidence E1/E2 etc directly supports the finding.
-Use call_chain as [] unless the finding depends on an inter-function call path.
 Use lowercase enum values exactly. Use null for line only when no precise line exists.
+Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic.
+Ignore style, maintainability, performance, compatibility, and portability in default mode.
 Before producing findings, internally scan these categories in order:
-1. integer overflow, integer underflow, truncation, divide-by-zero, and unsafe size calculations;
-2. memcpy/memmove/strcpy-style copy bounds, fixed-array or heap out-of-bounds read/write, and malloc(n) followed by access at [n];
-3. malloc/free lifetime issues: double free, use-after-free, dangling pointer, and free followed by read/write;
-4. resource leaks: pointer overwritten with 0/NULL before free, missing free/close/unlock on visible paths;
-5. resource exhaustion: infinite recursion, large recursive stack frames, unbounded allocation loops, and input-controlled huge allocation.
+1. buffer_overflow: copy bounds, fixed-array or heap out-of-bounds read/write, malloc(n) followed by access at [n];
+2. memory_safety: double free, use-after-free, dangling pointer, free followed by read/write;
+3. resource_leak: missing free/close/unlock or pointer overwritten before release on visible paths;
+4. integer_safety: overflow, underflow, truncation, divide-by-zero, unsafe size calculations;
+5. input_validation: externally controlled size/index/path used without bounds validation;
+6. concurrency: visible race/deadlock/lock-unlock imbalance;
+7. pointer_safety: proven invalid dereference only. Do not report NULL just because a parameter is a pointer;
+8. logic: concrete wrong condition/state update with visible consequence.
+Embedded peripheral registers such as CAN->, DAC->, DMA->, CRC->, RCC-> are fixed mapped hardware registers; do not report them as null pointer issues.
+Do not report vendor assert(IS_xxx(...)) checks as missing validation unless the code still dereferences before that check.
 If different defect categories appear in the same function, report them separately.
 Do not stop after the first obvious memcpy, malloc, or free issue.
 Do not merge double free with use-after-free, or out-of-bounds read with out-of-bounds write.
@@ -181,7 +186,22 @@ def _numbered_chunk_source(source_text: str, start_line: int, end_line: int) -> 
     )
 
 
-def _chunk_file(source: ReviewFile, max_chars: int) -> list[ChunkedReviewFile]:
+def _whole_file_chunk(source: ReviewFile) -> ChunkedReviewFile:
+    lines = source.source_text.splitlines()
+    end_line = max(1, len(lines))
+    return ChunkedReviewFile(
+        relative_path=source.relative_path,
+        source_text=_numbered_chunk_source(source.source_text, 1, end_line),
+        size_bytes=source.size_bytes,
+        start_line=1,
+        end_line=end_line,
+    )
+
+
+def _chunk_file(source: ReviewFile, max_chars: int, *, no_slice_max_bytes: int = 0) -> list[ChunkedReviewFile]:
+    if no_slice_max_bytes > 0 and source.size_bytes <= no_slice_max_bytes:
+        return [_whole_file_chunk(source)]
+
     lines = source.source_text.splitlines()
     if not lines:
         return [
@@ -238,7 +258,7 @@ def _chunk_review_files(files: Sequence[ReviewFile], settings: Settings) -> list
     chunks: list[ChunkedReviewFile] = []
     max_chars = _effective_chunk_max_chars(settings)
     for source in files:
-        chunks.extend(_chunk_file(source, max_chars))
+        chunks.extend(_chunk_file(source, max_chars, no_slice_max_bytes=settings.review_no_slice_max_bytes))
     return chunks
 
 
@@ -284,7 +304,7 @@ def _chunk_review_batches(
 
     chunks: list[ChunkedReviewFile] = []
     for source in files:
-        chunks.extend(_chunk_file(source, max_chars))
+        chunks.extend(_chunk_file(source, max_chars, no_slice_max_bytes=settings.review_no_slice_max_bytes))
     if isolate_chunks:
         return [[chunk] for chunk in chunks]
     for chunk in chunks:
@@ -913,7 +933,7 @@ def _response_format(settings: Settings) -> dict[str, Any] | None:
         "json_schema": {
             "name": STRUCTURED_RESPONSE_SCHEMA_NAME,
             "strict": True,
-            "schema": ModelReviewResponse.model_json_schema(),
+            "schema": CompactModelReviewResponse.model_json_schema(),
         },
     }
 

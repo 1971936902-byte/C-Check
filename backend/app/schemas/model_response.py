@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -66,3 +67,34 @@ class ModelReviewResponse(BaseModel):
     summary: str = Field(min_length=1, max_length=240)
     score: float = Field(ge=0, le=100)
     findings: list[ReviewFinding] = Field(default_factory=list, max_length=2000)
+
+
+FastFindingCategory = Literal[
+    "buffer_overflow",
+    "pointer_safety",
+    "memory_safety",
+    "resource_leak",
+    "integer_safety",
+    "input_validation",
+    "concurrency",
+    "logic",
+]
+
+
+class CompactReviewFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    severity: FindingSeverity
+    category: FastFindingCategory
+    title: str = Field(min_length=1, max_length=60)
+    file_path: str = Field(min_length=1, max_length=512)
+    line: int | None = Field(default=None, ge=1)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class CompactModelReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=120)
+    score: float = Field(ge=0, le=100)
+    findings: list[CompactReviewFinding] = Field(default_factory=list, max_length=4)

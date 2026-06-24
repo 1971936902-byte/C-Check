@@ -619,9 +619,9 @@ def test_invoke_model_requests_json_schema_structured_output(monkeypatch):
 
     response_format = captured["json"]["response_format"]
     assert response_format["type"] == "json_schema"
-    assert response_format["json_schema"]["name"] == "c_review_response"
+    assert response_format["json_schema"]["name"] == "c_review_fast_response"
     assert response_format["json_schema"]["strict"] is True
-    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 2000
+    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 4
 
 
 def test_parse_response_truncates_too_many_findings_for_audit():
@@ -639,12 +639,38 @@ def test_parse_response_truncates_too_many_findings_for_audit():
     content = {
         "summary": "too many findings",
         "score": 60,
-        "findings": [finding for _ in range(2001)],
+        "findings": [finding for _ in range(10)],
     }
 
     parsed = _parse_response({"choices": [{"message": {"content": json.dumps(content)}}]})
 
-    assert len(parsed.findings) == 2000
+    assert len(parsed.findings) == 4
+
+
+def test_parse_response_accepts_compact_findings_and_fills_report_fields():
+    content = {
+        "summary": "发现越界",
+        "score": 40,
+        "findings": [
+            {
+                "severity": "high",
+                "category": "buffer_overflow",
+                "title": "数组越界写",
+                "file_path": "main.c",
+                "line": 7,
+                "confidence": 0.9,
+            }
+        ],
+    }
+
+    parsed = _parse_response({"choices": [{"message": {"content": json.dumps(content)}}]})
+
+    finding = parsed.findings[0]
+    assert finding.title == "数组越界写"
+    assert finding.description == "数组越界写"
+    assert finding.remediation == "请根据定位行结合上下文复核。"
+    assert finding.code_snippet == []
+    assert finding.fixed_snippet == []
 
 
 def test_invoke_model_keeps_http_error_response_body(monkeypatch):
@@ -788,6 +814,29 @@ def test_chunk_file_preserves_original_line_numbers():
     assert chunks[0].source_text.startswith("000001: int value_1;")
     assert chunks[1].source_text.startswith(f"{chunks[1].start_line:06d}:")
     assert chunks[-1].end_line == 7
+
+
+def test_chunk_file_keeps_small_sources_whole_when_no_slice_threshold_is_set():
+    source = ReviewFile(
+        relative_path="small.c",
+        source_text="\n".join(f"int value_{index};" for index in range(1, 10)),
+        size_bytes=180,
+    )
+
+    chunks = _chunk_file(source, max_chars=45, no_slice_max_bytes=8 * 1024)
+
+    assert len(chunks) == 1
+    assert chunks[0].start_line == 1
+    assert chunks[0].end_line == 9
+    assert "000009: int value_9;" in chunks[0].source_text
+
+
+def test_settings_default_to_fast_review_path():
+    settings = Settings(_env_file=None, allow_insecure_defaults=True)
+
+    assert settings.review_no_slice_max_bytes == 8 * 1024
+    assert settings.rag_on_demand_enabled is True
+    assert settings.rag_review_units_enabled is False
 
 
 def test_chunk_review_files_does_not_reject_large_batches():
@@ -1202,6 +1251,7 @@ def test_invoke_selected_model_keeps_chunking_on_retry_instruction(monkeypatch, 
         allow_insecure_defaults=True,
         model_chunk_max_chars=1000,
         model_chunk_max_count=20,
+        review_no_slice_max_bytes=1024,
     ))
 
     with db_session_factory() as db:

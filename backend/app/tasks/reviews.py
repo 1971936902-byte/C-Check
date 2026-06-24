@@ -8,7 +8,7 @@ from time import monotonic
 from app.core.config import get_settings
 from app.db.models import CodeEdge, CodeSymbol, Report, ReviewEvidence, ReviewTask, TaskStatus
 from app.db.session import SessionLocal
-from app.schemas.model_response import CodeLine, CodeLineKind, ModelReviewResponse, ReviewFinding
+from app.schemas.model_response import CodeLine, CodeLineKind, FindingCategory, FindingSeverity, ModelReviewResponse, ReviewFinding
 from app.services.model_router import ModelInvocationError, invoke_selected_model, truncate_model_log
 from app.services.reports import build_report
 from app.worker import celery_app
@@ -248,6 +248,77 @@ def _validate_finding_evidence(task: ReviewTask, result: ModelReviewResponse) ->
     return result.model_copy(update={"findings": findings}) if changed else result
 
 
+NULL_POINTER_TEXT_PATTERN = re.compile(r"(空指针|null\s*pointer|null|nil)", re.IGNORECASE)
+PERIPHERAL_REGISTER_ACCESS_PATTERN = re.compile(
+    r"\b(?:CAN|DAC|DMA\d?|CRC|DBGMCU|RCC|GPIO[A-Z]?|USART\d?|UART\d?|SPI\d?|I2C\d?|TIM\d?|ADC\d?)\s*->"
+)
+
+
+def _finding_text(finding: ReviewFinding) -> str:
+    return " ".join(
+        part
+        for part in [finding.title, finding.description, finding.remediation]
+        if part
+    )
+
+
+def _finding_source_line(task: ReviewTask, finding: ReviewFinding) -> str:
+    if finding.line is None:
+        return ""
+    source = _source_file_for_finding(task, finding.file_path)
+    if source is None:
+        return ""
+    lines = source.source_text.splitlines()
+    if finding.line < 1 or finding.line > len(lines):
+        return ""
+    return lines[finding.line - 1]
+
+
+def _is_null_pointer_finding(finding: ReviewFinding) -> bool:
+    return bool(NULL_POINTER_TEXT_PATTERN.search(_finding_text(finding)))
+
+
+def _is_peripheral_register_null_pointer_false_positive(task: ReviewTask, finding: ReviewFinding) -> bool:
+    source_line = _finding_source_line(task, finding)
+    snippet_text = "\n".join(item.content for item in finding.code_snippet)
+    combined = "\n".join([source_line, snippet_text, _finding_text(finding)])
+    return bool(PERIPHERAL_REGISTER_ACCESS_PATTERN.search(combined)) and _is_null_pointer_finding(finding)
+
+
+def _downgrade_null_pointer_findings(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
+    changed = False
+    findings: list[ReviewFinding] = []
+    for finding in result.findings:
+        if not _is_null_pointer_finding(finding):
+            findings.append(finding)
+            continue
+        if finding.severity == FindingSeverity.SUGGESTION:
+            findings.append(finding)
+            continue
+        if finding.category in {
+            FindingCategory.POINTER_SAFETY,
+            FindingCategory.MEMORY_SAFETY,
+            FindingCategory.INPUT_VALIDATION,
+        }:
+            remediation = finding.remediation
+            if _is_peripheral_register_null_pointer_false_positive(task, finding):
+                remediation = "嵌入式外设寄存器通常是固定映射地址，空指针风险需结合平台头文件确认；默认降为建议项。"
+            findings.append(
+                finding.model_copy(
+                    update={
+                        "severity": FindingSeverity.SUGGESTION,
+                        "category": FindingCategory.MAINTAINABILITY,
+                        "confidence": min(finding.confidence or 0.5, 0.45),
+                        "remediation": remediation,
+                    }
+                )
+            )
+            changed = True
+            continue
+        findings.append(finding)
+    return result.model_copy(update={"findings": findings}) if changed else result
+
+
 def _link_findings_to_evidence(task: ReviewTask, result: ModelReviewResponse) -> None:
     if task.code_project is None:
         return
@@ -282,7 +353,10 @@ def _link_findings_to_evidence(task: ReviewTask, result: ModelReviewResponse) ->
 def _postprocess_review_result(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
     return _validate_finding_evidence(
         task,
-        _enrich_missing_code_snippets(task, _filter_unanchored_findings(task, _normalize_finding_anchors(task, result))),
+        _downgrade_null_pointer_findings(
+            task,
+            _enrich_missing_code_snippets(task, _filter_unanchored_findings(task, _normalize_finding_anchors(task, result))),
+        ),
     )
 
 

@@ -41,13 +41,14 @@ class Settings(BaseSettings):
     storage_path: Path = Path("uploads")
     mock_model_enabled: bool = False
     model_max_attempts: int = Field(default=3, ge=1, le=5)
-    model_context_window: int = Field(default=8192, ge=1024, le=1048576)
-    model_max_tokens: int = Field(default=1024, ge=256, le=16384)
-    model_max_input_tokens: int = Field(default=6144, ge=512, le=1048576)
-    model_token_chars_per_token: float = Field(default=2.0, ge=1.0, le=8.0)
-    model_chunk_max_chars: int = Field(default=8000, ge=1000, le=200000)
+    model_context_window: int = Field(default=12288, ge=1024, le=1048576)
+    model_max_tokens: int = Field(default=512, ge=256, le=16384)
+    model_max_input_tokens: int = Field(default=10000, ge=512, le=1048576)
+    model_token_chars_per_token: float = Field(default=3.5, ge=1.0, le=8.0)
+    model_chunk_max_chars: int = Field(default=35000, ge=1000, le=200000)
     model_chunk_max_count: int = Field(default=360, ge=1, le=10000)
     model_chunk_concurrency: int = Field(default=1, ge=1, le=8)
+    review_no_slice_max_bytes: int = Field(default=8 * 1024, ge=1024, le=1024 * 1024)
     model_small_task_max_files: int = Field(default=2, ge=1, le=1000)
     model_small_task_max_bytes: int = Field(default=128 * 1024, ge=1024, le=50 * 1024 * 1024)
     model_small_task_reserved_nodes: int = Field(default=1, ge=0, le=8)
@@ -56,7 +57,7 @@ class Settings(BaseSettings):
     rag_enabled: bool = True
     rag_keyword_top_k: int = Field(default=8, ge=1, le=100)
     rag_graph_max_depth: int = Field(default=1, ge=0, le=3)
-    rag_context_max_chars: int = Field(default=12000, ge=1000, le=100000)
+    rag_context_max_chars: int = Field(default=3000, ge=1000, le=100000)
     rag_embedding_backend: str = "hashing"
     rag_embedding_base_url: str | None = None
     rag_embedding_api_key: str | None = None
@@ -67,7 +68,8 @@ class Settings(BaseSettings):
     rag_qdrant_api_key: str | None = None
     rag_qdrant_collection: str = "c_check_code_chunks"
     rag_cache_enabled: bool = True
-    rag_review_units_enabled: bool = True
+    rag_on_demand_enabled: bool = True
+    rag_review_units_enabled: bool = False
     rag_observability_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False

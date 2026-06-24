@@ -6,7 +6,7 @@ from app.schemas.model_response import FindingCategory, FindingSeverity
 
 
 MAX_MODEL_SNIPPET_LINES = 5
-MAX_FINDINGS = 2000
+MAX_FINDINGS = 4
 
 
 def _as_text(value: Any, *, default: str = "") -> str:
@@ -205,9 +205,9 @@ class ModelOutputSanitizer:
         title = _truncate(_as_text(finding.get("title"), default="\u6a21\u578b\u53d1\u73b0\u7684\u95ee\u9898"), 120, default="\u6a21\u578b\u53d1\u73b0\u7684\u95ee\u9898")
         description = _truncate(_as_text(finding.get("description"), default=title), 360, default=title)
         remediation = _truncate(
-            _as_text(finding.get("remediation"), default="\u8bf7\u7ed3\u5408\u4e0a\u4e0b\u6587\u68c0\u67e5\u5e76\u4fee\u590d\u8be5\u95ee\u9898\u3002"),
+            _as_text(finding.get("remediation"), default="\u8bf7\u6839\u636e\u5b9a\u4f4d\u884c\u7ed3\u5408\u4e0a\u4e0b\u6587\u590d\u6838\u3002"),
             360,
-            default="\u8bf7\u7ed3\u5408\u4e0a\u4e0b\u6587\u68c0\u67e5\u5e76\u4fee\u590d\u8be5\u95ee\u9898\u3002",
+            default="\u8bf7\u6839\u636e\u5b9a\u4f4d\u884c\u7ed3\u5408\u4e0a\u4e0b\u6587\u590d\u6838\u3002",
         )
         return {
             "severity": self._normalize_severity(finding.get("severity")),
@@ -321,4 +321,3 @@ class ModelOutputSanitizer:
             if len(result) >= MAX_MODEL_SNIPPET_LINES:
                 break
         return result
-

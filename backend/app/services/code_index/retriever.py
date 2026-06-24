@@ -35,6 +35,46 @@ _COMMON_IDENTIFIERS = {
     "struct",
     "typedef",
 }
+_LOW_VALUE_RAG_IDENTIFIERS = {
+    "CAN",
+    "DAC",
+    "DMA",
+    "DMA1",
+    "DMA2",
+    "ADC",
+    "GPIO",
+    "USART",
+    "UART",
+    "SPI",
+    "I2C",
+    "RCC",
+    "NVIC",
+    "EXTI",
+    "TIM",
+    "USB",
+    "NULL",
+    "TRUE",
+    "FALSE",
+    "SET",
+    "RESET",
+    "ENABLE",
+    "DISABLE",
+    "SUCCESS",
+    "ERROR",
+    "u8",
+    "u16",
+    "u32",
+    "s8",
+    "s16",
+    "s32",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "size_t",
+}
 _HIGH_RISK_IDENTIFIERS = {
     "memcpy",
     "memmove",
@@ -111,17 +151,22 @@ def retrieve_context_for_files(
     source_text_by_path = {file.relative_path: file.source_text for file in files}
 
     for source_file in files:
-        identifiers = _identifiers(source_file.source_text)
-        graph_depth = max(settings.rag_graph_max_depth, 2 if _has_high_risk_api(source_file.source_text) else 1)
+        identifiers = _rag_query_identifiers(source_file.source_text)
+        graph_depth = 1 if settings.rag_on_demand_enabled else max(settings.rag_graph_max_depth, 2 if _has_high_risk_api(source_file.source_text) else 1)
         candidate_groups = [
             _include_contexts(db, project, source_file.relative_path),
             _direct_call_contexts(db, project, source_file.relative_path, chunks_by_symbol, max_depth=graph_depth),
-            _upstream_contexts(db, project, source_file.relative_path, chunks_by_symbol),
             _usage_contexts(db, project, source_file.relative_path, chunks_by_symbol),
             _keyword_contexts(db, project, identifiers, target_paths, limit=settings.rag_keyword_top_k),
-            _qdrant_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
-            _vector_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
         ]
+        if not settings.rag_on_demand_enabled:
+            candidate_groups.extend(
+                [
+                    _upstream_contexts(db, project, source_file.relative_path, chunks_by_symbol),
+                    _qdrant_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
+                    _vector_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
+                ]
+            )
         for group in candidate_groups:
             for context in group:
                 current = contexts.get(context.evidence_id)
@@ -147,7 +192,11 @@ def retrieve_missing_symbol_contexts(
     source_text_by_path = {file.relative_path: file.source_text for file in files}
     referenced = set().union(*(_referenced_symbols(file.source_text) for file in files))
     locally_defined = set().union(*(_locally_defined_symbols(file.source_text) for file in files))
-    missing_names = referenced - locally_defined - _COMMON_IDENTIFIERS
+    missing_names = {
+        name
+        for name in referenced - locally_defined - _COMMON_IDENTIFIERS
+        if not _is_low_value_rag_identifier(name)
+    }
     if not missing_names:
         return []
 
@@ -770,6 +819,23 @@ def _identifiers(source_text: str) -> set[str]:
         for match in _IDENTIFIER_RE.finditer(source_text)
         if match.group(0) not in _COMMON_IDENTIFIERS and len(match.group(0)) > 2
     }
+
+
+def _rag_query_identifiers(source_text: str) -> set[str]:
+    identifiers = _identifiers(source_text)
+    return {name for name in identifiers if not _is_low_value_rag_identifier(name)}
+
+
+def _is_low_value_rag_identifier(name: str) -> bool:
+    if name in _LOW_VALUE_RAG_IDENTIFIERS:
+        return True
+    if name.startswith("IS_"):
+        return True
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", name) and any(token in name for token in ("_", "FLAG", "IT", "MODE", "STATE")):
+        return True
+    if re.fullmatch(r"[us]int(?:8|16|32|64)_t", name):
+        return True
+    return False
 
 
 def _has_high_risk_api(source_text: str) -> bool:
