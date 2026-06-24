@@ -183,6 +183,44 @@ def test_parse_response_truncates_overlong_snippets_before_schema_validation():
     assert parsed.findings[0].fixed_snippet[-1].content == "line 4"
 
 
+def test_parse_response_normalizes_model_category_aliases():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "model used non-schema category",
+                                "score": 85,
+                                "findings": [
+                                    {
+                                        "severity": "low",
+                                        "category": "code_norm",
+                                        "title": "duplicate code block",
+                                        "description": "model used a code quality category alias",
+                                        "file_path": "ctest_mid/stm32f10x_can.c",
+                                        "line": 118,
+                                        "evidence_ids": [],
+                                        "call_chain": [],
+                                        "confidence": 0.9,
+                                        "remediation": "extract duplicate code into a helper",
+                                        "code_snippet": [],
+                                        "fixed_snippet": [],
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    assert parsed.findings[0].category.value == "maintainability"
+
+
 def test_parse_response_normalizes_chinese_enums_confidence_and_string_snippets():
     parsed = _parse_response(
         {

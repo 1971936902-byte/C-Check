@@ -727,6 +727,33 @@ def _normalize_model_contract(value: Any) -> Any:
         category = finding.get("category")
         if isinstance(category, str):
             normalized_category = {
+                "code_norm": "maintainability",
+                "code_quality": "maintainability",
+                "code_smell": "maintainability",
+                "duplication": "maintainability",
+                "readability": "maintainability",
+                "naming": "style",
+                "code_style": "style",
+                "coding_style": "style",
+                "robustness": "logic",
+                "null_safety": "pointer_safety",
+                "lifetime": "memory_safety",
+                "bounds": "buffer_overflow",
+                "overflow": "integer_safety",
+                "integer_overflow": "integer_safety",
+                "integer_underflow": "integer_safety",
+                "out_of_bounds": "buffer_overflow",
+                "out-of-bounds": "buffer_overflow",
+                "double_free": "memory_safety",
+                "use_after_free": "memory_safety",
+                "use-after-free": "memory_safety",
+                "leak": "resource_leak",
+                "memory_leak": "resource_leak",
+            }.get(category.strip().lower())
+            if normalized_category is not None:
+                finding["category"] = normalized_category
+                category = normalized_category
+            normalized_category = {
                 "内存安全": "memory_safety",
                 "内存安全问题": "memory_safety",
                 "缓冲区溢出": "buffer_overflow",
