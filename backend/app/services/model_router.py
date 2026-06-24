@@ -737,6 +737,20 @@ def _normalize_model_contract(value: Any) -> Any:
                 "coding_style": "style",
                 "robustness": "logic",
                 "null_safety": "pointer_safety",
+                "null_pointer": "pointer_safety",
+                "null_dereference": "pointer_safety",
+                "null_pointer_dereference": "pointer_safety",
+                "nullptr": "pointer_safety",
+                "dangling_pointer": "pointer_safety",
+                "wild_pointer": "pointer_safety",
+                "invalid_pointer": "pointer_safety",
+                "pointer": "pointer_safety",
+                "param_check": "input_validation",
+                "parameter_check": "input_validation",
+                "parameter_validation": "input_validation",
+                "argument_validation": "input_validation",
+                "invalid_argument": "input_validation",
+                "assertion": "input_validation",
                 "lifetime": "memory_safety",
                 "bounds": "buffer_overflow",
                 "overflow": "integer_safety",
@@ -816,7 +830,18 @@ def _normalize_model_contract(value: Any) -> Any:
         else:
             finding["call_chain"] = [item for item in finding["call_chain"] if isinstance(item, str) and item][:16]
         confidence = finding.get("confidence")
-        if confidence is not None and not isinstance(confidence, (int, float)):
+        if isinstance(confidence, str):
+            finding["confidence"] = {
+                "high": 0.9,
+                "medium": 0.7,
+                "low": 0.5,
+                "sure": 0.95,
+                "certain": 0.95,
+                "likely": 0.75,
+                "possible": 0.5,
+                "uncertain": 0.3,
+            }.get(confidence.strip().lower())
+        elif confidence is not None and not isinstance(confidence, (int, float)):
             finding["confidence"] = None
         elif isinstance(confidence, (int, float)) and confidence > 1:
             finding["confidence"] = max(0, min(1, float(confidence) / 100))

@@ -221,6 +221,46 @@ def test_parse_response_normalizes_model_category_aliases():
     assert parsed.findings[0].category.value == "maintainability"
 
 
+def test_parse_response_normalizes_pointer_category_and_confidence_aliases():
+    parsed = _parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "pointer category aliases",
+                                "score": 85,
+                                "findings": [
+                                    {
+                                        "severity": "medium",
+                                        "category": "null_pointer",
+                                        "title": "missing null check",
+                                        "description": "model used a pointer category alias",
+                                        "file_path": "ctest_mid/stm32f10x_can.c",
+                                        "line": 110,
+                                        "evidence_ids": ["E1", "E2"],
+                                        "call_chain": [],
+                                        "confidence": "high",
+                                        "remediation": "check arguments before dereference",
+                                        "code_snippet": [],
+                                        "fixed_snippet": [],
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    finding = parsed.findings[0]
+    assert finding.category.value == "pointer_safety"
+    assert finding.confidence == 0.9
+
+
 def test_parse_response_normalizes_chinese_enums_confidence_and_string_snippets():
     parsed = _parse_response(
         {
