@@ -210,15 +210,10 @@ function locationText(finding: Finding) {
                           </div>
                         </section>
                       </div>
-                      <p v-else class="finding-empty-code">模型未返回代码片段，请根据文件位置定位。</p>
+                      <p v-else class="finding-empty-code">第一阶段评审仅返回问题定位与描述，请根据文件位置结合源码查看。</p>
 
                       <div class="finding-meta">
                         <small>分类：{{ finding.category }}</small>
-                        <small v-if="finding.raw_category && finding.raw_category !== finding.category">原始分类：{{ finding.raw_category }}</small>
-                        <small v-if="finding.confidence != null">置信度：{{ Math.round(finding.confidence * 100) }}%</small>
-                        <small v-if="finding.difficulty">难度：{{ finding.difficulty }}</small>
-                        <small v-if="finding.needs_rag">建议二次 RAG</small>
-                        <small v-if="finding.evidence_ids?.length">Evidence：{{ finding.evidence_ids.join(', ') }}</small>
                       </div>
                     </div>
                   </el-collapse-item>

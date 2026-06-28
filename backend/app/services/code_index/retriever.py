@@ -121,7 +121,6 @@ REASON_VECTOR = "vector"
 REASON_MISSING = "missing"
 RAG_PURPOSE_DEFAULT = "default"
 RAG_PURPOSE_CANDIDATE = "candidate"
-RAG_PURPOSE_CONFIRMATION = "confirmation"
 
 
 @dataclass(frozen=True)
@@ -357,7 +356,7 @@ def _rerank_contexts(
 def _prune_ranked_contexts(contexts: list[RetrievedContext], *, limit: int, purpose: str = RAG_PURPOSE_DEFAULT) -> list[RetrievedContext]:
     if not contexts:
         return []
-    definition_only = purpose in {RAG_PURPOSE_CANDIDATE, RAG_PURPOSE_CONFIRMATION}
+    definition_only = purpose == RAG_PURPOSE_CANDIDATE
     hard_limit = max(3, min(limit, 8 if definition_only else 6))
     bucket_caps = (
         {
@@ -503,7 +502,7 @@ def _definition_profile_enabled(settings: Settings) -> bool:
 
 
 def _definition_only_mode(settings: Settings, purpose: str) -> bool:
-    return purpose in {RAG_PURPOSE_CANDIDATE, RAG_PURPOSE_CONFIRMATION} or _definition_profile_enabled(settings)
+    return purpose == RAG_PURPOSE_CANDIDATE or _definition_profile_enabled(settings)
 
 
 def _definition_symbol_allowed(kind: str) -> bool:

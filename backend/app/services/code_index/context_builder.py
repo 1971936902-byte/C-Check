@@ -8,7 +8,6 @@ from app.core.config import Settings, get_settings
 from app.db.models import ReviewContext, ReviewEvidence, ReviewFile, ReviewTask
 from app.services.code_index.retriever import (
     RAG_PURPOSE_CANDIDATE,
-    RAG_PURPOSE_CONFIRMATION,
     RAG_PURPOSE_DEFAULT,
     RetrievedContext,
     retrieve_context_for_files,
@@ -71,14 +70,12 @@ def render_rag_context(
 def _rag_max_chars(settings: Settings, purpose: str) -> int:
     if purpose == RAG_PURPOSE_CANDIDATE:
         return min(settings.rag_context_max_chars, 2600)
-    if purpose == RAG_PURPOSE_CONFIRMATION:
-        return min(settings.rag_context_max_chars, 3200)
     return settings.rag_context_max_chars
 
 
 def _rag_intro(context_format: str, purpose: str) -> list[str]:
     if context_format in {"segmented", "cards", "symbol_cards"}:
-        if purpose in {RAG_PURPOSE_CANDIDATE, RAG_PURPOSE_CONFIRMATION}:
+        if purpose == RAG_PURPOSE_CANDIDATE:
             return [
                 "DEFINITION CONTEXT (RAG, auxiliary only):",
                 "Use these cards only to resolve unknown structs, typedefs, enums, macros, globals, callbacks, and directly called functions.",
@@ -93,7 +90,7 @@ def _rag_intro(context_format: str, purpose: str) -> list[str]:
             "Every finding.file_path and finding.line must point to the PRIMARY SOURCE supplied in the user message, not to a reference-only location.",
             "If REFERENCE CONTEXT repeats code from PRIMARY SOURCE, treat PRIMARY SOURCE as authoritative and do not duplicate findings.",
         ]
-    if purpose in {RAG_PURPOSE_CANDIDATE, RAG_PURPOSE_CONFIRMATION}:
+    if purpose == RAG_PURPOSE_CANDIDATE:
         return [
             "Definition Context (RAG):",
             "Use PRIMARY SOURCE as the only audit target.",

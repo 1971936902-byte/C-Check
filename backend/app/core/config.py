@@ -73,8 +73,6 @@ class Settings(BaseSettings):
     rag_on_demand_enabled: bool = True
     rag_review_units_enabled: bool = False
     rag_candidate_scan_enabled: bool = True
-    rag_candidate_confirmation_enabled: bool = False
-    rag_candidate_window_radius: int = Field(default=8, ge=2, le=50)
     rag_observability_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False

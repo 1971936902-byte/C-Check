@@ -82,25 +82,3 @@ class CompactModelReviewResponse(BaseModel):
     summary: str = Field(min_length=1, max_length=120)
     score: float = Field(ge=0, le=100)
     findings: list[CompactReviewFinding] = Field(default_factory=list, max_length=COMPACT_MAX_FINDINGS)
-
-
-class CandidateConfirmationDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    candidate_index: int = Field(ge=1)
-    action: Literal["confirm", "reject", "correct"]
-    category: str | None = Field(default=None, max_length=120)
-    raw_category: str | None = Field(default=None, max_length=120)
-    title: str | None = Field(default=None, max_length=120)
-    description: str | None = Field(default=None, max_length=360)
-    line: int | None = Field(default=None, ge=1)
-    trigger_kind: str | None = Field(default=None, max_length=80)
-    reason: str = Field(default="", max_length=180)
-
-
-class CandidateConfirmationResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    summary: str = Field(min_length=1, max_length=120)
-    score: float = Field(ge=0, le=100)
-    decisions: list[CandidateConfirmationDecision] = Field(default_factory=list, max_length=COMPACT_MAX_FINDINGS)

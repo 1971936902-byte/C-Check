@@ -122,11 +122,23 @@ describe('mockApi', () => {
     await expect(mockApi.reviews.remove('review-seeded')).rejects.toThrow('审查任务不存在')
   })
 
-  it('includes Git-style source and fixed code snippets in reports', async () => {
+  it('returns first-stage review shaped findings in reports', async () => {
     const report = (await mockApi.reports.get('report-seeded')).data
     const finding = report.result_json.findings[0]
-    expect(finding.code_snippet?.some((line) => line.kind === 'removed')).toBe(true)
-    expect(finding.fixed_snippet?.some((line) => line.kind === 'added')).toBe(true)
+    const allFindings = report.result_json.findings
+    expect(finding).toEqual({
+      severity: expect.any(String),
+      category: expect.any(String),
+      title: expect.any(String),
+      description: expect.any(String),
+      file_path: expect.any(String),
+      line: expect.any(Number),
+    })
+    expect(finding.code_snippet).toBeUndefined()
+    expect(finding.fixed_snippet).toBeUndefined()
+    expect(finding.remediation).toBeUndefined()
+    expect(allFindings.every((item) => item.description && item.file_path && item.line)).toBe(true)
+    expect(allFindings.some((item) => item.category === 'other')).toBe(true)
   })
 
   it('filters review history by severity and creation time', async () => {

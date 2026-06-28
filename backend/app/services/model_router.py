@@ -17,10 +17,8 @@ from app.core.config import Settings, get_settings
 from app.db.models import CodeChunk, ModelNode, ReviewFile, ReviewTask, TaskStatus
 from app.schemas.model_response import (
     COMPACT_MAX_FINDINGS,
-    CandidateConfirmationResponse,
     CompactModelReviewResponse,
     ModelReviewResponse,
-    ReviewFinding,
 )
 from app.services.check_types import check_types_prompt
 from app.services.model_output_sanitizer import ModelOutputSanitizer
@@ -98,34 +96,14 @@ FINAL_RESPONSE_CONTRACT = """
 Return exactly one compact JSON object. No Markdown.
 Top-level keys: summary, score, findings.
 Use Chinese. Keep summary under 50 Chinese chars.
-This is final confirmation mode. Return only supported final findings.
-Each finding uses exactly: severity, category, title, description, file_path, line, evidence_ids, confidence, difficulty, needs_rag, trigger_kind, unknown_symbols.
+This is final single-pass review mode. Return only supported visible findings.
+Each finding uses exactly: severity, category, title, description, file_path, line.
 Keep title under 24 Chinese chars.
 Keep description under 140 Chinese chars and state the exact unsafe trigger or visible consequence.
 The line value must point to the best executable statement or declaration in PRIMARY SOURCE.
-Use evidence_ids only for definition cards that truly clarified the issue; include at most 3 evidence ids.
 Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
 If category is uncertain but the defect is real, use other instead of forcing logic.
-"""
-
-
-CONFIRMATION_RESPONSE_CONTRACT = """
-Return exactly one compact JSON object. No Markdown.
-Top-level keys: summary, score, decisions.
-Use Chinese. Keep summary under 50 Chinese chars.
-This is candidate confirmation mode, not a fresh full-file review.
-Review each listed candidate independently and return one decision item per candidate you evaluated.
-Do not output a findings key in this mode. The only result list key is decisions.
-Each decision uses exactly: candidate_index, action, category, raw_category, title, description, line, trigger_kind, evidence_ids, unknown_symbols, reason.
-action must be one of confirm, reject, correct.
-Use confirm when the candidate is supported as-is or only needs tiny wording cleanup.
-Use reject when the shown local code does not support the candidate.
-Use correct when the candidate is real but line/category/title/description/trigger_kind should be adjusted.
-Do not invent new findings outside the listed candidates.
-Do not merge one candidate into another candidate.
-RAG Definition Context is only for understanding unknown symbols, not as independent proof.
-If correcting, keep the same defect semantics and point to the best executable statement in PRIMARY SOURCE.
-Allowed stable categories: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
+PRIMARY SOURCE remains the proof standard; Definition Context is semantic compensation only.
 """
 
 # Backward-compatible alias kept for tests and legacy callers that inspect the
@@ -853,178 +831,8 @@ def _category_from_text(value: str) -> str | None:
     return None
 
 
-def _normalize_fractional_confidence_value(value: float) -> float:
-    if value <= 1:
-        return max(0.0, min(1.0, value))
-    if value <= 10:
-        return max(0.0, min(1.0, value / 10.0))
-    return max(0.0, min(1.0, value / 100.0))
-
-
 def _normalize_model_contract(value: Any) -> Any:
     return MODEL_OUTPUT_SANITIZER.sanitize(value)
-    if not isinstance(value, dict):
-        return value
-    findings = value.get("findings")
-    if not isinstance(findings, list):
-        return value
-    for finding in findings:
-        if not isinstance(finding, dict):
-            continue
-        severity = finding.get("severity")
-        if isinstance(severity, str):
-            normalized_severity = {
-                "高": "high",
-                "高危": "high",
-                "严重": "high",
-                "中": "medium",
-                "中危": "medium",
-                "中等": "medium",
-                "低": "low",
-                "低危": "low",
-                "建议": "suggestion",
-                "提示": "suggestion",
-            }.get(severity.strip())
-            if normalized_severity is not None:
-                finding["severity"] = normalized_severity
-        category = finding.get("category")
-        if isinstance(category, str):
-            normalized_category = {
-                "code_norm": "maintainability",
-                "code_quality": "maintainability",
-                "code_smell": "maintainability",
-                "duplication": "maintainability",
-                "readability": "maintainability",
-                "naming": "style",
-                "code_style": "style",
-                "coding_style": "style",
-                "robustness": "logic",
-                "null_safety": "pointer_safety",
-                "null_pointer": "pointer_safety",
-                "null_dereference": "pointer_safety",
-                "null_pointer_dereference": "pointer_safety",
-                "nullptr": "pointer_safety",
-                "dangling_pointer": "pointer_safety",
-                "wild_pointer": "pointer_safety",
-                "invalid_pointer": "pointer_safety",
-                "pointer": "pointer_safety",
-                "param_check": "input_validation",
-                "parameter_check": "input_validation",
-                "parameter_validation": "input_validation",
-                "argument_validation": "input_validation",
-                "invalid_argument": "input_validation",
-                "assertion": "input_validation",
-                "lifetime": "memory_safety",
-                "bounds": "buffer_overflow",
-                "overflow": "integer_safety",
-                "integer_overflow": "integer_safety",
-                "integer_underflow": "integer_safety",
-                "type_conversion": "integer_safety",
-                "implicit_cast": "integer_safety",
-                "integer_conversion": "integer_safety",
-                "cast_overflow": "integer_safety",
-                "type_safety": "compatibility",
-                "type_mismatch": "compatibility",
-                "out_of_bounds": "buffer_overflow",
-                "out-of-bounds": "buffer_overflow",
-                "double_free": "memory_safety",
-                "use_after_free": "memory_safety",
-                "use-after-free": "memory_safety",
-                "leak": "resource_leak",
-                "memory_leak": "resource_leak",
-                "allocation_leak": "resource_leak",
-                "unbounded_allocation": "resource_leak",
-                "unbounded_allocation_loop": "resource_leak",
-                "allocation_until_failure": "resource_leak",
-                "malloc_loop": "resource_leak",
-                "stack_exhaustion": "resource_leak",
-                "heap_exhaustion": "resource_leak",
-                "resource_exhaustion": "resource_leak",
-            }.get(category.strip().lower())
-            if normalized_category is not None:
-                finding["category"] = normalized_category
-                category = normalized_category
-            normalized_category = {
-                "内存安全": "memory_safety",
-                "内存安全问题": "memory_safety",
-                "缓冲区溢出": "buffer_overflow",
-                "堆缓冲区溢出": "buffer_overflow",
-                "栈缓冲区溢出": "buffer_overflow",
-                "指针安全": "pointer_safety",
-                "空指针": "pointer_safety",
-                "野指针": "pointer_safety",
-                "资源泄漏": "resource_leak",
-                "内存泄漏": "resource_leak",
-                "逻辑错误": "logic",
-                "逻辑": "logic",
-                "安全": "security",
-                "输入校验": "input_validation",
-                "输入验证": "input_validation",
-                "整数安全": "integer_safety",
-                "整数溢出": "integer_safety",
-                "整数溢出与类型转换": "integer_safety",
-                "并发": "concurrency",
-                "并发与线程安全": "concurrency",
-                "性能": "performance",
-                "代码风格": "style",
-                "可维护性": "maintainability",
-                "兼容性": "compatibility",
-                "可移植性": "portability",
-            }.get(category.strip())
-            if normalized_category is None:
-                normalized_category = _category_from_text(category)
-            if normalized_category is not None:
-                finding["category"] = normalized_category
-        fallback_line = finding.get("line")
-        if not isinstance(fallback_line, int):
-            fallback_line = None
-        for snippet_key in ("code_snippet", "fixed_snippet"):
-            snippet = finding.get(snippet_key)
-            if not isinstance(snippet, list):
-                continue
-            normalized_lines = []
-            for line in snippet:
-                if isinstance(line, str):
-                    if fallback_line is None:
-                        continue
-                    line = {"line": fallback_line, "content": line, "kind": "context"}
-                elif not isinstance(line, dict):
-                    continue
-                if line.get("kind") not in {"context", "removed", "added"}:
-                    line = {**line, "kind": "context"}
-                if line.get("line") is None:
-                    if fallback_line is None:
-                        continue
-                    line = {**line, "line": fallback_line}
-                normalized_lines.append(line)
-            finding[snippet_key] = normalized_lines[:MAX_MODEL_SNIPPET_LINES]
-        if not isinstance(finding.get("evidence_ids"), list):
-            finding["evidence_ids"] = []
-        else:
-            finding["evidence_ids"] = [
-                item for item in finding["evidence_ids"] if isinstance(item, str) and item.startswith("E")
-            ][:12]
-        if not isinstance(finding.get("call_chain"), list):
-            finding["call_chain"] = []
-        else:
-            finding["call_chain"] = [item for item in finding["call_chain"] if isinstance(item, str) and item][:16]
-        confidence = finding.get("confidence")
-        if isinstance(confidence, str):
-            finding["confidence"] = {
-                "high": 0.9,
-                "medium": 0.7,
-                "low": 0.5,
-                "sure": 0.95,
-                "certain": 0.95,
-                "likely": 0.75,
-                "possible": 0.5,
-                "uncertain": 0.3,
-            }.get(confidence.strip().lower())
-        elif confidence is not None and not isinstance(confidence, (int, float)):
-            finding["confidence"] = None
-        elif isinstance(confidence, (int, float)) and confidence > 1:
-            finding["confidence"] = _normalize_fractional_confidence_value(float(confidence))
-    return value
 
 
 def _parse_typed_response(
@@ -1055,20 +863,6 @@ def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
         response_model=ModelReviewResponse,
         normalizer=_normalize_model_contract,
     )
-
-
-def _normalize_confirmation_contract(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-    if "decisions" in value:
-        return value
-    if "findings" in value and isinstance(value["findings"], list):
-        return {
-            "summary": value.get("summary", "候选确认完成。"),
-            "score": value.get("score", 80),
-            "decisions": value["findings"],
-        }
-    return value
 
 
 def _response_format(settings: Settings, *, response_schema: type[BaseModel] = CompactModelReviewResponse) -> dict[str, Any] | None:
@@ -1202,81 +996,6 @@ def _review_file_by_path(files: Sequence[ReviewFile], file_path: str) -> ReviewF
     return basename_matches[0] if len(basename_matches) == 1 else None
 
 
-def _normalized_trigger_kind_value(value: str | None) -> str:
-    lowered = (value or "").strip().lower()
-    aliases = {
-        "unsafe_copy": "copy_bounds",
-        "copy_overflow": "copy_bounds",
-        "integer_overflow": "overflow",
-        "integer_underflow": "underflow",
-        "division_by_zero": "divide_by_zero",
-        "memory_leak": "missing_release",
-        "leak": "missing_release",
-        "heap_exhaustion": "exhausted_loop",
-        "resource_exhaustion": "exhausted_loop",
-        "allocation_until_failure": "exhausted_loop",
-        "unbounded_allocation_loop": "exhausted_loop",
-        "malloc_loop": "exhausted_loop",
-        "stack_overflow": "stack_exhaustion",
-        "recursive_exhaustion": "stack_exhaustion",
-    }
-    return aliases.get(lowered, lowered)
-
-
-def _normalized_trigger_kind(finding) -> str:
-    return _normalized_trigger_kind_value(getattr(finding, "trigger_kind", ""))
-
-
-def _confidence_uncertainty_score(confidence: float | None) -> int:
-    if confidence is None:
-        return 30
-    if confidence >= 0.90:
-        return 0
-    if confidence >= 0.75:
-        return 10
-    if confidence >= 0.55:
-        return 20
-    return 30
-
-
-def _difficulty_review_score(difficulty) -> int:
-    value = getattr(difficulty, "value", difficulty)
-    return {
-        "low": 0,
-        "medium": 25,
-        "high": 40,
-        None: 25,
-    }.get(value, 25)
-
-
-def _severity_review_score(severity) -> int:
-    value = getattr(severity, "value", severity)
-    return {
-        "high": 30,
-        "medium": 20,
-        "low": 10,
-        "suggestion": 0,
-    }.get(value, 10)
-
-
-def _deep_review_score(finding) -> int:
-    return (
-        _confidence_uncertainty_score(finding.confidence)
-        + _difficulty_review_score(finding.difficulty)
-        + _severity_review_score(finding.severity)
-    )
-
-
-def _raw_category_conflicts_with_category(finding) -> bool:
-    raw_category = (finding.raw_category or "").strip()
-    if not raw_category:
-        return False
-    normalized = MODEL_OUTPUT_SANITIZER._normalize_category(raw_category, fallback_text="")
-    if normalized == "logic":
-        return False
-    return normalized != finding.category.value
-
-
 def _looks_like_function_header(header_text: str) -> bool:
     compact = " ".join(line.strip() for line in header_text.splitlines() if line.strip())
     if not compact or ")" not in compact:
@@ -1313,11 +1032,8 @@ def _candidate_text(finding) -> str:
         part
         for part in (
             getattr(finding, "category", None).value if getattr(finding, "category", None) is not None else "",
-            getattr(finding, "raw_category", "") or "",
-            _normalized_trigger_kind_value(getattr(finding, "trigger_kind", "") or ""),
             getattr(finding, "title", "") or "",
             getattr(finding, "description", "") or "",
-            " ".join(getattr(finding, "unknown_symbols", []) or []),
         )
         if part
     ).lower()
@@ -1397,7 +1113,6 @@ def _candidate_subject_identifiers(finding) -> tuple[str, ...]:
         for part in (
             getattr(finding, "title", "") or "",
             getattr(finding, "description", "") or "",
-            " ".join(getattr(finding, "unknown_symbols", []) or []),
         )
         if part
     )
@@ -1430,13 +1145,8 @@ def _line_matches_candidate_trigger(line_text: str, finding) -> bool:
     tokens = _candidate_anchor_terms(finding)
     if tokens and any(token in lowered for token in tokens):
         return True
-    symbol_hits = [symbol.lower() for symbol in (getattr(finding, "unknown_symbols", None) or []) if symbol]
     identifier_hits = _candidate_subject_identifiers(finding)
-    return (
-        bool(symbol_hits) and any(symbol in lowered for symbol in symbol_hits)
-    ) or (
-        bool(identifier_hits) and any(identifier in lowered for identifier in identifier_hits)
-    )
+    return bool(identifier_hits) and any(identifier in lowered for identifier in identifier_hits)
 
 
 def _line_has_actionable_c_anchor(line_text: str) -> bool:
@@ -1556,7 +1266,6 @@ def _dedupe_final_findings(findings: Sequence) -> list:
             finding.file_path.replace("\\", "/").strip().lower(),
             finding.category.value,
             finding.line,
-            _normalized_trigger_kind(finding),
             finding.title.strip().lower(),
         )
         if key in seen:
@@ -1564,155 +1273,6 @@ def _dedupe_final_findings(findings: Sequence) -> list:
         seen.add(key)
         deduped.append(finding)
     return deduped
-
-
-def _needs_deep_candidate_review(files: Sequence[ReviewFile], finding, *, threshold: int = 80) -> bool:
-    if finding.needs_rag:
-        return True
-    if finding.unknown_symbols:
-        return True
-    if finding.line is None:
-        return True
-    if _raw_category_conflicts_with_category(finding):
-        return True
-    source = _review_file_by_path(files, finding.file_path)
-    line_text = ""
-    if source is not None and finding.line is not None:
-        lines = source.source_text.splitlines()
-        if 1 <= finding.line <= len(lines):
-            line_text = lines[finding.line - 1]
-    anchor_score = _candidate_line_anchor_score(line_text, finding) if line_text else 0.0
-    if finding.category.value in {"concurrency", "logic", "input_validation", "other"}:
-        return True
-    if (
-        _difficulty_review_score(finding.difficulty) == 0
-        and (finding.confidence or 0) >= 0.90
-        and anchor_score >= 3.0
-    ):
-        return False
-    return _deep_review_score(finding) >= threshold or anchor_score < 2.0
-
-
-def _partition_candidate_findings(files: Sequence[ReviewFile], candidates: Sequence) -> tuple[list, list]:
-    direct: list = []
-    deep: list = []
-    for finding in candidates:
-        if _needs_deep_candidate_review(files, finding):
-            deep.append(finding)
-        else:
-            direct.append(finding)
-    return direct, deep
-
-
-def _candidate_window_files(
-    source_files: Sequence[ReviewFile],
-    candidates: Sequence,
-    *,
-    radius: int,
-) -> list[ReviewFile]:
-    windows_by_path: dict[str, list[tuple[int, int]]] = {}
-    for candidate in candidates:
-        candidate_line = _refine_candidate_line(source_files, candidate) if candidate.line is not None else None
-        if candidate_line is None:
-            continue
-        source = _review_file_by_path(source_files, candidate.file_path)
-        if source is None:
-            continue
-        line_count = max(1, len(source.source_text.splitlines()))
-        start = max(1, candidate_line - radius)
-        end = min(line_count, candidate_line + radius)
-        windows_by_path.setdefault(source.relative_path, []).append((start, end))
-
-    rendered_files: list[ReviewFile] = []
-    for relative_path, windows in windows_by_path.items():
-        source = _review_file_by_path(source_files, relative_path)
-        if source is None:
-            continue
-        lines = source.source_text.splitlines()
-        merged: list[tuple[int, int]] = []
-        for start, end in sorted(windows):
-            if merged and start <= merged[-1][1] + 1:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-        parts: list[str] = []
-        for start, end in merged:
-            parts.append(f"--- candidate local window lines {start}-{end} ---")
-            parts.extend(
-                f"{line_number:0{CHUNK_LINE_PREFIX_WIDTH}d}: {lines[line_number - 1]}"
-                for line_number in range(start, end + 1)
-            )
-        source_text = "\n".join(parts)
-        rendered_files.append(
-            ReviewFile(
-                relative_path=relative_path,
-                source_text=source_text,
-                size_bytes=len(source_text.encode("utf-8", errors="ignore")),
-            )
-        )
-    return rendered_files
-
-
-def _candidate_confirmation_prompt(base_prompt: str, candidates: Sequence) -> str:
-    candidate_lines = []
-    for index, finding in enumerate(candidates, start=1):
-        candidate_lines.append(
-            f"{index}. {finding.file_path}:{finding.line or 'unknown'} "
-            f"category_guess={finding.category.value} severity={finding.severity.value} "
-            f"title={finding.title} trigger={_normalized_trigger_kind(finding) or 'unknown'} "
-            f"unknown={','.join(finding.unknown_symbols or []) or '-'}"
-        )
-    return "\n".join(
-        [
-            base_prompt,
-            "",
-            "Second-stage confirmation mode.",
-            "Review only the candidate local windows in the PRIMARY SOURCE below.",
-            "Candidate lines may be approximate; use only nearby lines inside each shown local window, plus any Definition Context cards, to confirm or correct each candidate.",
-            "For each candidate, output one decision item with the same candidate_index.",
-            "Return the result list under the decisions key only. Do not output a findings key.",
-            "Do not rescan the whole function and do not convert one candidate into another candidate's defect.",
-            "Do not add new global findings outside the shown candidate windows.",
-            "If the category is uncertain but the local defect is real, use other.",
-            "Return only the decisions list.",
-            "",
-            "Candidate list:",
-            *candidate_lines,
-        ]
-    )
-
-
-def _apply_confirmation_decisions(candidates: Sequence[ReviewFinding], confirmation: CandidateConfirmationResponse) -> list[ReviewFinding]:
-    resolved: list[ReviewFinding] = []
-    for decision in confirmation.decisions:
-        if decision.candidate_index < 1 or decision.candidate_index > len(candidates):
-            continue
-        base = candidates[decision.candidate_index - 1]
-        if decision.action == "reject":
-            continue
-        if decision.action == "confirm":
-            resolved.append(base)
-            continue
-        merged = base.model_dump(mode="json")
-        if decision.category:
-            merged["category"] = decision.category
-        if decision.raw_category:
-            merged["raw_category"] = decision.raw_category
-        if decision.title:
-            merged["title"] = decision.title
-        if decision.description:
-            merged["description"] = decision.description
-        if decision.line is not None:
-            merged["line"] = decision.line
-        if decision.trigger_kind:
-            merged["trigger_kind"] = decision.trigger_kind
-        if decision.evidence_ids:
-            merged["evidence_ids"] = list(decision.evidence_ids)
-        if decision.unknown_symbols:
-            merged["unknown_symbols"] = list(decision.unknown_symbols)
-        sanitized = MODEL_OUTPUT_SANITIZER._sanitize_finding(merged)
-        resolved.append(ReviewFinding.model_validate(sanitized))
-    return resolved
 
 
 async def _invoke_candidate_review(
