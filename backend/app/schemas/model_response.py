@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+COMPACT_MAX_FINDINGS = 200
+
 
 class FindingSeverity(str, Enum):
     HIGH = "high"
@@ -28,20 +30,7 @@ class FindingCategory(str, Enum):
     MAINTAINABILITY = "maintainability"
     COMPATIBILITY = "compatibility"
     PORTABILITY = "portability"
-
-
-class CodeLineKind(str, Enum):
-    CONTEXT = "context"
-    REMOVED = "removed"
-    ADDED = "added"
-
-
-class CodeLine(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    line: int = Field(ge=1)
-    content: str
-    kind: CodeLineKind = CodeLineKind.CONTEXT
+    OTHER = "other"
 
 
 class ReviewFinding(BaseModel):
@@ -53,12 +42,6 @@ class ReviewFinding(BaseModel):
     description: str = Field(min_length=1, max_length=360)
     file_path: str = Field(min_length=1, max_length=512)
     line: int | None = Field(default=None, ge=1)
-    evidence_ids: list[str] = Field(default_factory=list, max_length=12)
-    call_chain: list[str] = Field(default_factory=list, max_length=16)
-    confidence: float | None = Field(default=None, ge=0, le=1)
-    remediation: str = Field(min_length=1, max_length=360)
-    code_snippet: list[CodeLine] = Field(default_factory=list, max_length=5)
-    fixed_snippet: list[CodeLine] = Field(default_factory=list, max_length=5)
 
 
 class ModelReviewResponse(BaseModel):
@@ -78,6 +61,7 @@ FastFindingCategory = Literal[
     "input_validation",
     "concurrency",
     "logic",
+    "other",
 ]
 
 
@@ -87,9 +71,9 @@ class CompactReviewFinding(BaseModel):
     severity: FindingSeverity
     category: FastFindingCategory
     title: str = Field(min_length=1, max_length=60)
+    description: str = Field(default="", max_length=180)
     file_path: str = Field(min_length=1, max_length=512)
     line: int | None = Field(default=None, ge=1)
-    confidence: float | None = Field(default=None, ge=0, le=1)
 
 
 class CompactModelReviewResponse(BaseModel):
@@ -97,4 +81,26 @@ class CompactModelReviewResponse(BaseModel):
 
     summary: str = Field(min_length=1, max_length=120)
     score: float = Field(ge=0, le=100)
-    findings: list[CompactReviewFinding] = Field(default_factory=list, max_length=4)
+    findings: list[CompactReviewFinding] = Field(default_factory=list, max_length=COMPACT_MAX_FINDINGS)
+
+
+class CandidateConfirmationDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_index: int = Field(ge=1)
+    action: Literal["confirm", "reject", "correct"]
+    category: str | None = Field(default=None, max_length=120)
+    raw_category: str | None = Field(default=None, max_length=120)
+    title: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=360)
+    line: int | None = Field(default=None, ge=1)
+    trigger_kind: str | None = Field(default=None, max_length=80)
+    reason: str = Field(default="", max_length=180)
+
+
+class CandidateConfirmationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=120)
+    score: float = Field(ge=0, le=100)
+    decisions: list[CandidateConfirmationDecision] = Field(default_factory=list, max_length=COMPACT_MAX_FINDINGS)

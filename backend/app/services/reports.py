@@ -19,20 +19,23 @@ class ReportRenderError(RuntimeError):
     """Raised when a report cannot be rendered in the requested format."""
 
 
-def build_report(task: ReviewTask, result: ModelReviewResponse) -> Report:
+def populate_report(report: Report, task: ReviewTask, result: ModelReviewResponse) -> Report:
     severity_counts = Counter(finding.severity.value for finding in result.findings)
     category_counts = Counter(finding.category.value for finding in result.findings)
-    return Report(
-        task=task,
-        summary=result.summary,
-        score=result.score,
-        high_count=severity_counts["high"],
-        medium_count=severity_counts["medium"],
-        low_count=severity_counts["low"],
-        suggestion_count=severity_counts["suggestion"],
-        category_counts=dict(category_counts),
-        result_json=result.model_dump(mode="json"),
-    )
+    report.task = task
+    report.summary = result.summary
+    report.score = result.score
+    report.high_count = severity_counts["high"]
+    report.medium_count = severity_counts["medium"]
+    report.low_count = severity_counts["low"]
+    report.suggestion_count = severity_counts["suggestion"]
+    report.category_counts = dict(category_counts)
+    report.result_json = result.model_dump(mode="json")
+    return report
+
+
+def build_report(task: ReviewTask, result: ModelReviewResponse) -> Report:
+    return populate_report(Report(task=task), task, result)
 
 
 def render_markdown(report: Report) -> str:
@@ -66,30 +69,11 @@ def render_markdown(report: Report) -> str:
                 "",
                 f"- Category: `{finding['category']}`",
                 f"- Location: `{location}`",
-            "",
-                finding["description"],
                 "",
-            f"**Remediation:** {finding['remediation']}",
+                finding["description"],
                 "",
             ]
         )
-        evidence_ids = finding.get("evidence_ids") or []
-        call_chain = finding.get("call_chain") or []
-        confidence = finding.get("confidence")
-        if evidence_ids:
-            lines.extend([f"- Evidence: `{', '.join(evidence_ids)}`", ""])
-        if call_chain:
-            lines.extend([f"- Call chain: `{ ' -> '.join(call_chain) }`", ""])
-        if confidence is not None:
-            lines.extend([f"- Confidence: `{confidence:.2f}`", ""])
-        for title, snippet in (
-            ("Problematic code", finding.get("code_snippet", [])),
-            ("Suggested code", finding.get("fixed_snippet", [])),
-        ):
-            if snippet:
-                lines.extend([f"**{title}:**", "", "```c"])
-                lines.extend(item["content"] for item in snippet)
-                lines.extend(["```", ""])
     return "\n".join(lines).rstrip() + "\n"
 
 

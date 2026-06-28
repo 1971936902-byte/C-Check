@@ -14,7 +14,12 @@ export interface ReviewTask {
 }
 export type CodeLineKind = 'context' | 'removed' | 'added'
 export interface CodeLine { line: number; content: string; kind: CodeLineKind }
-export interface Finding { severity: Severity; category: string; title: string; description: string; file_path: string; line?: number | null; remediation: string; code_snippet?: CodeLine[]; fixed_snippet?: CodeLine[] }
+export interface Finding {
+  severity: Severity; category: string; title: string; description: string; file_path: string; line?: number | null
+  evidence_ids?: string[]; call_chain?: string[]; confidence?: number | null; raw_category?: string | null
+  difficulty?: 'low' | 'medium' | 'high' | null; needs_rag?: boolean
+  remediation: string; code_snippet?: CodeLine[]; fixed_snippet?: CodeLine[]
+}
 export interface Report { id: string; task_id: string; summary: string; score: number; high_count: number; medium_count: number; low_count: number; suggestion_count: number; category_counts: Record<string, number>; result_json: { summary: string; score: number; findings: Finding[] } }
 export interface Dashboard { users: number; enabled_users: number; models: number; enabled_models: number; tasks: number; queued_tasks: number; running_tasks: number; completed_tasks: number; failed_tasks: number }
 export interface SystemResource { cpu_percent?: number | null; load_average_1m?: number | null; memory_total_bytes?: number | null; memory_used_bytes?: number | null; memory_percent?: number | null; disk_total_bytes?: number | null; disk_used_bytes?: number | null; disk_percent?: number | null }

@@ -225,11 +225,19 @@ def _matched_key(context: RetrievedContext, expected: set[str]) -> str:
 def _ndcg(top: list[RetrievedContext], expected: set[str]) -> float:
     if not expected:
         return 1.0
-    gains = [1.0 if _matches_any(context, expected) else 0.0 for context in top]
+    seen: set[str] = set()
+    gains: list[float] = []
+    for context in top:
+        key = _matched_key(context, expected) if _matches_any(context, expected) else ""
+        if key and key not in seen:
+            gains.append(1.0)
+            seen.add(key)
+        else:
+            gains.append(0.0)
     dcg = sum(gain / log2(index + 2) for index, gain in enumerate(gains))
     ideal_hits = min(len(expected), len(top))
     idcg = sum(1.0 / log2(index + 2) for index in range(ideal_hits))
-    return dcg / idcg if idcg else 0.0
+    return min(1.0, dcg / idcg) if idcg else 0.0
 
 
 def _set_recall(actual: set[tuple[str, str]], expected: set[tuple[str, str]]) -> float:

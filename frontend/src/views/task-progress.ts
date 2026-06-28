@@ -13,6 +13,7 @@ export const ALL_CHECK_TYPES = [
   { value: 'portability', label: '跨平台可移植性' },
   { value: 'performance', label: '性能隐患' },
   { value: 'maintainability', label: '代码规范与可维护性' },
+  { value: 'other', label: 'Other' },
 ] as const
 
 export type FileProgressStatus = 'pending' | 'analyzing' | 'completed'

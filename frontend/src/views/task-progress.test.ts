@@ -59,6 +59,7 @@ describe('deriveReviewProgressSummary', () => {
   })
 
   it('provides at least ten selectable C review dimensions', () => {
-    expect(ALL_CHECK_TYPES).toHaveLength(12)
+    expect(ALL_CHECK_TYPES.length).toBeGreaterThanOrEqual(12)
+    expect(ALL_CHECK_TYPES.some((item) => item.value === 'other')).toBe(true)
   })
 })

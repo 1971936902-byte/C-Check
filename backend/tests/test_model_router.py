@@ -6,10 +6,12 @@ import pytest
 
 from app.db.models import ModelNode, ReviewFile
 from app.core.config import Settings
-from app.schemas.model_response import FindingCategory, ModelReviewResponse
+from app.schemas.model_response import COMPACT_MAX_FINDINGS, FindingCategory, ModelReviewResponse
 from app.services.model_router import (
     ModelNodeDispatchPool,
     ModelInvocationError,
+    RESPONSE_CONTRACT,
+    _refine_candidate_line,
     _chunk_file,
     _effective_chunk_max_chars,
     _ensure_input_budget,
@@ -337,7 +339,8 @@ def test_parse_response_sanitizes_malformed_but_usable_findings():
     assert parsed.findings[0].code_snippet[0].line == 42
     assert parsed.findings[0].fixed_snippet[0].kind.value == "context"
     assert parsed.findings[1].severity.value == "low"
-    assert parsed.findings[1].category.value == "logic"
+    assert parsed.findings[1].category.value == "other"
+    assert parsed.findings[1].raw_category == "totally_new_category"
     assert parsed.findings[1].title == "模型发现的问题"
 
 
@@ -621,7 +624,8 @@ def test_invoke_model_requests_json_schema_structured_output(monkeypatch):
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["name"] == "c_review_fast_response"
     assert response_format["json_schema"]["strict"] is True
-    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == 4
+    assert "category_buckets" not in response_format["json_schema"]["schema"]["properties"]
+    assert response_format["json_schema"]["schema"]["properties"]["findings"]["maxItems"] == COMPACT_MAX_FINDINGS
 
 
 def test_parse_response_truncates_too_many_findings_for_audit():
@@ -639,12 +643,21 @@ def test_parse_response_truncates_too_many_findings_for_audit():
     content = {
         "summary": "too many findings",
         "score": 60,
-        "findings": [finding for _ in range(10)],
+        "findings": [finding for _ in range(COMPACT_MAX_FINDINGS + 2)],
     }
 
     parsed = _parse_response({"choices": [{"message": {"content": json.dumps(content)}}]})
 
-    assert len(parsed.findings) == 4
+    assert len(parsed.findings) == COMPACT_MAX_FINDINGS
+
+
+def test_response_contract_keeps_category_scanning_without_buckets():
+    assert "Top-level keys: summary, score, findings" in RESPONSE_CONTRACT
+    assert "first-stage candidate discovery" in RESPONSE_CONTRACT
+    assert "broad category coverage" in RESPONSE_CONTRACT
+    assert "up to 10 candidates per category" not in RESPONSE_CONTRACT
+    assert "Return up to" not in RESPONSE_CONTRACT
+    assert "category_buckets" not in RESPONSE_CONTRACT
 
 
 def test_parse_response_accepts_compact_findings_and_fills_report_fields():
@@ -656,9 +669,13 @@ def test_parse_response_accepts_compact_findings_and_fills_report_fields():
                 "severity": "high",
                 "category": "buffer_overflow",
                 "title": "数组越界写",
+                "description": "索引等于固定数组长度导致越界写入。",
                 "file_path": "main.c",
                 "line": 7,
+                "evidence_ids": ["E1"],
                 "confidence": 0.9,
+                "difficulty": "high",
+                "needs_rag": True,
             }
         ],
     }
@@ -667,10 +684,65 @@ def test_parse_response_accepts_compact_findings_and_fills_report_fields():
 
     finding = parsed.findings[0]
     assert finding.title == "数组越界写"
-    assert finding.description == "数组越界写"
+    assert finding.description == "索引等于固定数组长度导致越界写入。"
+    assert finding.evidence_ids == ["E1"]
+    assert finding.difficulty.value == "high"
+    assert finding.needs_rag is True
     assert finding.remediation == "请根据定位行结合上下文复核。"
     assert finding.code_snippet == []
     assert finding.fixed_snippet == []
+
+
+def test_parse_response_accepts_open_category_and_normalizes_resource_exhaustion():
+    content = {
+        "summary": "发现资源耗尽",
+        "score": 30,
+        "findings": [
+            {
+                "severity": "high",
+                "category": "unbounded_allocation_loop",
+                "title": "循环分配直到失败",
+                "description": "do while 循环持续 malloc，成功时覆盖旧指针并继续分配，最终耗尽堆内存。",
+                "file_path": "imgReadlib.c",
+                "line": 114,
+                "evidence_ids": [],
+                "confidence": 0.9,
+                "difficulty": "low",
+                "needs_rag": False,
+            }
+        ],
+    }
+
+    parsed = _parse_response({"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]})
+
+    finding = parsed.findings[0]
+    assert finding.category.value == "resource_leak"
+    assert finding.raw_category == "unbounded_allocation_loop"
+    assert finding.line == 114
+
+
+def test_parse_response_falls_back_unknown_category_to_other():
+    content = {
+        "summary": "发现未知类型",
+        "score": 70,
+        "findings": [
+            {
+                "severity": "low",
+                "category": "weird_model_label",
+                "title": "无法归类的问题",
+                "description": "模型发现真实风险但没有足够信息归入稳定类别。",
+                "file_path": "main.c",
+                "line": 3,
+                "confidence": 0.5,
+            }
+        ],
+    }
+
+    parsed = _parse_response({"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]})
+
+    finding = parsed.findings[0]
+    assert finding.category.value == "other"
+    assert finding.raw_category == "weird_model_label"
 
 
 def test_invoke_model_keeps_http_error_response_body(monkeypatch):
@@ -835,6 +907,8 @@ def test_settings_default_to_fast_review_path():
     settings = Settings(_env_file=None, allow_insecure_defaults=True)
 
     assert settings.review_no_slice_max_bytes == 8 * 1024
+    assert settings.model_max_tokens == 2048
+    assert settings.model_chunk_max_chars == 18000
     assert settings.rag_on_demand_enabled is True
     assert settings.rag_review_units_enabled is False
 
@@ -1417,3 +1491,273 @@ def test_invoke_selected_model_keeps_large_task_off_reserved_small_node(monkeypa
     assert result.score == 100
     assert set(calls) == {"http://gpu0", "http://gpu1"}
     assert "http://gpu2" not in calls
+
+
+def test_invoke_selected_model_runs_candidate_confirmation_for_small_task(monkeypatch, db_session_factory):
+    from app.core.security import hash_password
+    from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+    from app.schemas.model_response import ReviewFinding
+
+    prompts: list[str] = []
+
+    async def fake_invoke_model(*, prompt, **_kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return ModelReviewResponse(
+                summary="candidates",
+                score=50,
+                findings=[
+                    ReviewFinding(
+                        severity="high",
+                        category="memory_safety",
+                        title="释放后继续使用",
+                        description="free 后继续写入同一指针。",
+                        file_path="main.c",
+                        line=3,
+                        confidence=0.8,
+                        difficulty="medium",
+                        needs_rag=True,
+                        remediation="review",
+                    )
+                ],
+            )
+        return ModelReviewResponse(summary="confirmed", score=40, findings=[])
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr(
+        "app.services.model_router.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            allow_insecure_defaults=True,
+            rag_enabled=False,
+            rag_candidate_scan_enabled=True,
+            rag_candidate_confirmation_enabled=True,
+        ),
+    )
+
+    with db_session_factory() as db:
+        user = User(username="candidate-runner", password_hash=hash_password("candidate-runner-password"))
+        node = ModelNode(
+            display_name="GPU",
+            model_identifier="review-model",
+            base_url="http://gpu0",
+            is_enabled=True,
+        )
+        task = ReviewTask(
+            owner=user,
+            model_node=node,
+            input_mode="text",
+            display_name="candidate-project",
+            file_count=1,
+            check_types=["memory_safety"],
+        )
+        task.files.append(
+            ReviewFile(
+                relative_path="main.c",
+                source_text="int main(void) {\n  free(p);\n  p[0] = 1;\n}\n",
+                size_bytes=45,
+            )
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    with db_session_factory() as db:
+        result = asyncio.run(invoke_selected_model(db, task_id))
+
+    assert result.summary == "confirmed"
+    assert len(prompts) == 2
+    assert "Second-stage confirmation mode" in prompts[1]
+
+
+def test_invoke_selected_model_skips_confirmation_for_obvious_low_difficulty_candidate(
+    monkeypatch, db_session_factory
+):
+    from app.core.security import hash_password
+    from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+    from app.schemas.model_response import ReviewFinding
+
+    prompts: list[str] = []
+
+    async def fake_invoke_model(*, prompt, **_kwargs):
+        prompts.append(prompt)
+        return ModelReviewResponse(
+            summary="candidates",
+            score=50,
+            findings=[
+                ReviewFinding(
+                    severity="high",
+                    category="memory_safety",
+                    raw_category="use_after_free",
+                    title="释放后使用",
+                    description="free 后继续写入同一指针。",
+                    file_path="main.c",
+                    line=3,
+                    confidence=0.95,
+                    difficulty="low",
+                    needs_rag=False,
+                    remediation="review",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr(
+        "app.services.model_router.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            allow_insecure_defaults=True,
+            rag_enabled=False,
+            rag_candidate_scan_enabled=True,
+            rag_candidate_confirmation_enabled=True,
+        ),
+    )
+
+    with db_session_factory() as db:
+        user = User(username="candidate-direct", password_hash=hash_password("candidate-direct-password"))
+        node = ModelNode(
+            display_name="GPU",
+            model_identifier="review-model",
+            base_url="http://gpu0",
+            is_enabled=True,
+        )
+        task = ReviewTask(
+            owner=user,
+            model_node=node,
+            input_mode="text",
+            display_name="candidate-direct-project",
+            file_count=1,
+            check_types=["memory_safety"],
+        )
+        task.files.append(
+            ReviewFile(
+                relative_path="main.c",
+                source_text="int main(void) {\n  free(p);\n  p[0] = 1;\n}\n",
+                size_bytes=45,
+            )
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    with db_session_factory() as db:
+        result = asyncio.run(invoke_selected_model(db, task_id))
+
+    assert result.summary == "candidates"
+    assert len(result.findings) == 1
+    assert len(prompts) == 1
+
+
+def test_refine_candidate_line_prefers_exact_mechanism_anchor():
+    from app.schemas.model_response import ReviewFinding
+
+    finding = ReviewFinding(
+        severity="high",
+        category="integer_safety",
+        title="整数下溢",
+        description="size2 由 img.width - img.height + 100 计算，可能发生下溢。",
+        file_path="imgRead.c",
+        line=45,
+        confidence=0.9,
+        difficulty="low",
+        needs_rag=False,
+        trigger_kind="underflow",
+        remediation="review",
+    )
+    files = [
+        ReviewFile(
+            relative_path="imgRead.c",
+            source_text="\n".join(
+                [
+                    "int main(void)",
+                    "{",
+                    "  // unrelated",
+                    "  //{",
+                    "  int size2 = img.width - img.height + 100;",
+                    "  char* buff2 = (char*)malloc(size2);",
+                    "}",
+                ]
+            ),
+            size_bytes=128,
+        )
+    ]
+
+    assert _refine_candidate_line(files, finding) == 5
+
+
+def test_invoke_selected_model_skips_confirmation_for_precise_divide_by_zero_candidate(
+    monkeypatch, db_session_factory
+):
+    from app.core.security import hash_password
+    from app.db.models import ModelNode, ReviewFile, ReviewTask, User
+    from app.schemas.model_response import ReviewFinding
+
+    prompts: list[str] = []
+
+    async def fake_invoke_model(*, prompt, **_kwargs):
+        prompts.append(prompt)
+        return ModelReviewResponse(
+            summary="candidates",
+            score=50,
+            findings=[
+                ReviewFinding(
+                    severity="high",
+                    category="integer_safety",
+                    title="除以零",
+                    description="size3 = img.width / img.height 可能发生除零。",
+                    file_path="main.c",
+                    line=3,
+                    confidence=0.95,
+                    difficulty="low",
+                    needs_rag=False,
+                    trigger_kind="divide_by_zero",
+                    remediation="review",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr(
+        "app.services.model_router.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            allow_insecure_defaults=True,
+            rag_enabled=False,
+            rag_candidate_scan_enabled=True,
+            rag_candidate_confirmation_enabled=True,
+        ),
+    )
+
+    with db_session_factory() as db:
+        user = User(username="candidate-div-zero", password_hash=hash_password("candidate-div-zero-password"))
+        node = ModelNode(
+            display_name="GPU",
+            model_identifier="review-model",
+            base_url="http://gpu0",
+            is_enabled=True,
+        )
+        task = ReviewTask(
+            owner=user,
+            model_node=node,
+            input_mode="text",
+            display_name="candidate-div-zero-project",
+            file_count=1,
+            check_types=["integer_safety"],
+        )
+        task.files.append(
+            ReviewFile(
+                relative_path="main.c",
+                source_text="int main(void) {\n  int ok = 1;\n  int size3 = img.width / img.height;\n  return ok;\n}\n",
+                size_bytes=96,
+            )
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    with db_session_factory() as db:
+        result = asyncio.run(invoke_selected_model(db, task_id))
+
+    assert result.summary == "candidates"
+    assert len(result.findings) == 1
+    assert len(prompts) == 1

@@ -22,6 +22,7 @@ const names: Record<string, string> = {
   maintainability: '可维护性',
   compatibility: '兼容性',
   portability: '可移植性',
+  other: 'Other',
 }
 const colors = ['#ec6a72', '#f0a35e', '#e9c25d', '#62a7d4', '#7392ce', '#82b59a', '#9c86c8']
 async function render() {

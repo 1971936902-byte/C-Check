@@ -119,6 +119,9 @@ REASON_SYMBOL = "symbol"
 REASON_KEYWORD = "keyword"
 REASON_VECTOR = "vector"
 REASON_MISSING = "missing"
+RAG_PURPOSE_DEFAULT = "default"
+RAG_PURPOSE_CANDIDATE = "candidate"
+RAG_PURPOSE_CONFIRMATION = "confirmation"
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,7 @@ def retrieve_context_for_files(
     files: list[ReviewFile],
     *,
     settings: Settings | None = None,
+    purpose: str = RAG_PURPOSE_DEFAULT,
 ) -> list[RetrievedContext]:
     settings = settings or get_settings()
     if not settings.rag_enabled or not files:
@@ -152,18 +156,27 @@ def retrieve_context_for_files(
 
     for source_file in files:
         identifiers = _rag_query_identifiers(source_file.source_text)
-        graph_depth = 1 if settings.rag_on_demand_enabled else max(settings.rag_graph_max_depth, 2 if _has_high_risk_api(source_file.source_text) else 1)
+        definition_only = _definition_only_mode(settings, purpose)
+        graph_depth = 1 if definition_only or settings.rag_on_demand_enabled else max(settings.rag_graph_max_depth, 2 if _has_high_risk_api(source_file.source_text) else 1)
         candidate_groups = [
             _include_contexts(db, project, source_file.relative_path),
             _direct_call_contexts(db, project, source_file.relative_path, chunks_by_symbol, max_depth=graph_depth),
             _usage_contexts(db, project, source_file.relative_path, chunks_by_symbol),
-            _keyword_contexts(db, project, identifiers, target_paths, limit=settings.rag_keyword_top_k),
         ]
-        if not settings.rag_on_demand_enabled:
+        if not definition_only:
             candidate_groups.extend(
                 [
                     _upstream_contexts(db, project, source_file.relative_path, chunks_by_symbol),
-                    _qdrant_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
+                    _keyword_contexts(db, project, identifiers, target_paths, limit=settings.rag_keyword_top_k),
+                ]
+            )
+            if settings.rag_qdrant_url:
+                candidate_groups.append(
+                    _qdrant_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k)
+                )
+        if not settings.rag_on_demand_enabled and not definition_only:
+            candidate_groups.extend(
+                [
                     _vector_contexts(db, project, source_file.source_text, target_paths, settings=settings, limit=settings.rag_keyword_top_k),
                 ]
             )
@@ -173,8 +186,9 @@ def retrieve_context_for_files(
                 if current is None or _context_merge_key(context) > _context_merge_key(current):
                     contexts[context.evidence_id] = context
 
-    ranked = _rerank_contexts(db, project, list(contexts.values()), target_paths, source_text_by_path)
-    return _prune_ranked_contexts(ranked, limit=settings.rag_keyword_top_k)
+    profile_contexts = _filter_contexts_for_profile(db, project, list(contexts.values()), target_paths, settings, purpose=purpose)
+    ranked = _rerank_contexts(db, project, profile_contexts, target_paths, source_text_by_path)
+    return _prune_ranked_contexts(ranked, limit=settings.rag_keyword_top_k, purpose=purpose)
 
 
 def retrieve_missing_symbol_contexts(
@@ -183,6 +197,7 @@ def retrieve_missing_symbol_contexts(
     files: list[ReviewFile],
     *,
     settings: Settings | None = None,
+    purpose: str = RAG_PURPOSE_DEFAULT,
 ) -> list[RetrievedContext]:
     settings = settings or get_settings()
     if not settings.rag_enabled or not files:
@@ -209,8 +224,12 @@ def retrieve_missing_symbol_contexts(
         )
     ).all()
     for symbol in symbols:
+        if not _definition_symbol_allowed(symbol.kind):
+            continue
         chunk = chunks_by_symbol.get(symbol.id)
         if chunk is None:
+            continue
+        if _definition_only_mode(settings, purpose) and not _definition_chunk_allowed(chunk, target_paths):
             continue
         score = _missing_symbol_score(symbol.kind, symbol.name, chunk.file.relative_path, target_paths)
         context = _context_from_chunk(chunk, f"{REASON_MISSING}:{symbol.kind}", score)
@@ -218,17 +237,21 @@ def retrieve_missing_symbol_contexts(
         if current is None or context.score > current.score:
             contexts[context.evidence_id] = context
 
-    for hit in keyword_search_chunks(db, project, missing_names, limit=settings.rag_keyword_top_k):
-        chunk = hit.chunk
-        if chunk.symbol_name not in missing_names and not (_identifiers(chunk.content) & missing_names):
-            continue
-        context = _context_from_chunk(chunk, f"{REASON_MISSING}:keyword", 1.0 + hit.score)
-        current = contexts.get(context.evidence_id)
-        if current is None or context.score > current.score:
-            contexts[context.evidence_id] = context
+    if not _definition_only_mode(settings, purpose):
+        for hit in keyword_search_chunks(db, project, missing_names, limit=settings.rag_keyword_top_k):
+            chunk = hit.chunk
+            if chunk.file.relative_path in target_paths and chunk.chunk_kind in {"function", "file_summary"}:
+                continue
+            if chunk.symbol_name not in missing_names and not (_identifiers(chunk.content) & missing_names):
+                continue
+            context = _context_from_chunk(chunk, f"{REASON_MISSING}:keyword", 1.0 + hit.score)
+            current = contexts.get(context.evidence_id)
+            if current is None or context.score > current.score:
+                contexts[context.evidence_id] = context
 
-    ranked = _rerank_contexts(db, project, list(contexts.values()), target_paths, source_text_by_path)
-    return _prune_ranked_contexts(ranked, limit=max(settings.rag_keyword_top_k, 6))
+    profile_contexts = _filter_contexts_for_profile(db, project, list(contexts.values()), target_paths, settings, purpose=purpose)
+    ranked = _rerank_contexts(db, project, profile_contexts, target_paths, source_text_by_path)
+    return _prune_ranked_contexts(ranked, limit=max(settings.rag_keyword_top_k, 6), purpose=purpose)
 
 
 def retrieve_context_diagnostics(
@@ -331,34 +354,76 @@ def _rerank_contexts(
     return sorted(rescored, key=attrgetter("score"), reverse=True)
 
 
-def _prune_ranked_contexts(contexts: list[RetrievedContext], *, limit: int) -> list[RetrievedContext]:
+def _prune_ranked_contexts(contexts: list[RetrievedContext], *, limit: int, purpose: str = RAG_PURPOSE_DEFAULT) -> list[RetrievedContext]:
     if not contexts:
         return []
-    hard_limit = max(2, min(limit, 4))
-    bucket_caps = {
-        REASON_CALL: 3,
-        REASON_SYMBOL: 2,
-        REASON_INCLUDE: 1,
-        REASON_UPSTREAM: 1,
-        REASON_KEYWORD: 1,
-        REASON_VECTOR: 1,
-        "qdrant": 1,
-        REASON_MISSING: 4,
-    }
+    definition_only = purpose in {RAG_PURPOSE_CANDIDATE, RAG_PURPOSE_CONFIRMATION}
+    hard_limit = max(3, min(limit, 8 if definition_only else 6))
+    bucket_caps = (
+        {
+            REASON_CALL: 2,
+            REASON_SYMBOL: 3,
+            REASON_INCLUDE: 1,
+            REASON_MISSING: 3,
+        }
+        if definition_only
+        else {
+            REASON_CALL: 3,
+            REASON_SYMBOL: 2,
+            REASON_INCLUDE: 1,
+            REASON_UPSTREAM: 2,
+            REASON_KEYWORD: 2,
+            REASON_VECTOR: 1,
+            "qdrant": 2,
+            REASON_MISSING: 4,
+        }
+    )
     selected: list[RetrievedContext] = []
     bucket_counts: dict[str, int] = {}
+    symbol_counts: dict[tuple[str, str], int] = {}
+    line_windows: set[tuple[str, int, str]] = set()
 
-    strong_buckets = {REASON_MISSING, REASON_CALL, REASON_SYMBOL}
-    for context in contexts:
+    def can_add(context: RetrievedContext, *, allow_same_region: bool = False) -> bool:
         bucket = _reason_bucket(context.reason)
-        if bucket not in strong_buckets:
-            continue
+        if context in selected:
+            return False
+        if any(_overlaps_same_symbol(context, item) for item in selected):
+            return False
         if bucket_counts.get(bucket, 0) >= bucket_caps.get(bucket, 1):
-            continue
+            return False
+        symbol_key = (context.file_path, context.symbol_name or "")
+        if context.symbol_name and symbol_counts.get(symbol_key, 0) >= 1:
+            return False
+        line_window = (context.file_path, context.start_line // 20, bucket)
+        if not allow_same_region and line_window in line_windows:
+            return False
+        return True
+
+    def add(context: RetrievedContext) -> None:
+        bucket = _reason_bucket(context.reason)
         selected.append(context)
         bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        if context.symbol_name:
+            symbol_key = (context.file_path, context.symbol_name)
+            symbol_counts[symbol_key] = symbol_counts.get(symbol_key, 0) + 1
+        line_windows.add((context.file_path, context.start_line // 20, bucket))
+
+    strong_buckets = {REASON_MISSING, REASON_CALL, REASON_SYMBOL}
+    bucket_order = (
+        (REASON_MISSING, REASON_CALL, REASON_SYMBOL, REASON_INCLUDE)
+        if definition_only
+        else (REASON_MISSING, REASON_CALL, REASON_SYMBOL, REASON_UPSTREAM, REASON_KEYWORD, "qdrant", REASON_INCLUDE, REASON_VECTOR)
+    )
+    for bucket in bucket_order:
+        for context in contexts:
+            if _reason_bucket(context.reason) != bucket:
+                continue
+            if not can_add(context):
+                continue
+            add(context)
+            break
         if len(selected) >= hard_limit:
-            return selected
+            return sorted(selected, key=attrgetter("score"), reverse=True)
 
     strong_symbols = {context.symbol_name for context in selected if context.symbol_name}
     top_score = contexts[0].score
@@ -369,6 +434,8 @@ def _prune_ranked_contexts(contexts: list[RetrievedContext], *, limit: int) -> l
         bucket = _reason_bucket(context.reason)
         if bucket in strong_buckets:
             continue
+        if definition_only and bucket not in bucket_caps:
+            continue
         if bucket == REASON_INCLUDE and selected:
             continue
         if context.symbol_name and context.symbol_name in strong_symbols:
@@ -377,13 +444,24 @@ def _prune_ranked_contexts(contexts: list[RetrievedContext], *, limit: int) -> l
             continue
         if bucket in {REASON_KEYWORD, REASON_VECTOR} and context.score < weak_score_floor:
             continue
-        if bucket_counts.get(bucket, 0) >= bucket_caps.get(bucket, 1):
+        if not can_add(context):
             continue
-        selected.append(context)
-        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        add(context)
         if len(selected) >= hard_limit:
             break
-    return selected
+    for context in contexts:
+        if len(selected) >= hard_limit:
+            break
+        if not can_add(context, allow_same_region=True):
+            continue
+        add(context)
+    return sorted(selected, key=attrgetter("score"), reverse=True)
+
+
+def _overlaps_same_symbol(left: RetrievedContext, right: RetrievedContext) -> bool:
+    if left.file_path != right.file_path or not left.symbol_name or left.symbol_name != right.symbol_name:
+        return False
+    return left.start_line <= right.end_line and right.start_line <= left.end_line
 
 
 def _context_merge_key(context: RetrievedContext) -> tuple[int, float]:
@@ -418,6 +496,78 @@ def _context_to_diagnostic(context: RetrievedContext) -> dict:
         "reason": context.reason,
         "score": round(context.score, 4),
     }
+
+
+def _definition_profile_enabled(settings: Settings) -> bool:
+    return settings.rag_retrieval_profile.strip().lower() in {"definition", "definitions", "minimal"}
+
+
+def _definition_only_mode(settings: Settings, purpose: str) -> bool:
+    return purpose in {RAG_PURPOSE_CANDIDATE, RAG_PURPOSE_CONFIRMATION} or _definition_profile_enabled(settings)
+
+
+def _definition_symbol_allowed(kind: str) -> bool:
+    return kind in {
+        "function",
+        "declaration",
+        "macro",
+        "type",
+        "typedef",
+        "struct",
+        "enum",
+        "global_variable",
+        "callback_binding",
+        "function_pointer",
+    }
+
+
+def _definition_chunk_allowed(chunk: CodeChunk, target_paths: set[str]) -> bool:
+    useful_kinds = {
+        "macro",
+        "conditional",
+        "type",
+        "struct",
+        "typedef",
+        "enum",
+        "declaration",
+        "function_pointer",
+        "callback_binding",
+        "global_variable",
+    }
+    if chunk.chunk_kind in useful_kinds:
+        return True
+    if chunk.chunk_kind == "function":
+        return chunk.file.relative_path not in target_paths and _line_span(chunk) <= 40
+    if chunk.chunk_kind == "callsite":
+        return chunk.file.relative_path not in target_paths
+    return False
+
+
+def _filter_contexts_for_profile(
+    db: Session,
+    project: CodeProject,
+    contexts: list[RetrievedContext],
+    target_paths: set[str],
+    settings: Settings,
+    *,
+    purpose: str = RAG_PURPOSE_DEFAULT,
+) -> list[RetrievedContext]:
+    if not _definition_only_mode(settings, purpose):
+        return contexts
+    chunks_by_id = _chunks_by_id(db, project)
+    filtered: list[RetrievedContext] = []
+    for context in contexts:
+        chunk = chunks_by_id.get(context.chunk_id or "")
+        if chunk is None:
+            filtered.append(context)
+            continue
+        if _definition_chunk_allowed(chunk, target_paths):
+            filtered.append(context)
+    return filtered
+
+
+def _line_span(chunk: CodeChunk) -> int:
+    return max(0, chunk.end_line - chunk.start_line + 1)
 
 
 def _direct_call_contexts(
@@ -755,7 +905,7 @@ def _function_symbol_ids_for_file(db: Session, project: CodeProject, relative_pa
         for symbol in db.scalars(
             select(CodeSymbol).where(CodeSymbol.project_id == project.id, CodeSymbol.file_id == file_id)
         ).all()
-        if symbol.kind == "function"
+        if symbol.kind in {"function", "declaration"}
     }
 
 
@@ -774,14 +924,31 @@ def _context_from_chunk(chunk: CodeChunk, reason: str, score: float) -> Retrieve
 
 
 def _referenced_symbols(source_text: str) -> set[str]:
-    identifiers = _identifiers(source_text)
     calls = {
         match.group(1)
         for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", source_text)
         if match.group(1) not in _COMMON_IDENTIFIERS
     }
-    macros = {name for name in identifiers if name.isupper() and len(name) > 2}
-    return identifiers | calls | macros
+    macros = {name for name in _identifiers(source_text) if name.isupper() and len(name) > 2}
+    typed_names = {
+        match.group(1)
+        for match in re.finditer(r"\b(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)", source_text)
+    }
+    casts = {
+        match.group(1)
+        for match in re.finditer(r"\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\*+\s*)?\)", source_text)
+        if not _is_low_value_rag_identifier(match.group(1))
+    }
+    field_names = {
+        match.group(1)
+        for match in re.finditer(r"(?:->|\.)\s*([A-Za-z_][A-Za-z0-9_]*)", source_text)
+    }
+    referenced = (calls | macros | typed_names | casts) - field_names
+    return {
+        name
+        for name in referenced
+        if len(name) > 2 and not _is_low_value_rag_identifier(name)
+    }
 
 
 def _locally_defined_symbols(source_text: str) -> set[str]:
@@ -792,9 +959,48 @@ def _locally_defined_symbols(source_text: str) -> set[str]:
         r"\btypedef\b.*?\b([A-Za-z_][A-Za-z0-9_]*)\s*;",
         r"\b(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)",
         r"^\s*(?:extern\s+)?(?:static\s+)?(?:const\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;)",
+        r"^\s*(?:const\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;|,)",
     ):
         defined.update(match.group(1) for match in re.finditer(pattern, source_text, flags=re.MULTILINE | re.DOTALL))
+    defined.update(_function_parameter_symbols(source_text))
+    defined.update(_struct_field_symbols(source_text))
+    defined.update(_enum_member_symbols(source_text))
     return defined
+
+
+def _function_parameter_symbols(source_text: str) -> set[str]:
+    params: set[str] = set()
+    for match in re.finditer(
+        r"\b[A-Za-z_][A-Za-z0-9_\s\*]*\s+[A-Za-z_][A-Za-z0-9_]*\s*\(([^;{}]*)\)\s*\{",
+        source_text,
+        flags=re.MULTILINE,
+    ):
+        for raw_param in match.group(1).split(","):
+            param = raw_param.strip()
+            if not param or param == "void":
+                continue
+            name_match = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?$", param)
+            if name_match:
+                params.add(name_match.group(1))
+    return params
+
+
+def _struct_field_symbols(source_text: str) -> set[str]:
+    fields: set[str] = set()
+    for body in re.findall(r"\bstruct\b[^{;]*\{(.*?)\}", source_text, flags=re.DOTALL):
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*;", body):
+            fields.add(match.group(1))
+    return fields
+
+
+def _enum_member_symbols(source_text: str) -> set[str]:
+    members: set[str] = set()
+    for body in re.findall(r"\benum\b[^{;]*\{(.*?)\}", source_text, flags=re.DOTALL):
+        for part in body.split(","):
+            match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", part.strip())
+            if match:
+                members.add(match.group(1))
+    return members
 
 
 def _missing_symbol_score(kind: str, name: str, file_path: str, target_paths: set[str]) -> float:

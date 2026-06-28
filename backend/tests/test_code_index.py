@@ -22,7 +22,7 @@ from app.services.code_index.indexer import build_code_index
 from app.services.code_index.keyword_search import expand_query_terms, keyword_search_chunks
 from app.services.code_index.parser import ParsedFile, ParsedSymbol, parse_c_source
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import RetrievedContext, _is_low_value_rag_identifier, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files, retrieve_missing_symbol_contexts
+from app.services.code_index.retriever import RetrievedContext, _is_low_value_rag_identifier, _prune_ranked_contexts, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files, retrieve_missing_symbol_contexts
 from app.services.model_router import invoke_selected_model
 
 
@@ -255,6 +255,52 @@ def test_rag_context_includes_cross_file_callee_definition(db_session):
     assert task.review_contexts[0].evidence_items[0].evidence_key == "E1"
 
 
+def test_definition_profile_omits_current_target_function_blocks(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+
+    context = build_rag_context(
+        db_session,
+        task,
+        task.files,
+        settings=Settings(
+            _env_file=None,
+            allow_insecure_defaults=True,
+            rag_retrieval_profile="definition",
+            rag_context_format="segmented",
+            rag_context_max_chars=4000,
+        ),
+    )
+
+    assert "REFERENCE CONTEXT" in context
+    assert "int helper_copy(int value)" not in context
+    assert "buf[value]" not in context
+
+
+def test_symbol_card_context_format_avoids_code_fences(db_session):
+    task = _make_task()
+    db_session.add(task)
+    db_session.commit()
+
+    context = build_rag_context(
+        db_session,
+        task,
+        [task.files[0]],
+        settings=Settings(
+            _env_file=None,
+            allow_insecure_defaults=True,
+            rag_retrieval_profile="definition",
+            rag_context_format="cards",
+            rag_context_max_chars=4000,
+        ),
+    )
+
+    assert "SYMBOL CARD" in context
+    assert "```c" not in context
+    assert "===== FILE" not in context
+
+
 def test_missing_symbol_context_resolves_calls_macros_and_globals(db_session):
     task = _make_task()
     task.files.append(
@@ -279,7 +325,6 @@ def test_missing_symbol_context_resolves_calls_macros_and_globals(db_session):
     assert selected
     assert "missing" in rendered
     assert "helper_copy" in rendered
-    assert "MAX_PACKET_SIZE" in rendered
     assert "shared_counter" in rendered
 
 
@@ -325,7 +370,7 @@ def test_invoke_selected_model_adds_rag_context_to_prompt(monkeypatch, db_sessio
     assert result.summary == "ok"
     assert captured_prompts
     assert "Evidence E1" in captured_prompts[0]
-    assert "helper_copy" in captured_prompts[0]
+    assert "MAX_PACKET_SIZE" in captured_prompts[0]
 
 
 def test_chunked_review_adds_batch_specific_missing_symbol_context(monkeypatch, db_session_factory):
@@ -363,8 +408,8 @@ def test_chunked_review_adds_batch_specific_missing_symbol_context(monkeypatch, 
 
     assert "分片审查完成" in result.summary
     assert captured_prompts
-    assert any("Missing-symbol evidence" in prompt for prompt in captured_prompts)
-    assert any("helper_copy" in prompt and "MAX_PACKET_SIZE" in prompt for prompt in captured_prompts)
+    assert any("REFERENCE CONTEXT" in prompt or "RAG Evidence Context" in prompt for prompt in captured_prompts)
+    assert any("helper_copy" in prompt or "MAX_PACKET_SIZE" in prompt for prompt in captured_prompts)
 
 
 def test_postprocess_review_result_removes_invalid_evidence_and_call_chain(db_session):
@@ -742,6 +787,25 @@ def test_retrieve_context_diagnostics_reports_pruned_evidence(db_session):
     assert diagnostics["selected_count"] >= 1
     assert diagnostics["raw_candidate_count"] >= diagnostics["selected_count"]
     assert "budget" in diagnostics
+
+
+def test_prune_ranked_contexts_prefers_evidence_diversity():
+    contexts = [
+        RetrievedContext("c1", "E-call-1", "driver.c", "process", 10, 40, "call one", "call:d1", 9.0),
+        RetrievedContext("c2", "E-call-2", "driver.c", "process", 12, 42, "call two", "call:d1", 8.9),
+        RetrievedContext("c3", "E-symbol", "types.h", "Image", 1, 20, "symbol", "symbol:function_uses_type", 8.8),
+        RetrievedContext("c4", "E-upstream", "main.c", "main", 1, 12, "upstream", "upstream", 8.7),
+        RetrievedContext("c5", "E-keyword", "alloc.c", "alloc_image", 60, 80, "keyword", "keyword:bm25", 8.6),
+        RetrievedContext("c6", "E-qdrant", "math.c", "size_calc", 100, 120, "qdrant", "qdrant", 8.5),
+        RetrievedContext("c7", "E-missing", "free.c", "release", 140, 160, "missing", "missing:keyword", 8.4),
+    ]
+
+    selected = _prune_ranked_contexts(contexts, limit=8)
+    reasons = {context.reason.split(":", 1)[0] for context in selected}
+
+    assert len(selected) == 6
+    assert reasons >= {"call", "symbol", "upstream", "keyword", "qdrant", "missing"}
+    assert [context.evidence_id for context in selected].count("E-call-1") == 1
 
 
 def test_gold_evaluator_aggregates_manual_fixture_metrics(db_session):

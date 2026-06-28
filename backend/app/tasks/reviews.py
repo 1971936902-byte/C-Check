@@ -5,12 +5,14 @@ import re
 from datetime import datetime, timezone
 from time import monotonic
 
+from sqlalchemy import select
+
 from app.core.config import get_settings
-from app.db.models import CodeEdge, CodeSymbol, Report, ReviewEvidence, ReviewTask, TaskStatus
+from app.db.models import Report, ReviewTask, TaskStatus
 from app.db.session import SessionLocal
-from app.schemas.model_response import CodeLine, CodeLineKind, FindingCategory, FindingSeverity, ModelReviewResponse, ReviewFinding
+from app.schemas.model_response import FindingCategory, FindingSeverity, ModelReviewResponse, ReviewFinding
 from app.services.model_router import ModelInvocationError, invoke_selected_model, truncate_model_log
-from app.services.reports import build_report
+from app.services.reports import populate_report
 from app.worker import celery_app
 
 
@@ -57,18 +59,6 @@ def _source_file_for_finding(task: ReviewTask, file_path: str):
     if len(basename_matches) == 1:
         return basename_matches[0]
     return None
-
-
-def _source_context_lines(source_text: str, line_number: int, *, radius: int = 1) -> list[CodeLine]:
-    lines = source_text.splitlines()
-    if line_number < 1 or line_number > len(lines):
-        return []
-    start = max(1, line_number - radius)
-    end = min(len(lines), line_number + radius)
-    return [
-        CodeLine(line=line, content=lines[line - 1], kind=CodeLineKind.CONTEXT)
-        for line in range(start, end + 1)
-    ]
 
 
 DATA_ONLY_LINE_PATTERN = re.compile(r"^[\s{},().+\-*/&|^~!?:<>=0-9xXa-fA-FuUlL'\"]+$")
@@ -128,16 +118,6 @@ def _nearest_actionable_line(task: ReviewTask, finding: ReviewFinding, *, radius
     if DATA_ONLY_LINE_PATTERN.match(original_line.strip()):
         return None
 
-    snippet_contents = {
-        item.content.strip()
-        for item in finding.code_snippet
-        if item.content and _line_has_actionable_c_anchor(item.content)
-    }
-    if snippet_contents:
-        for index, line in enumerate(lines, start=1):
-            if line.strip() in snippet_contents:
-                return index
-
     start = max(1, finding.line - radius)
     end = min(len(lines), finding.line + radius)
     for distance in range(1, radius + 1):
@@ -181,85 +161,12 @@ def _filter_unanchored_findings(task: ReviewTask, result: ModelReviewResponse) -
     return result.model_copy(update={"summary": summary, "findings": kept})
 
 
-def _enrich_missing_code_snippets(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
-    enriched_findings = []
-    changed = False
-    for finding in result.findings:
-        if finding.code_snippet or finding.line is None:
-            enriched_findings.append(finding)
-            continue
-        source = _source_file_for_finding(task, finding.file_path)
-        if source is None:
-            enriched_findings.append(finding)
-            continue
-        context_lines = _source_context_lines(source.source_text, finding.line)
-        if not context_lines:
-            enriched_findings.append(finding)
-            continue
-        enriched_findings.append(finding.model_copy(update={"code_snippet": context_lines}))
-        changed = True
-    if not changed:
-        return result
-    return result.model_copy(update={"findings": enriched_findings})
-
-
-def _valid_evidence_keys(task: ReviewTask) -> set[str]:
-    return {evidence.evidence_key for context in task.review_contexts for evidence in context.evidence_items}
-
-
-def _call_chain_exists(task: ReviewTask, call_chain: list[str]) -> bool:
-    if len(call_chain) < 2 or task.code_project is None:
-        return True
-    symbols_by_name: dict[str, list[CodeSymbol]] = {}
-    for symbol in task.code_project.symbols:
-        symbols_by_name.setdefault(symbol.name, []).append(symbol)
-    for caller, callee in zip(call_chain, call_chain[1:]):
-        caller_ids = {symbol.id for symbol in symbols_by_name.get(caller, [])}
-        callee_ids = {symbol.id for symbol in symbols_by_name.get(callee, [])}
-        if not caller_ids or not callee_ids:
-            return False
-        if not any(
-            edge.edge_type == "FUNCTION_CALLS_FUNCTION"
-            and edge.source_id in caller_ids
-            and edge.target_id in callee_ids
-            for edge in task.code_project.edges
-        ):
-            return False
-    return True
-
-
-def _validate_finding_evidence(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
-    valid_keys = _valid_evidence_keys(task)
-    if not valid_keys and task.code_project is None:
-        return result
-    changed = False
-    findings = []
-    for finding in result.findings:
-        updates = {}
-        if finding.evidence_ids:
-            evidence_ids = [evidence_id for evidence_id in finding.evidence_ids if evidence_id in valid_keys]
-            if evidence_ids != finding.evidence_ids:
-                updates["evidence_ids"] = evidence_ids
-                changed = True
-        if finding.call_chain and not _call_chain_exists(task, finding.call_chain):
-            updates["call_chain"] = []
-            changed = True
-        findings.append(finding.model_copy(update=updates) if updates else finding)
-    return result.model_copy(update={"findings": findings}) if changed else result
-
-
 NULL_POINTER_TEXT_PATTERN = re.compile(r"(空指针|null\s*pointer|null|nil)", re.IGNORECASE)
 PERIPHERAL_REGISTER_ACCESS_PATTERN = re.compile(
     r"\b(?:CAN|DAC|DMA\d?|CRC|DBGMCU|RCC|GPIO[A-Z]?|USART\d?|UART\d?|SPI\d?|I2C\d?|TIM\d?|ADC\d?)\s*->"
 )
-
-
 def _finding_text(finding: ReviewFinding) -> str:
-    return " ".join(
-        part
-        for part in [finding.title, finding.description, finding.remediation]
-        if part
-    )
+    return " ".join(part for part in [finding.title, finding.description] if part)
 
 
 def _finding_source_line(task: ReviewTask, finding: ReviewFinding) -> str:
@@ -280,8 +187,7 @@ def _is_null_pointer_finding(finding: ReviewFinding) -> bool:
 
 def _is_peripheral_register_null_pointer_false_positive(task: ReviewTask, finding: ReviewFinding) -> bool:
     source_line = _finding_source_line(task, finding)
-    snippet_text = "\n".join(item.content for item in finding.code_snippet)
-    combined = "\n".join([source_line, snippet_text, _finding_text(finding)])
+    combined = "\n".join([source_line, _finding_text(finding)])
     return bool(PERIPHERAL_REGISTER_ACCESS_PATTERN.search(combined)) and _is_null_pointer_finding(finding)
 
 
@@ -300,16 +206,15 @@ def _downgrade_null_pointer_findings(task: ReviewTask, result: ModelReviewRespon
             FindingCategory.MEMORY_SAFETY,
             FindingCategory.INPUT_VALIDATION,
         }:
-            remediation = finding.remediation
+            description = finding.description
             if _is_peripheral_register_null_pointer_false_positive(task, finding):
-                remediation = "嵌入式外设寄存器通常是固定映射地址，空指针风险需结合平台头文件确认；默认降为建议项。"
+                description = "嵌入式外设寄存器通常是固定映射地址，空指针风险需结合平台头文件确认。"
             findings.append(
                 finding.model_copy(
                     update={
                         "severity": FindingSeverity.SUGGESTION,
                         "category": FindingCategory.MAINTAINABILITY,
-                        "confidence": min(finding.confidence or 0.5, 0.45),
-                        "remediation": remediation,
+                        "description": description,
                     }
                 )
             )
@@ -319,44 +224,10 @@ def _downgrade_null_pointer_findings(task: ReviewTask, result: ModelReviewRespon
     return result.model_copy(update={"findings": findings}) if changed else result
 
 
-def _link_findings_to_evidence(task: ReviewTask, result: ModelReviewResponse) -> None:
-    if task.code_project is None:
-        return
-    evidence_by_key = {
-        evidence.evidence_key: evidence
-        for context in task.review_contexts
-        for evidence in context.evidence_items
-    }
-    for index, finding in enumerate(result.findings, start=1):
-        for evidence_key in finding.evidence_ids:
-            evidence = evidence_by_key.get(evidence_key)
-            if evidence is None:
-                continue
-            task.code_project.edges.append(
-                CodeEdge(
-                    project=task.code_project,
-                    source_id=f"finding:{index}",
-                    target_id=evidence.id,
-                    edge_type="FINDING_EVIDENCED_BY",
-                    line=finding.line,
-                    confidence=finding.confidence if finding.confidence is not None else 0.7,
-                    source_tool="model-output-validator",
-                    metadata_json={
-                        "finding_index": index,
-                        "evidence_key": evidence_key,
-                        "title": finding.title,
-                    },
-                )
-            )
-
-
 def _postprocess_review_result(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
-    return _validate_finding_evidence(
+    return _downgrade_null_pointer_findings(
         task,
-        _downgrade_null_pointer_findings(
-            task,
-            _enrich_missing_code_snippets(task, _filter_unanchored_findings(task, _normalize_finding_anchors(task, result))),
-        ),
+        _filter_unanchored_findings(task, _normalize_finding_anchors(task, result)),
     )
 
 
@@ -366,7 +237,7 @@ def _retry_instruction(attempt: int, exc: Exception) -> str:
             "The previous model output backend JSON schema audit failed.",
             "Return exactly one smaller complete JSON object only. Do not include Markdown, comments, prose, or extra keys.",
             "The object must contain exactly: summary, score, findings. Every finding must match the required enum values and field types.",
-            "Return up to 5 high-value findings. Keep descriptions, remediation, and snippets short. Escape all quotes/newlines as valid JSON strings.",
+            "Keep descriptions short. Escape all quotes/newlines as valid JSON strings.",
             "Internally scan integer, bounds, lifetime, leak, and exhaustion categories before selecting findings.",
             f"Audit failure from attempt {attempt}:",
         ]
@@ -450,9 +321,10 @@ def run_review_task(task_id: str) -> None:
                 if task is None:
                     return
                 result = _postprocess_review_result(task, result)
-                report = build_report(task, result)
-                _link_findings_to_evidence(task, result)
+                existing_report = db.scalar(select(Report).where(Report.task_id == task.id))
+                report = populate_report(existing_report or Report(task=task), task, result)
                 db.add(report)
+                db.flush()
                 task.status = TaskStatus.COMPLETED
                 task.progress = 100
                 task.finding_count = len(result.findings)

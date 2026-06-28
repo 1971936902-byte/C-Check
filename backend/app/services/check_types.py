@@ -14,6 +14,7 @@ CHECK_TYPE_LABELS = {
     "portability": "跨平台可移植性",
     "performance": "性能隐患",
     "maintainability": "代码规范与可维护性",
+    "other": "Other",
 }
 ALL_CHECK_TYPES = list(CHECK_TYPE_LABELS)
 DEFAULT_FAST_CHECK_TYPES = {
@@ -25,6 +26,7 @@ DEFAULT_FAST_CHECK_TYPES = {
     "logic",
     "input_validation",
     "integer_safety",
+    "other",
 }
 
 
@@ -50,6 +52,7 @@ def check_types_prompt(check_types: list[str]) -> str:
             "input_validation",
             "concurrency",
             "logic",
+            "other",
         ]
     labels = [CHECK_TYPE_LABELS[item] for item in selected]
     return "默认快速审查仅关注以下高价值 C 缺陷类型：\n" + "\n".join(f"- {label}" for label in labels)

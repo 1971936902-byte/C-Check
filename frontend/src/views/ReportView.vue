@@ -176,6 +176,7 @@ function locationText(finding: Finding) {
                     </template>
 
                     <div class="finding-body">
+                      <p class="finding-description">{{ finding.description }}</p>
                       <div v-if="finding.code_snippet?.length || finding.fixed_snippet?.length" class="diff-grid">
                         <section v-if="finding.code_snippet?.length" class="code-panel">
                           <header>
@@ -211,7 +212,14 @@ function locationText(finding: Finding) {
                       </div>
                       <p v-else class="finding-empty-code">模型未返回代码片段，请根据文件位置定位。</p>
 
-                      <small>分类：{{ finding.category }}</small>
+                      <div class="finding-meta">
+                        <small>分类：{{ finding.category }}</small>
+                        <small v-if="finding.raw_category && finding.raw_category !== finding.category">原始分类：{{ finding.raw_category }}</small>
+                        <small v-if="finding.confidence != null">置信度：{{ Math.round(finding.confidence * 100) }}%</small>
+                        <small v-if="finding.difficulty">难度：{{ finding.difficulty }}</small>
+                        <small v-if="finding.needs_rag">建议二次 RAG</small>
+                        <small v-if="finding.evidence_ids?.length">Evidence：{{ finding.evidence_ids.join(', ') }}</small>
+                      </div>
                     </div>
                   </el-collapse-item>
                 </el-collapse>
@@ -331,6 +339,19 @@ function locationText(finding: Finding) {
 
 .finding-empty-code {
   margin: 4px 0 10px;
+}
+
+.finding-description {
+  margin: 0 0 12px;
+  color: #3b5368;
+  line-height: 1.7;
+}
+
+.finding-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 10px;
 }
 
 .finding-title {

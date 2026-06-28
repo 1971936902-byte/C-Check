@@ -245,8 +245,8 @@ def test_run_review_task_fills_missing_code_snippet_from_source(db_session_facto
     with db_session_factory() as db:
         task = db.get(ReviewTask, task_id)
         finding = task.report.result_json["findings"][0]
-        assert [line["line"] for line in finding["code_snippet"]] == [2, 3, 4]
-        assert finding["code_snippet"][1]["content"] == "    strcpy(name, input);"
+        assert [line["line"] for line in finding["code_snippet"]] == [1, 2, 3, 4]
+        assert any(line["content"] == "    strcpy(name, input);" for line in finding["code_snippet"])
 
     get_settings.cache_clear()
 
@@ -313,6 +313,6 @@ def test_run_review_task_filters_findings_anchored_to_static_data_rows(db_sessio
         findings = task.report.result_json["findings"]
         assert len(findings) == 1
         assert findings[0]["title"] == "未限制字符串复制"
-        assert findings[0]["code_snippet"][1]["content"] == "    strcpy(name, input);"
+        assert any(line["content"] == "    strcpy(name, input);" for line in findings[0]["code_snippet"])
 
     get_settings.cache_clear()

@@ -9,13 +9,19 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.models import CodeChunk, ModelNode, ReviewFile, ReviewTask, TaskStatus
-from app.schemas.model_response import CompactModelReviewResponse, ModelReviewResponse
+from app.schemas.model_response import (
+    COMPACT_MAX_FINDINGS,
+    CandidateConfirmationResponse,
+    CompactModelReviewResponse,
+    ModelReviewResponse,
+    ReviewFinding,
+)
 from app.services.check_types import check_types_prompt
 from app.services.model_output_sanitizer import ModelOutputSanitizer
 
@@ -42,35 +48,89 @@ VLLM_TOKEN_BUDGET_PATTERN = re.compile(
     r"\((?P<input>\d+) in the messages, (?P<completion>\d+) in the completion\)",
     re.IGNORECASE,
 )
-RESPONSE_CONTRACT = """
+CANDIDATE_RESPONSE_CONTRACT = """
 Return exactly one compact JSON object. No Markdown.
 Top-level keys: summary, score, findings.
 Use Chinese. Keep summary under 50 Chinese chars.
-Return up to 4 high-value findings for this request, ordered by severity and confidence.
-Each finding uses exactly: severity, category, title, file_path, line, confidence.
-Do not output description, remediation, code_snippet, fixed_snippet, evidence_ids, or call_chain; the backend fills source snippets by file_path and line.
+This is first-stage candidate discovery, not final vulnerability confirmation.
+Goal: return as many real visible candidate findings as possible from PRIMARY SOURCE.
+Return candidate findings in one flat findings list.
+Do not stop after the first obvious issue.
+Do not perform final high-value filtering in this stage.
+Each finding uses exactly: severity, category, title, description, file_path, line.
 Keep title under 24 Chinese chars. Make it direct and specific.
+Keep description under 140 Chinese chars and explain the concrete trigger or visible consequence.
 The line value must point to the exact visible statement or declaration causing the issue.
 Do not use pure data initializer rows, lookup tables, font/bitmap tables, or comments as finding locations.
 Use lowercase enum values exactly. Use null for line only when no precise line exists.
-Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic.
+Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
 Ignore style, maintainability, performance, compatibility, and portability in default mode.
-Before producing findings, internally scan these categories in order:
-1. buffer_overflow: copy bounds, fixed-array or heap out-of-bounds read/write, malloc(n) followed by access at [n];
-2. memory_safety: double free, use-after-free, dangling pointer, free followed by read/write;
-3. resource_leak: missing free/close/unlock or pointer overwritten before release on visible paths;
-4. integer_safety: overflow, underflow, truncation, divide-by-zero, unsafe size calculations;
-5. input_validation: externally controlled size/index/path used without bounds validation;
-6. concurrency: visible race/deadlock/lock-unlock imbalance;
-7. pointer_safety: proven invalid dereference only. Do not report NULL just because a parameter is a pointer;
-8. logic: concrete wrong condition/state update with visible consequence.
+Before producing findings, internally cover these categories:
+1. integer_overflow / integer_underflow / truncation / divide_by_zero / unsafe size calculation -> integer_safety;
+2. memcpy/memmove/strcpy bounds issue / fixed-array OOB / heap OOB read-write / malloc(n) then access at [n] -> buffer_overflow;
+3. double_free / use_after_free / dangling pointer / free then access -> memory_safety;
+4. visible unreleased path / overwritten pointer before release / recursive stack exhaustion / unbounded allocation loop -> resource_leak;
+5. proven invalid dereference -> pointer_safety;
+6. external size/index/path without validation -> input_validation;
+7. visible race/deadlock/lock imbalance -> concurrency;
+8. concrete wrong condition/state update with visible consequence -> logic;
+9. a real defect candidate that does not cleanly fit above categories -> other.
 Embedded peripheral registers such as CAN->, DAC->, DMA->, CRC->, RCC-> are fixed mapped hardware registers; do not report them as null pointer issues.
 Do not report vendor assert(IS_xxx(...)) checks as missing validation unless the code still dereferences before that check.
+Scan all visible code for arithmetic/size calculations, copy operations, array indexing, malloc/free lifetime, overwritten pointers, missing release, recursion, and allocation loops before finishing the findings list.
 If different defect categories appear in the same function, report them separately.
-Do not stop after the first obvious memcpy, malloc, or free issue.
-Do not merge double free with use-after-free, or out-of-bounds read with out-of-bounds write.
-Dedupe exact duplicates, but preserve different consequences from the same root cause.
+Do not merge double free with use-after-free.
+Do not merge out-of-bounds read with out-of-bounds write.
+Do not merge stack OOB with heap OOB.
+Do not merge one unsafe copy issue with another unsafe copy issue.
+For resource_leak, report it only when PRIMARY SOURCE shows a visible unreleased path, pointer overwrite before release, recursion without a visible bound, or allocation until failure.
+Do not use a normal free/close/unlock statement itself as the leak location.
+For pointer-overwrite leaks, point to the overwrite statement, not to a nearby comment.
+For recursion or allocation-loop exhaustion, use titles like 栈耗尽 or 堆耗尽 and describe exhaustion directly instead of generic leak wording.
+If the visible trigger is a recursive call or allocation loop, do not rewrite it as a copy/buffer-overflow issue unless that same local statement is itself a visible copy or array-access trigger.
+Do not use generic text like "某些条件下可能未正确释放" unless the unreleased path is visible and the specific resource is named.
+PRIMARY SOURCE is the proof standard.
+Definition Context only helps understand unknown symbols. It is not the proof standard and not the line-matching standard.
 """
+
+
+FINAL_RESPONSE_CONTRACT = """
+Return exactly one compact JSON object. No Markdown.
+Top-level keys: summary, score, findings.
+Use Chinese. Keep summary under 50 Chinese chars.
+This is final confirmation mode. Return only supported final findings.
+Each finding uses exactly: severity, category, title, description, file_path, line, evidence_ids, confidence, difficulty, needs_rag, trigger_kind, unknown_symbols.
+Keep title under 24 Chinese chars.
+Keep description under 140 Chinese chars and state the exact unsafe trigger or visible consequence.
+The line value must point to the best executable statement or declaration in PRIMARY SOURCE.
+Use evidence_ids only for definition cards that truly clarified the issue; include at most 3 evidence ids.
+Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
+If category is uncertain but the defect is real, use other instead of forcing logic.
+"""
+
+
+CONFIRMATION_RESPONSE_CONTRACT = """
+Return exactly one compact JSON object. No Markdown.
+Top-level keys: summary, score, decisions.
+Use Chinese. Keep summary under 50 Chinese chars.
+This is candidate confirmation mode, not a fresh full-file review.
+Review each listed candidate independently and return one decision item per candidate you evaluated.
+Do not output a findings key in this mode. The only result list key is decisions.
+Each decision uses exactly: candidate_index, action, category, raw_category, title, description, line, trigger_kind, evidence_ids, unknown_symbols, reason.
+action must be one of confirm, reject, correct.
+Use confirm when the candidate is supported as-is or only needs tiny wording cleanup.
+Use reject when the shown local code does not support the candidate.
+Use correct when the candidate is real but line/category/title/description/trigger_kind should be adjusted.
+Do not invent new findings outside the listed candidates.
+Do not merge one candidate into another candidate.
+RAG Definition Context is only for understanding unknown symbols, not as independent proof.
+If correcting, keep the same defect semantics and point to the best executable statement in PRIMARY SOURCE.
+Allowed stable categories: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
+"""
+
+# Backward-compatible alias kept for tests and legacy callers that inspect the
+# first-stage contract text directly.
+RESPONSE_CONTRACT = CANDIDATE_RESPONSE_CONTRACT
 
 
 class ModelInvocationError(RuntimeError):
@@ -112,9 +172,13 @@ def _mock_response(files: Sequence[ReviewFile]) -> ModelReviewResponse:
 
 
 def _source_message(files: Sequence[ReviewFile]) -> str:
-    sections = []
+    sections = [
+        "PRIMARY SOURCE (审查对象):",
+        "Only report findings whose file_path and line are located in this primary source.",
+        "Each source line may start with a 6-digit prefix like 000123:. Treat that prefix as location metadata, not as part of the C code.",
+    ]
     for source in files:
-        sections.append(f"===== FILE: {source.relative_path} =====\n{source.source_text}")
+        sections.append(f"===== FILE: {source.relative_path} =====\n{_render_source_with_absolute_lines(source.source_text)}")
     return "\n\n".join(sections)
 
 
@@ -127,8 +191,8 @@ def _input_token_budget(settings: Settings) -> int:
     return max(0, min(settings.model_max_input_tokens, context_budget))
 
 
-def _response_format_overhead(settings: Settings) -> str:
-    response_format = _response_format(settings)
+def _response_format_overhead(settings: Settings, *, response_schema: type[BaseModel] = CompactModelReviewResponse) -> str:
+    response_format = _response_format(settings, response_schema=response_schema)
     if response_format is None:
         return ""
     return json.dumps(response_format, ensure_ascii=False, separators=(",", ":"))
@@ -136,9 +200,10 @@ def _response_format_overhead(settings: Settings) -> str:
 
 def _strict_prompt(
     prompt: str,
+    response_contract: str,
     retry_instruction: str | None = None,
 ) -> str:
-    strict_prompt = f"{prompt}\n\n{RESPONSE_CONTRACT}"
+    strict_prompt = f"{prompt}\n\n{response_contract}"
     if retry_instruction:
         strict_prompt = (
             f"{strict_prompt}\n\nPrevious response was rejected by the backend validator:\n"
@@ -152,13 +217,15 @@ def _input_budget_details(
     prompt: str,
     files: Sequence[ReviewFile],
     settings: Settings,
+    response_contract: str,
+    response_schema: type[BaseModel] = CompactModelReviewResponse,
     retry_instruction: str | None = None,
 ) -> tuple[int, int]:
     input_text = "\n\n".join(
         part
         for part in (
-            _strict_prompt(prompt, retry_instruction),
-            _response_format_overhead(settings),
+            _strict_prompt(prompt, response_contract, retry_instruction),
+            _response_format_overhead(settings, response_schema=response_schema),
             _source_message(files),
         )
         if part
@@ -170,10 +237,14 @@ def _source_char_budget(
     *,
     prompt: str,
     settings: Settings,
+    response_contract: str,
+    response_schema: type[BaseModel] = CompactModelReviewResponse,
     retry_instruction: str | None = None,
 ) -> int:
     max_input_chars = int(_input_token_budget(settings) * settings.model_token_chars_per_token)
-    overhead = len(_strict_prompt(prompt, retry_instruction)) + len(_response_format_overhead(settings))
+    overhead = len(_strict_prompt(prompt, response_contract, retry_instruction)) + len(
+        _response_format_overhead(settings, response_schema=response_schema)
+    )
     return max(1, max_input_chars - overhead - CHUNK_PROMPT_CHAR_MARGIN)
 
 
@@ -183,6 +254,24 @@ def _numbered_chunk_source(source_text: str, start_line: int, end_line: int) -> 
     return "\n".join(
         f"{line_number:0{CHUNK_LINE_PREFIX_WIDTH}d}: {line}"
         for line_number, line in enumerate(selected, start=start_line)
+    )
+
+
+_NUMBERED_SOURCE_LINE_RE = re.compile(rf"^\d{{{CHUNK_LINE_PREFIX_WIDTH}}}:\s")
+
+
+def _render_source_with_absolute_lines(source_text: str) -> str:
+    lines = source_text.splitlines()
+    for line in lines:
+        if line.strip():
+            if _NUMBERED_SOURCE_LINE_RE.match(line):
+                return source_text
+            break
+    if not lines:
+        return source_text
+    return "\n".join(
+        f"{line_number:0{CHUNK_LINE_PREFIX_WIDTH}d}: {line}"
+        for line_number, line in enumerate(lines, start=1)
     )
 
 
@@ -270,6 +359,7 @@ def _effective_chunk_max_chars(
     settings: Settings,
     *,
     prompt: str | None = None,
+    response_contract: str = FINAL_RESPONSE_CONTRACT,
     retry_instruction: str | None = None,
 ) -> int:
     conservative_budget = int(settings.model_chunk_max_chars * CHUNK_CONTEXT_CHAR_RATIO)
@@ -280,6 +370,7 @@ def _effective_chunk_max_chars(
         max_chars = min(max_chars, _source_char_budget(
             prompt=prompt,
             settings=settings,
+            response_contract=response_contract,
             retry_instruction=retry_instruction,
         ))
     return max(1, max_chars)
@@ -290,6 +381,7 @@ def _chunk_review_batches(
     settings: Settings,
     *,
     prompt: str | None = None,
+    response_contract: str = FINAL_RESPONSE_CONTRACT,
     retry_instruction: str | None = None,
     isolate_chunks: bool = False,
 ) -> list[list[ChunkedReviewFile]]:
@@ -299,6 +391,7 @@ def _chunk_review_batches(
     max_chars = _effective_chunk_max_chars(
         settings,
         prompt=prompt,
+        response_contract=response_contract,
         retry_instruction=retry_instruction,
     )
 
@@ -405,8 +498,14 @@ def _is_retryable_node_failure(exc: ModelInvocationError) -> bool:
     return str(exc) == "selected model node is unavailable"
 
 
-def _should_chunk(files: Sequence[ReviewFile], settings: Settings) -> bool:
-    return len(_source_message(files)) > _effective_chunk_max_chars(settings)
+def _should_chunk(
+    files: Sequence[ReviewFile],
+    settings: Settings,
+    *,
+    prompt: str | None = None,
+    response_contract: str = FINAL_RESPONSE_CONTRACT,
+) -> bool:
+    return len(_source_message(files)) > _effective_chunk_max_chars(settings, prompt=prompt, response_contract=response_contract)
 
 
 def _ensure_input_budget(
@@ -414,12 +513,16 @@ def _ensure_input_budget(
     prompt: str,
     files: Sequence[ReviewFile],
     settings: Settings,
+    response_contract: str,
+    response_schema: type[BaseModel] = CompactModelReviewResponse,
     retry_instruction: str | None = None,
 ) -> None:
     estimated_tokens, budget_tokens = _input_budget_details(
         prompt=prompt,
         files=files,
         settings=settings,
+        response_contract=response_contract,
+        response_schema=response_schema,
         retry_instruction=retry_instruction,
     )
     if estimated_tokens <= budget_tokens:
@@ -750,6 +853,14 @@ def _category_from_text(value: str) -> str | None:
     return None
 
 
+def _normalize_fractional_confidence_value(value: float) -> float:
+    if value <= 1:
+        return max(0.0, min(1.0, value))
+    if value <= 10:
+        return max(0.0, min(1.0, value / 10.0))
+    return max(0.0, min(1.0, value / 100.0))
+
+
 def _normalize_model_contract(value: Any) -> Any:
     return MODEL_OUTPUT_SANITIZER.sanitize(value)
     if not isinstance(value, dict):
@@ -821,6 +932,14 @@ def _normalize_model_contract(value: Any) -> Any:
                 "use-after-free": "memory_safety",
                 "leak": "resource_leak",
                 "memory_leak": "resource_leak",
+                "allocation_leak": "resource_leak",
+                "unbounded_allocation": "resource_leak",
+                "unbounded_allocation_loop": "resource_leak",
+                "allocation_until_failure": "resource_leak",
+                "malloc_loop": "resource_leak",
+                "stack_exhaustion": "resource_leak",
+                "heap_exhaustion": "resource_leak",
+                "resource_exhaustion": "resource_leak",
             }.get(category.strip().lower())
             if normalized_category is not None:
                 finding["category"] = normalized_category
@@ -904,19 +1023,24 @@ def _normalize_model_contract(value: Any) -> Any:
         elif confidence is not None and not isinstance(confidence, (int, float)):
             finding["confidence"] = None
         elif isinstance(confidence, (int, float)) and confidence > 1:
-            finding["confidence"] = max(0, min(1, float(confidence) / 100))
+            finding["confidence"] = _normalize_fractional_confidence_value(float(confidence))
     return value
 
 
-def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
+def _parse_typed_response(
+    payload: dict[str, Any],
+    *,
+    response_model: type[BaseModel],
+    normalizer: Callable[[Any], Any] | None = None,
+) -> BaseModel:
     content: str | None = None
     try:
         content = payload["choices"][0]["message"]["content"]
         if not isinstance(content, str):
             raise TypeError("assistant content is not text")
-        return ModelReviewResponse.model_validate(
-            _normalize_model_contract(json.loads(_extract_json_object(content)))
-        )
+        raw_value = json.loads(_extract_json_object(content))
+        normalized_value = normalizer(raw_value) if normalizer is not None else raw_value
+        return response_model.model_validate(normalized_value)
     except (KeyError, IndexError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
         raise ModelInvocationError(
             "model returned an invalid structured response",
@@ -925,7 +1049,29 @@ def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
         ) from exc
 
 
-def _response_format(settings: Settings) -> dict[str, Any] | None:
+def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
+    return _parse_typed_response(
+        payload,
+        response_model=ModelReviewResponse,
+        normalizer=_normalize_model_contract,
+    )
+
+
+def _normalize_confirmation_contract(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    if "decisions" in value:
+        return value
+    if "findings" in value and isinstance(value["findings"], list):
+        return {
+            "summary": value.get("summary", "候选确认完成。"),
+            "score": value.get("score", 80),
+            "decisions": value["findings"],
+        }
+    return value
+
+
+def _response_format(settings: Settings, *, response_schema: type[BaseModel] = CompactModelReviewResponse) -> dict[str, Any] | None:
     if not settings.model_structured_outputs_enabled:
         return None
     return {
@@ -933,7 +1079,7 @@ def _response_format(settings: Settings) -> dict[str, Any] | None:
         "json_schema": {
             "name": STRUCTURED_RESPONSE_SCHEMA_NAME,
             "strict": True,
-            "schema": CompactModelReviewResponse.model_json_schema(),
+            "schema": response_schema.model_json_schema(),
         },
     }
 
@@ -964,9 +1110,13 @@ async def invoke_model(
     node: ModelNode,
     files: Sequence[ReviewFile],
     prompt: str,
+    response_contract: str = FINAL_RESPONSE_CONTRACT,
     retry_instruction: str | None = None,
     settings: Settings | None = None,
-) -> ModelReviewResponse:
+    response_schema: type[BaseModel] = CompactModelReviewResponse,
+    response_model: type[BaseModel] = ModelReviewResponse,
+    response_normalizer: Callable[[Any], Any] | None = _normalize_model_contract,
+) -> BaseModel:
     settings = settings or get_settings()
     if not node.is_enabled:
         raise ModelInvocationError("selected model node is disabled")
@@ -982,9 +1132,11 @@ async def invoke_model(
         prompt=prompt,
         files=files,
         settings=settings,
+        response_contract=response_contract,
+        response_schema=response_schema,
         retry_instruction=retry_instruction,
     )
-    strict_prompt = _strict_prompt(prompt, retry_instruction)
+    strict_prompt = _strict_prompt(prompt, response_contract, retry_instruction)
     body = {
         "model": node.model_identifier,
         "messages": [
@@ -994,7 +1146,7 @@ async def invoke_model(
         "temperature": 0,
         "max_tokens": settings.model_max_tokens,
     }
-    response_format = _response_format(settings)
+    response_format = _response_format(settings, response_schema=response_schema)
     if response_format is not None:
         body["response_format"] = response_format
     try:
@@ -1030,7 +1182,575 @@ async def invoke_model(
         raise
     except (httpx.HTTPError, ValueError) as exc:
         raise ModelInvocationError("selected model node is unavailable", details=str(exc)) from exc
-    return _parse_response(payload)
+    return _parse_typed_response(payload, response_model=response_model, normalizer=response_normalizer)
+
+
+def _select_candidate_findings(result: ModelReviewResponse) -> list:
+    return list(result.findings)
+
+
+def _review_file_by_path(files: Sequence[ReviewFile], file_path: str) -> ReviewFile | None:
+    wanted = file_path.replace("\\", "/").strip().lstrip("./")
+    for source in files:
+        if source.relative_path.replace("\\", "/").strip().lstrip("./") == wanted:
+            return source
+    basename_matches = [
+        source
+        for source in files
+        if source.relative_path.replace("\\", "/").split("/")[-1] == wanted.split("/")[-1]
+    ]
+    return basename_matches[0] if len(basename_matches) == 1 else None
+
+
+def _normalized_trigger_kind_value(value: str | None) -> str:
+    lowered = (value or "").strip().lower()
+    aliases = {
+        "unsafe_copy": "copy_bounds",
+        "copy_overflow": "copy_bounds",
+        "integer_overflow": "overflow",
+        "integer_underflow": "underflow",
+        "division_by_zero": "divide_by_zero",
+        "memory_leak": "missing_release",
+        "leak": "missing_release",
+        "heap_exhaustion": "exhausted_loop",
+        "resource_exhaustion": "exhausted_loop",
+        "allocation_until_failure": "exhausted_loop",
+        "unbounded_allocation_loop": "exhausted_loop",
+        "malloc_loop": "exhausted_loop",
+        "stack_overflow": "stack_exhaustion",
+        "recursive_exhaustion": "stack_exhaustion",
+    }
+    return aliases.get(lowered, lowered)
+
+
+def _normalized_trigger_kind(finding) -> str:
+    return _normalized_trigger_kind_value(getattr(finding, "trigger_kind", ""))
+
+
+def _confidence_uncertainty_score(confidence: float | None) -> int:
+    if confidence is None:
+        return 30
+    if confidence >= 0.90:
+        return 0
+    if confidence >= 0.75:
+        return 10
+    if confidence >= 0.55:
+        return 20
+    return 30
+
+
+def _difficulty_review_score(difficulty) -> int:
+    value = getattr(difficulty, "value", difficulty)
+    return {
+        "low": 0,
+        "medium": 25,
+        "high": 40,
+        None: 25,
+    }.get(value, 25)
+
+
+def _severity_review_score(severity) -> int:
+    value = getattr(severity, "value", severity)
+    return {
+        "high": 30,
+        "medium": 20,
+        "low": 10,
+        "suggestion": 0,
+    }.get(value, 10)
+
+
+def _deep_review_score(finding) -> int:
+    return (
+        _confidence_uncertainty_score(finding.confidence)
+        + _difficulty_review_score(finding.difficulty)
+        + _severity_review_score(finding.severity)
+    )
+
+
+def _raw_category_conflicts_with_category(finding) -> bool:
+    raw_category = (finding.raw_category or "").strip()
+    if not raw_category:
+        return False
+    normalized = MODEL_OUTPUT_SANITIZER._normalize_category(raw_category, fallback_text="")
+    if normalized == "logic":
+        return False
+    return normalized != finding.category.value
+
+
+def _looks_like_function_header(header_text: str) -> bool:
+    compact = " ".join(line.strip() for line in header_text.splitlines() if line.strip())
+    if not compact or ")" not in compact:
+        return False
+    lowered = compact.lower().lstrip()
+    if lowered.startswith(("if ", "if(", "for ", "for(", "while ", "while(", "switch ", "switch(", "else", "do ")):
+        return False
+    return bool(re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*\{?\s*$", compact))
+
+
+def _function_window_for_line(lines: Sequence[str], line_number: int, *, max_lines: int = 160) -> tuple[int, int] | None:
+    if line_number < 1 or line_number > len(lines):
+        return None
+    for open_index in range(line_number - 1, -1, -1):
+        if "{" not in lines[open_index]:
+            continue
+        header_start = max(0, open_index - 4)
+        if not _looks_like_function_header("\n".join(lines[header_start : open_index + 1])):
+            continue
+        balance = 0
+        for close_index in range(open_index, len(lines)):
+            balance += lines[close_index].count("{") - lines[close_index].count("}")
+            if balance <= 0 and close_index > open_index:
+                start = open_index + 1
+                end = close_index + 1
+                if start <= line_number <= end and end - start + 1 <= max_lines:
+                    return start, end
+                return None
+    return None
+
+
+def _candidate_text(finding) -> str:
+    return " ".join(
+        part
+        for part in (
+            getattr(finding, "category", None).value if getattr(finding, "category", None) is not None else "",
+            getattr(finding, "raw_category", "") or "",
+            _normalized_trigger_kind_value(getattr(finding, "trigger_kind", "") or ""),
+            getattr(finding, "title", "") or "",
+            getattr(finding, "description", "") or "",
+            " ".join(getattr(finding, "unknown_symbols", []) or []),
+        )
+        if part
+    ).lower()
+
+
+_CANDIDATE_ANCHOR_IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+_CANDIDATE_ANCHOR_STOPWORDS = {
+    "high",
+    "medium",
+    "low",
+    "other",
+    "logic",
+    "true",
+    "false",
+    "null",
+    "candidate",
+    "trigger",
+    "buffer",
+    "overflow",
+    "underflow",
+    "integer",
+    "safety",
+    "memory",
+    "resource",
+    "leak",
+    "divide",
+    "zero",
+    "write",
+    "read",
+    "stack",
+    "heap",
+    "copy",
+    "bounds",
+    "free",
+    "release",
+    "recursion",
+    "allocation",
+    "input",
+    "check",
+    "validation",
+    "pointer",
+    "invalid",
+    "condition",
+    "loop",
+    "size",
+    "call",
+    "risk",
+    "issue",
+    "line",
+}
+
+_CANDIDATE_API_TERMS = (
+    "memcpy",
+    "memmove",
+    "strcpy",
+    "strncpy",
+    "sprintf",
+    "snprintf",
+    "malloc",
+    "calloc",
+    "realloc",
+    "free",
+    "fopen",
+    "open",
+    "close",
+    "read",
+    "write",
+    "recv",
+    "send",
+    "stack_operation",
+)
+
+
+def _candidate_subject_identifiers(finding) -> tuple[str, ...]:
+    text = " ".join(
+        part
+        for part in (
+            getattr(finding, "title", "") or "",
+            getattr(finding, "description", "") or "",
+            " ".join(getattr(finding, "unknown_symbols", []) or []),
+        )
+        if part
+    )
+    identifiers: list[str] = []
+    for match in _CANDIDATE_ANCHOR_IDENTIFIER_RE.finditer(text):
+        identifier = match.group(0)
+        lowered = identifier.lower()
+        if len(identifier) < 3 or lowered in _CANDIDATE_ANCHOR_STOPWORDS:
+            continue
+        if lowered in {"memcpy", "memmove", "strcpy", "strncpy", "malloc", "calloc", "realloc", "free"}:
+            continue
+        identifiers.append(lowered)
+    return tuple(dict.fromkeys(identifiers))
+
+
+def _candidate_anchor_terms(finding) -> tuple[str, ...]:
+    text = _candidate_text(finding)
+    terms = list(_candidate_subject_identifiers(finding))
+    terms.extend(term for term in _CANDIDATE_API_TERMS if term in text)
+    terms.extend(symbol for symbol in ("->", "[", "]", "<<", ">>", "/", "=") if symbol in text)
+    return tuple(dict.fromkeys(terms))
+
+
+def _line_matches_candidate_trigger(line_text: str, finding) -> bool:
+    lowered = line_text.strip().lower()
+    if not lowered:
+        return False
+    if lowered in {"{", "}", "//{", "//}", "(", ")"}:
+        return False
+    tokens = _candidate_anchor_terms(finding)
+    if tokens and any(token in lowered for token in tokens):
+        return True
+    symbol_hits = [symbol.lower() for symbol in (getattr(finding, "unknown_symbols", None) or []) if symbol]
+    identifier_hits = _candidate_subject_identifiers(finding)
+    return (
+        bool(symbol_hits) and any(symbol in lowered for symbol in symbol_hits)
+    ) or (
+        bool(identifier_hits) and any(identifier in lowered for identifier in identifier_hits)
+    )
+
+
+def _line_has_actionable_c_anchor(line_text: str) -> bool:
+    lowered = line_text.strip().lower()
+    if not lowered:
+        return False
+    if lowered in {"{", "}", "(", ")", ";"}:
+        return False
+    if lowered.startswith(("//", "/*", "*", "#endif", "#else")):
+        return False
+    if lowered.startswith("#"):
+        return any(token in lowered for token in ("define", "include", "if", "ifdef", "ifndef"))
+    if lowered.startswith(("if", "while", "for", "switch", "return", "do", "goto", "free(")):
+        return True
+    if any(token in lowered for token in ("=", "->", "[", "]", "malloc", "calloc", "realloc", "memcpy", "memmove", "strcpy", "strncpy", "snprintf", "sprintf")):
+        return True
+    if re.search(r"\b[a-z_][a-z0-9_]*\s*\(", lowered):
+        return True
+    return lowered.endswith(";")
+
+
+def _candidate_line_anchor_score(line_text: str, finding) -> float:
+    lowered = line_text.strip().lower()
+    if not lowered:
+        return -10.0
+    if lowered in {"{", "}", "//{", "//}", "(", ")"}:
+        return -8.0
+    if lowered.startswith("//") or lowered.startswith("/*") or lowered.startswith("*"):
+        return -6.0
+
+    score = 0.0
+    if _line_has_actionable_c_anchor(line_text):
+        score += 1.0
+    if _line_matches_candidate_trigger(line_text, finding):
+        score += 2.5
+
+    anchor_terms = _candidate_anchor_terms(finding)
+    score += sum(1.4 for term in anchor_terms if term in lowered)
+    return score
+
+
+def _refine_candidate_line(files: Sequence[ReviewFile], finding, *, radius: int = 5) -> int | None:
+    if finding.line is None:
+        return None
+    source = _review_file_by_path(files, finding.file_path)
+    if source is None:
+        return finding.line
+    lines = source.source_text.splitlines()
+    if finding.line < 1 or finding.line > len(lines):
+        return finding.line
+    current_score = _candidate_line_anchor_score(lines[finding.line - 1], finding)
+    if current_score >= 4.5:
+        return finding.line
+
+    best_line = finding.line
+    best_score = current_score
+
+    start = max(1, finding.line - radius)
+    end = min(len(lines), finding.line + radius)
+    for candidate_line in range(start, end + 1):
+        score = _candidate_line_anchor_score(lines[candidate_line - 1], finding) - (abs(candidate_line - finding.line) * 0.12)
+        if score > best_score:
+            best_score = score
+            best_line = candidate_line
+
+    function_window = _function_window_for_line(lines, finding.line)
+    if function_window is not None:
+        for candidate_line in range(function_window[0], function_window[1] + 1):
+            score = _candidate_line_anchor_score(lines[candidate_line - 1], finding)
+            if score > best_score:
+                best_score = score
+                best_line = candidate_line
+
+    if best_score >= 3.0:
+        return best_line
+
+    for candidate_line in range(1, len(lines) + 1):
+        score = _candidate_line_anchor_score(lines[candidate_line - 1], finding)
+        if score > best_score:
+            best_score = score
+            best_line = candidate_line
+
+    if best_score >= 3.0:
+        return best_line
+
+    if _line_matches_candidate_trigger(lines[finding.line - 1], finding):
+        return finding.line
+    for distance in range(1, radius + 1):
+        for candidate_line in (finding.line - distance, finding.line + distance):
+            if candidate_line < start or candidate_line > end:
+                continue
+            if _line_matches_candidate_trigger(lines[candidate_line - 1], finding):
+                return candidate_line
+    if function_window is not None:
+        for candidate_line in range(function_window[0], function_window[1] + 1):
+            if _line_matches_candidate_trigger(lines[candidate_line - 1], finding):
+                return candidate_line
+    return finding.line
+
+
+def _normalize_candidate_findings(files: Sequence[ReviewFile], candidates: Sequence) -> list:
+    normalized: list = []
+    for finding in candidates:
+        refined_line = _refine_candidate_line(files, finding)
+        if refined_line is not None and refined_line != finding.line:
+            normalized.append(finding.model_copy(update={"line": refined_line}))
+        else:
+            normalized.append(finding)
+    return normalized
+
+
+def _dedupe_final_findings(findings: Sequence) -> list:
+    deduped: list = []
+    seen: set[tuple[str, str, int | None, str, str]] = set()
+    for finding in findings:
+        key = (
+            finding.file_path.replace("\\", "/").strip().lower(),
+            finding.category.value,
+            finding.line,
+            _normalized_trigger_kind(finding),
+            finding.title.strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(finding)
+    return deduped
+
+
+def _needs_deep_candidate_review(files: Sequence[ReviewFile], finding, *, threshold: int = 80) -> bool:
+    if finding.needs_rag:
+        return True
+    if finding.unknown_symbols:
+        return True
+    if finding.line is None:
+        return True
+    if _raw_category_conflicts_with_category(finding):
+        return True
+    source = _review_file_by_path(files, finding.file_path)
+    line_text = ""
+    if source is not None and finding.line is not None:
+        lines = source.source_text.splitlines()
+        if 1 <= finding.line <= len(lines):
+            line_text = lines[finding.line - 1]
+    anchor_score = _candidate_line_anchor_score(line_text, finding) if line_text else 0.0
+    if finding.category.value in {"concurrency", "logic", "input_validation", "other"}:
+        return True
+    if (
+        _difficulty_review_score(finding.difficulty) == 0
+        and (finding.confidence or 0) >= 0.90
+        and anchor_score >= 3.0
+    ):
+        return False
+    return _deep_review_score(finding) >= threshold or anchor_score < 2.0
+
+
+def _partition_candidate_findings(files: Sequence[ReviewFile], candidates: Sequence) -> tuple[list, list]:
+    direct: list = []
+    deep: list = []
+    for finding in candidates:
+        if _needs_deep_candidate_review(files, finding):
+            deep.append(finding)
+        else:
+            direct.append(finding)
+    return direct, deep
+
+
+def _candidate_window_files(
+    source_files: Sequence[ReviewFile],
+    candidates: Sequence,
+    *,
+    radius: int,
+) -> list[ReviewFile]:
+    windows_by_path: dict[str, list[tuple[int, int]]] = {}
+    for candidate in candidates:
+        candidate_line = _refine_candidate_line(source_files, candidate) if candidate.line is not None else None
+        if candidate_line is None:
+            continue
+        source = _review_file_by_path(source_files, candidate.file_path)
+        if source is None:
+            continue
+        line_count = max(1, len(source.source_text.splitlines()))
+        start = max(1, candidate_line - radius)
+        end = min(line_count, candidate_line + radius)
+        windows_by_path.setdefault(source.relative_path, []).append((start, end))
+
+    rendered_files: list[ReviewFile] = []
+    for relative_path, windows in windows_by_path.items():
+        source = _review_file_by_path(source_files, relative_path)
+        if source is None:
+            continue
+        lines = source.source_text.splitlines()
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(windows):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        parts: list[str] = []
+        for start, end in merged:
+            parts.append(f"--- candidate local window lines {start}-{end} ---")
+            parts.extend(
+                f"{line_number:0{CHUNK_LINE_PREFIX_WIDTH}d}: {lines[line_number - 1]}"
+                for line_number in range(start, end + 1)
+            )
+        source_text = "\n".join(parts)
+        rendered_files.append(
+            ReviewFile(
+                relative_path=relative_path,
+                source_text=source_text,
+                size_bytes=len(source_text.encode("utf-8", errors="ignore")),
+            )
+        )
+    return rendered_files
+
+
+def _candidate_confirmation_prompt(base_prompt: str, candidates: Sequence) -> str:
+    candidate_lines = []
+    for index, finding in enumerate(candidates, start=1):
+        candidate_lines.append(
+            f"{index}. {finding.file_path}:{finding.line or 'unknown'} "
+            f"category_guess={finding.category.value} severity={finding.severity.value} "
+            f"title={finding.title} trigger={_normalized_trigger_kind(finding) or 'unknown'} "
+            f"unknown={','.join(finding.unknown_symbols or []) or '-'}"
+        )
+    return "\n".join(
+        [
+            base_prompt,
+            "",
+            "Second-stage confirmation mode.",
+            "Review only the candidate local windows in the PRIMARY SOURCE below.",
+            "Candidate lines may be approximate; use only nearby lines inside each shown local window, plus any Definition Context cards, to confirm or correct each candidate.",
+            "For each candidate, output one decision item with the same candidate_index.",
+            "Return the result list under the decisions key only. Do not output a findings key.",
+            "Do not rescan the whole function and do not convert one candidate into another candidate's defect.",
+            "Do not add new global findings outside the shown candidate windows.",
+            "If the category is uncertain but the local defect is real, use other.",
+            "Return only the decisions list.",
+            "",
+            "Candidate list:",
+            *candidate_lines,
+        ]
+    )
+
+
+def _apply_confirmation_decisions(candidates: Sequence[ReviewFinding], confirmation: CandidateConfirmationResponse) -> list[ReviewFinding]:
+    resolved: list[ReviewFinding] = []
+    for decision in confirmation.decisions:
+        if decision.candidate_index < 1 or decision.candidate_index > len(candidates):
+            continue
+        base = candidates[decision.candidate_index - 1]
+        if decision.action == "reject":
+            continue
+        if decision.action == "confirm":
+            resolved.append(base)
+            continue
+        merged = base.model_dump(mode="json")
+        if decision.category:
+            merged["category"] = decision.category
+        if decision.raw_category:
+            merged["raw_category"] = decision.raw_category
+        if decision.title:
+            merged["title"] = decision.title
+        if decision.description:
+            merged["description"] = decision.description
+        if decision.line is not None:
+            merged["line"] = decision.line
+        if decision.trigger_kind:
+            merged["trigger_kind"] = decision.trigger_kind
+        if decision.evidence_ids:
+            merged["evidence_ids"] = list(decision.evidence_ids)
+        if decision.unknown_symbols:
+            merged["unknown_symbols"] = list(decision.unknown_symbols)
+        sanitized = MODEL_OUTPUT_SANITIZER._sanitize_finding(merged)
+        resolved.append(ReviewFinding.model_validate(sanitized))
+    return resolved
+
+
+async def _invoke_candidate_review(
+    *,
+    db: Session,
+    task: ReviewTask,
+    node: ModelNode,
+    files: Sequence[ReviewFile],
+    prompt: str,
+    settings: Settings,
+    retry_instruction: str | None,
+) -> ModelReviewResponse:
+    candidate_result = await invoke_model(
+        node=node,
+        files=files,
+        prompt=_with_rag_context(db, task, prompt, settings, files=files, purpose="candidate"),
+        response_contract=CANDIDATE_RESPONSE_CONTRACT,
+        retry_instruction=retry_instruction,
+        settings=settings,
+    )
+    candidates = _normalize_candidate_findings(files, _select_candidate_findings(candidate_result))
+    final_findings = _dedupe_final_findings(candidates)
+    task.model_log = truncate_model_log(
+        "\n\n".join(
+            part
+            for part in [
+                task.model_log,
+                (
+                    "[CandidateScan] Single-pass review produced "
+                    f"{len(candidate_result.findings)} candidate(s); forwarded {len(candidates)}; "
+                    f"final_after_postprocess={len(final_findings)}."
+                ),
+            ]
+            if part
+        )
+    )
+    db.commit()
+    return candidate_result.model_copy(update={"findings": final_findings})
 
 
 async def invoke_selected_model(
@@ -1053,7 +1773,7 @@ async def invoke_selected_model(
         batch_count: int,
         batch: Sequence[ChunkedReviewFile],
     ) -> str:
-        enriched = _with_rag_context(db, task, prompt_text, settings, files=batch, persist=False)
+        enriched = _with_rag_context(db, task, prompt_text, settings, files=batch, persist=False, purpose="default")
         return _batch_prompt(enriched, batch_index, batch_count, batch)
 
     def update_chunk_progress(completed_chunks: int, total_chunks: int) -> None:
@@ -1066,7 +1786,24 @@ async def invoke_selected_model(
         current_task.progress = max(current_task.progress, min(95, chunk_progress))
         db.commit()
 
-    if _should_chunk(task.files, settings) or (len(dispatch_pool.nodes) > 1 and len(task.files) > 1):
+    should_chunk = _should_chunk(
+        task.files,
+        settings,
+        prompt=base_prompt,
+        response_contract=CANDIDATE_RESPONSE_CONTRACT if settings.rag_candidate_scan_enabled else FINAL_RESPONSE_CONTRACT,
+    ) or (len(dispatch_pool.nodes) > 1 and len(task.files) > 1)
+    if settings.rag_candidate_scan_enabled and not should_chunk:
+        return await _invoke_candidate_review(
+            db=db,
+            task=task,
+            node=task.model_node,
+            files=task.files,
+            prompt=base_prompt,
+            settings=settings,
+            retry_instruction=retry_instruction,
+        )
+
+    if should_chunk:
         dispatch_files: Sequence[ReviewFile] = _rag_review_unit_files(db, task, settings) or task.files
         return await _invoke_chunked_review(
             node=task.model_node,
@@ -1082,7 +1819,8 @@ async def invoke_selected_model(
         return await invoke_model(
             node=task.model_node,
             files=task.files,
-            prompt=_with_rag_context(db, task, base_prompt, settings, files=task.files),
+            prompt=_with_rag_context(db, task, base_prompt, settings, files=task.files, purpose="default"),
+            response_contract=FINAL_RESPONSE_CONTRACT,
             retry_instruction=retry_instruction,
             settings=settings,
         )
@@ -1110,13 +1848,14 @@ def _with_rag_context(
     *,
     files: Sequence[ReviewFile] | Sequence[ChunkedReviewFile],
     persist: bool = True,
+    purpose: str = "default",
 ) -> str:
     if not settings.rag_enabled:
         return prompt
     try:
         from app.services.code_index.context_builder import build_rag_context
 
-        rag_context = build_rag_context(db, task, list(files), settings=settings, persist=persist)
+        rag_context = build_rag_context(db, task, list(files), settings=settings, persist=persist, purpose=purpose)
     except Exception as exc:  # pragma: no cover - defensive guard for optional RAG services.
         current_log = task.model_log or ""
         task.model_log = truncate_model_log(f"{current_log}\n[RAG] Context build skipped: {exc}")

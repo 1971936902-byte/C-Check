@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.schemas.model_response import FindingCategory, FindingSeverity
+from app.schemas.model_response import COMPACT_MAX_FINDINGS, FindingCategory, FindingSeverity
 
 
-MAX_MODEL_SNIPPET_LINES = 5
-MAX_FINDINGS = 4
+MAX_FINDINGS = COMPACT_MAX_FINDINGS
 
 
 def _as_text(value: Any, *, default: str = "") -> str:
@@ -96,7 +95,16 @@ class ModelOutputSanitizer:
         "buffer overflow": "buffer_overflow",
         "out_of_bounds": "buffer_overflow",
         "out-of-bounds": "buffer_overflow",
+        "out_of_bounds_read": "buffer_overflow",
+        "out-of-bounds-read": "buffer_overflow",
+        "out_of_bounds_write": "buffer_overflow",
+        "out-of-bounds-write": "buffer_overflow",
         "oob": "buffer_overflow",
+        "oob_read": "buffer_overflow",
+        "oob_write": "buffer_overflow",
+        "unsafe_copy": "buffer_overflow",
+        "fixed_array_oob": "buffer_overflow",
+        "malloc_size_too_small": "buffer_overflow",
         "pointer": "pointer_safety",
         "pointer_safety": "pointer_safety",
         "null_safety": "pointer_safety",
@@ -108,14 +116,26 @@ class ModelOutputSanitizer:
         "dangling_pointer": "pointer_safety",
         "wild_pointer": "pointer_safety",
         "invalid_pointer": "pointer_safety",
+        "invalid_pointer_dereference": "pointer_safety",
         "resource": "resource_leak",
         "resource_leak": "resource_leak",
         "resource leak": "resource_leak",
         "leak": "resource_leak",
         "memory_leak": "resource_leak",
+        "allocation_leak": "resource_leak",
+        "unbounded_allocation": "resource_leak",
+        "unbounded_allocation_loop": "resource_leak",
+        "allocation_until_failure": "resource_leak",
+        "malloc_loop": "resource_leak",
+        "stack_exhaustion": "resource_leak",
+        "heap_exhaustion": "resource_leak",
+        "resource_exhaustion": "resource_leak",
         "logic": "logic",
         "logical": "logic",
         "robustness": "logic",
+        "other": "other",
+        "unknown": "other",
+        "unclassified": "other",
         "security": "security",
         "input_validation": "input_validation",
         "input validation": "input_validation",
@@ -131,6 +151,12 @@ class ModelOutputSanitizer:
         "overflow": "integer_safety",
         "integer_overflow": "integer_safety",
         "integer_underflow": "integer_safety",
+        "divide_by_zero": "integer_safety",
+        "divide-by-zero": "integer_safety",
+        "division_by_zero": "integer_safety",
+        "truncation": "integer_safety",
+        "signedness": "integer_safety",
+        "unsafe_size_calculation": "integer_safety",
         "type_conversion": "integer_safety",
         "implicit_cast": "integer_safety",
         "integer_conversion": "integer_safety",
@@ -138,6 +164,9 @@ class ModelOutputSanitizer:
         "concurrency": "concurrency",
         "thread_safety": "concurrency",
         "race_condition": "concurrency",
+        "deadlock": "concurrency",
+        "lock_leak": "concurrency",
+        "unlock_imbalance": "concurrency",
         "performance": "performance",
         "perf": "performance",
         "style": "style",
@@ -160,7 +189,8 @@ class ModelOutputSanitizer:
 
     category_keywords = (
         (("\u53ef\u7ef4\u62a4", "\u7ef4\u62a4\u6027", "\u4ee3\u7801\u89c4\u8303", "\u4ee3\u7801\u8d28\u91cf", "\u91cd\u590d\u4ee3\u7801", "\u91cd\u590d\u5757"), "maintainability"),
-        (("\u6027\u80fd", "\u6548\u7387", "\u8017\u65f6", "\u8d44\u6e90\u8017\u5c3d", "\u6808\u8017\u5c3d", "\u5806\u8017\u5c3d"), "performance"),
+        (("\u8d44\u6e90\u8017\u5c3d", "\u6808\u8017\u5c3d", "\u5806\u8017\u5c3d", "resource exhaustion", "stack exhaustion", "heap exhaustion", "unbounded allocation", "allocation until failure", "malloc loop"), "resource_leak"),
+        (("\u6027\u80fd", "\u6548\u7387", "\u8017\u65f6"), "performance"),
         (("\u7a7a\u6307\u9488", "\u91ce\u6307\u9488", "\u60ac\u7a7a\u6307\u9488", "null pointer", "null-pointer"), "pointer_safety"),
         (("\u8d8a\u754c", "\u7f13\u51b2\u533a", "buffer overflow", "out of bounds"), "buffer_overflow"),
         (("\u5185\u5b58\u6cc4\u6f0f", "\u8d44\u6e90\u6cc4\u6f0f", "\u672a\u91ca\u653e", "memory leak", "resource leak"), "resource_leak"),
@@ -171,20 +201,6 @@ class ModelOutputSanitizer:
         (("\u517c\u5bb9", "\u79fb\u690d", "\u5e73\u53f0", "\u7c7b\u578b\u5b89\u5168", "\u7c7b\u578b\u4e0d\u5339\u914d", "compatibility", "type safety", "type mismatch"), "compatibility"),
         (("\u5b89\u5168", "\u6f0f\u6d1e", "\u6ce8\u5165", "security"), "security"),
     )
-
-    confidence_aliases = {
-        "high": 0.9,
-        "medium": 0.7,
-        "low": 0.5,
-        "sure": 0.95,
-        "certain": 0.95,
-        "likely": 0.75,
-        "possible": 0.5,
-        "uncertain": 0.3,
-        "\u9ad8": 0.9,
-        "\u4e2d": 0.7,
-        "\u4f4e": 0.5,
-    }
 
     def sanitize(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict):
@@ -204,27 +220,16 @@ class ModelOutputSanitizer:
         fallback_line = _as_line(finding.get("line"))
         title = _truncate(_as_text(finding.get("title"), default="\u6a21\u578b\u53d1\u73b0\u7684\u95ee\u9898"), 120, default="\u6a21\u578b\u53d1\u73b0\u7684\u95ee\u9898")
         description = _truncate(_as_text(finding.get("description"), default=title), 360, default=title)
-        remediation = _truncate(
-            _as_text(finding.get("remediation"), default="\u8bf7\u6839\u636e\u5b9a\u4f4d\u884c\u7ed3\u5408\u4e0a\u4e0b\u6587\u590d\u6838\u3002"),
-            360,
-            default="\u8bf7\u6839\u636e\u5b9a\u4f4d\u884c\u7ed3\u5408\u4e0a\u4e0b\u6587\u590d\u6838\u3002",
-        )
         return {
             "severity": self._normalize_severity(finding.get("severity")),
             "category": self._normalize_category(
                 finding.get("category"),
-                fallback_text=" ".join((title, description, remediation)),
+                fallback_text=" ".join((title, description)),
             ),
             "title": title,
             "description": description,
             "file_path": _truncate(_as_text(finding.get("file_path"), default="unknown.c"), 512, default="unknown.c"),
             "line": fallback_line,
-            "evidence_ids": self._normalize_string_list(finding.get("evidence_ids"), prefix="E", limit=12),
-            "call_chain": self._normalize_string_list(finding.get("call_chain"), prefix=None, limit=16),
-            "confidence": self._normalize_confidence(finding.get("confidence")),
-            "remediation": remediation,
-            "code_snippet": self._normalize_snippet(finding.get("code_snippet"), fallback_line=fallback_line),
-            "fixed_snippet": self._normalize_snippet(finding.get("fixed_snippet"), fallback_line=fallback_line),
         }
 
     def _normalize_severity(self, value: Any) -> str:
@@ -249,7 +254,7 @@ class ModelOutputSanitizer:
         spaced = text.lower().replace("_", " ").replace("-", " ")
         if spaced in self.category_aliases:
             return self.category_aliases[spaced]
-        return self._category_from_text(text) or self._category_from_text(fallback_text) or "logic"
+        return self._category_from_text(text) or self._category_from_text(fallback_text) or "other"
 
     def _category_from_text(self, value: str) -> str | None:
         normalized = value.strip().lower()
@@ -260,64 +265,3 @@ class ModelOutputSanitizer:
                 return category
         return None
 
-    def _normalize_confidence(self, value: Any) -> float | None:
-        if value is None or isinstance(value, bool):
-            return None
-        if isinstance(value, (int, float)):
-            confidence = float(value)
-        elif isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in self.confidence_aliases:
-                return self.confidence_aliases[normalized]
-            try:
-                confidence = float(normalized.rstrip("%"))
-            except ValueError:
-                return None
-        else:
-            return None
-        if confidence > 1:
-            confidence = confidence / 100
-        return max(0.0, min(1.0, confidence))
-
-    def _normalize_string_list(self, value: Any, *, prefix: str | None, limit: int) -> list[str]:
-        if isinstance(value, str):
-            value = [value]
-        if not isinstance(value, list):
-            return []
-        result: list[str] = []
-        for item in value:
-            text = _as_text(item)
-            if not text:
-                continue
-            if prefix is not None and not text.startswith(prefix):
-                continue
-            result.append(text)
-            if len(result) >= limit:
-                break
-        return result
-
-    def _normalize_snippet(self, value: Any, *, fallback_line: int | None) -> list[dict[str, Any]]:
-        if isinstance(value, (str, dict)):
-            value = [value]
-        if not isinstance(value, list):
-            return []
-        result: list[dict[str, Any]] = []
-        for item in value:
-            kind = "context"
-            if isinstance(item, str):
-                line = fallback_line
-                content = item
-            elif isinstance(item, dict):
-                line = _as_line(item.get("line")) or fallback_line
-                content = _as_text(item.get("content"))
-                item_kind = _as_text(item.get("kind")).lower()
-                if item_kind in {"context", "removed", "added"}:
-                    kind = item_kind
-            else:
-                continue
-            if line is None or not content:
-                continue
-            result.append({"line": line, "content": content[:1000], "kind": kind})
-            if len(result) >= MAX_MODEL_SNIPPET_LINES:
-                break
-        return result

@@ -38,6 +38,8 @@ const checkTypeLabels: Record<string, string> = {
   maintainability: '代码规范与可维护性',
 }
 
+checkTypeLabels.other = 'Other'
+
 const allCheckTypes = Object.keys(checkTypeLabels)
 
 const sourceFiles = [
