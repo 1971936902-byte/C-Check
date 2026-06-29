@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     model_max_attempts: int = Field(default=3, ge=1, le=5)
     model_context_window: int = Field(default=12288, ge=1024, le=1048576)
     model_max_tokens: int = Field(default=2048, ge=256, le=16384)
+    candidate_model_max_tokens: int = Field(default=2048, ge=256, le=16384)
     model_max_input_tokens: int = Field(default=10000, ge=512, le=1048576)
     model_token_chars_per_token: float = Field(default=3.5, ge=1.0, le=8.0)
     model_chunk_max_chars: int = Field(default=18000, ge=1000, le=200000)

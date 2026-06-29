@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 
-PARSER_VERSION = "hybrid-c-parser-v2"
+PARSER_VERSION = "hybrid-c-parser-v3"
 _IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
 _CONTROL_KEYWORDS = {
     "if",
@@ -266,7 +266,10 @@ def _parse_declaration_symbols(lines: list[str]) -> list[ParsedSymbol]:
 
 def _parse_global_variable_symbols(lines: list[str]) -> list[ParsedSymbol]:
     symbols: list[ParsedSymbol] = []
-    for line_number, line in enumerate(lines, start=1):
+    top_level_flags = _top_level_scope_flags(lines)
+    for line_number, (line, is_top_level) in enumerate(zip(lines, top_level_flags, strict=True), start=1):
+        if not is_top_level:
+            continue
         stripped = _strip_line_comment(line).strip()
         if (
             not stripped
@@ -290,6 +293,50 @@ def _parse_global_variable_symbols(lines: list[str]) -> list[ParsedSymbol]:
             )
         )
     return symbols
+
+
+def _top_level_scope_flags(lines: list[str]) -> list[bool]:
+    flags: list[bool] = []
+    depth = 0
+    in_block_comment = False
+    for line in lines:
+        flags.append(depth == 0)
+        if line.lstrip().startswith("#"):
+            continue
+        index = 0
+        quote: str | None = None
+        while index < len(line):
+            char = line[index]
+            following = line[index + 1] if index + 1 < len(line) else ""
+            if in_block_comment:
+                if char == "*" and following == "/":
+                    in_block_comment = False
+                    index += 2
+                    continue
+                index += 1
+                continue
+            if quote is not None:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = None
+                index += 1
+                continue
+            if char == "/" and following == "*":
+                in_block_comment = True
+                index += 2
+                continue
+            if char == "/" and following == "/":
+                break
+            if char in {'"', "'"}:
+                quote = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth = max(0, depth - 1)
+            index += 1
+    return flags
 
 
 def _parse_functions(lines: list[str]) -> tuple[list[ParsedSymbol], list[ParsedCall]]:

@@ -957,19 +957,39 @@ def _referenced_symbols(source_text: str) -> set[str]:
 
 def _locally_defined_symbols(source_text: str) -> set[str]:
     defined: set[str] = set()
-    for pattern in (
-        r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\b(?:static\s+)?(?:inline\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{",
-        r"\btypedef\b.*?\b([A-Za-z_][A-Za-z0-9_]*)\s*;",
-        r"\b(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"^\s*(?:extern\s+)?(?:static\s+)?(?:const\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;)",
-        r"^\s*(?:const\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;|,)",
+    for pattern, flags in (
+        (r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+        (
+            r"\b(?:static\s+)?(?:inline\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{",
+            re.MULTILINE,
+        ),
+        (r"\btypedef\b.*?\b([A-Za-z_][A-Za-z0-9_]*)\s*;", re.MULTILINE | re.DOTALL),
+        (r"\b(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
     ):
-        defined.update(match.group(1) for match in re.finditer(pattern, source_text, flags=re.MULTILINE | re.DOTALL))
+        defined.update(match.group(1) for match in re.finditer(pattern, source_text, flags=flags))
+    defined.update(_declared_object_symbols(source_text))
     defined.update(_function_parameter_symbols(source_text))
     defined.update(_struct_field_symbols(source_text))
     defined.update(_enum_member_symbols(source_text))
     return defined
+
+
+_OBJECT_DECLARATION_RE = re.compile(
+    r"^\s*(?:(?:extern|static|const|volatile|register|auto)\s+)*"
+    r"(?:struct\s+[A-Za-z_][A-Za-z0-9_]*|enum\s+[A-Za-z_][A-Za-z0-9_]*|"
+    r"union\s+[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"(?:\s+\*+\s*|\s*\*+\s+|\s+)(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"\s*(?:\[[^\]]*\])?\s*(?:=|;|,)"
+)
+
+
+def _declared_object_symbols(source_text: str) -> set[str]:
+    declared: set[str] = set()
+    for line in source_text.splitlines():
+        match = _OBJECT_DECLARATION_RE.match(line)
+        if match:
+            declared.add(match.group("name"))
+    return declared
 
 
 def _function_parameter_symbols(source_text: str) -> set[str]:

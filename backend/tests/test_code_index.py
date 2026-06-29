@@ -22,7 +22,7 @@ from app.services.code_index.indexer import build_code_index
 from app.services.code_index.keyword_search import expand_query_terms, keyword_search_chunks
 from app.services.code_index.parser import ParsedFile, ParsedSymbol, parse_c_source
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import RetrievedContext, _is_low_value_rag_identifier, _prune_ranked_contexts, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files, retrieve_missing_symbol_contexts
+from app.services.code_index.retriever import RetrievedContext, _is_low_value_rag_identifier, _locally_defined_symbols, _prune_ranked_contexts, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files, retrieve_missing_symbol_contexts
 from app.services.model_router import invoke_selected_model
 
 
@@ -326,6 +326,40 @@ def test_missing_symbol_context_resolves_calls_macros_and_globals(db_session):
     assert "missing" in rendered
     assert "helper_copy" in rendered
     assert "shared_counter" in rendered
+
+
+def test_parser_does_not_index_local_variables_or_struct_members_as_globals():
+    source = """
+struct Image { int width; };
+int shared_counter = 7;
+int inspect(struct Image *img) {
+    int size1 = img->width + 1;
+    char *buffer = 0;
+    return size1 + (buffer != 0);
+}
+"""
+
+    parsed = parse_c_source("src/scope.c", source)
+    global_names = {symbol.name for symbol in parsed.symbols if symbol.kind == "global_variable"}
+
+    assert "shared_counter" in global_names
+    assert "size1" not in global_names
+    assert "buffer" not in global_names
+    assert "width" not in global_names
+
+
+def test_local_declarations_are_not_treated_as_missing_symbols():
+    source = """
+int inspect(int width) {
+    int size1 = width + 1;
+    char *buffer = 0;
+    return size1 + (buffer != 0);
+}
+"""
+
+    locally_defined = _locally_defined_symbols(source)
+
+    assert {"inspect", "width", "size1", "buffer"}.issubset(locally_defined)
 
 
 def test_default_rag_query_filters_low_value_embedded_identifiers():

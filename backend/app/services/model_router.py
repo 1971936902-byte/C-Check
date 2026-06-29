@@ -1541,6 +1541,10 @@ def _allowed_final_categories(check_types: Sequence[str]) -> tuple[str, ...]:
     return selected or tuple(sorted(supported))
 
 
+def _candidate_stage_settings(settings: Settings) -> Settings:
+    return settings.model_copy(update={"model_max_tokens": settings.candidate_model_max_tokens})
+
+
 def _candidate_format_prompt(allowed_categories: Sequence[str]) -> str:
     return (
         "Normalize and filter the supplied candidate JSONL document.\n"
@@ -1573,13 +1577,14 @@ async def _invoke_candidate_review(
     settings: Settings,
     retry_instruction: str | None,
 ) -> ModelReviewResponse:
+    candidate_settings = _candidate_stage_settings(settings)
     candidate_result = await invoke_model(
         node=node,
         files=files,
-        prompt=_with_rag_context(db, task, prompt, settings, files=files, purpose="candidate"),
+        prompt=_with_rag_context(db, task, prompt, candidate_settings, files=files, purpose="candidate"),
         response_contract=CANDIDATE_RESPONSE_CONTRACT,
         retry_instruction=retry_instruction,
-        settings=settings,
+        settings=candidate_settings,
         response_schema=None,
         response_parser=_parse_candidate_jsonl_response,
     )
@@ -1718,6 +1723,7 @@ async def invoke_selected_model(
         raise ModelInvocationError("review task does not exist")
     prompt = get_active_prompt(db)
     settings = get_settings()
+    candidate_settings = _candidate_stage_settings(settings)
     base_prompt = (
         prompt.body
         if settings.rag_candidate_scan_enabled
@@ -1747,7 +1753,7 @@ async def invoke_selected_model(
 
     should_chunk = _should_chunk(
         task.files,
-        settings,
+        candidate_settings if settings.rag_candidate_scan_enabled else settings,
         prompt=base_prompt,
         response_contract=CANDIDATE_RESPONSE_CONTRACT if settings.rag_candidate_scan_enabled else FINAL_RESPONSE_CONTRACT,
     ) or (len(dispatch_pool.nodes) > 1 and len(task.files) > 1)
@@ -1770,7 +1776,7 @@ async def invoke_selected_model(
             files=dispatch_files,
             prompt=base_prompt,
             retry_instruction=retry_instruction,
-            settings=settings,
+            settings=candidate_settings if settings.rag_candidate_scan_enabled else settings,
             progress_callback=update_chunk_progress,
             batch_prompt_builder=rag_batch_prompt,
             response_contract=CANDIDATE_RESPONSE_CONTRACT if settings.rag_candidate_scan_enabled else FINAL_RESPONSE_CONTRACT,

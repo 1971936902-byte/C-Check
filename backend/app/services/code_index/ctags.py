@@ -116,6 +116,10 @@ def _normalize_kind(value: object) -> str:
         return "macro"
     if normalized in {"struct", "union", "enum", "typedef"}:
         return normalized
-    if normalized in {"variable", "member", "externvar"}:
+    if normalized in {"variable", "externvar"}:
         return "global_variable"
+    if normalized == "member":
+        return "struct_member"
+    if normalized in {"local", "localvariable"}:
+        return "local_variable"
     return normalized or PARSER_VERSION
