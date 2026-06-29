@@ -18,7 +18,9 @@ from app.db.models import CodeChunk, ModelNode, ReviewFile, ReviewTask, TaskStat
 from app.schemas.model_response import (
     COMPACT_MAX_FINDINGS,
     CompactModelReviewResponse,
+    FormattedFindingsResponse,
     ModelReviewResponse,
+    ReviewFinding,
 )
 from app.services.check_types import check_types_prompt
 from app.services.model_output_sanitizer import ModelOutputSanitizer
@@ -37,6 +39,37 @@ CHUNK_PROMPT_CHAR_MARGIN = 512
 CHUNK_LINE_PREFIX_WIDTH = 6
 SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "suggestion": 3}
 MODEL_OUTPUT_SANITIZER = ModelOutputSanitizer()
+
+
+def _normalize_model_contract(value: Any) -> Any:
+    return MODEL_OUTPUT_SANITIZER.sanitize(value)
+
+
+def _normalize_formatted_findings_contract(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(value.get("findings"), list):
+        return {"findings": []}
+    schema_categories = {
+        "buffer_overflow",
+        "pointer_safety",
+        "memory_safety",
+        "resource_leak",
+        "integer_safety",
+        "input_validation",
+        "concurrency",
+        "logic",
+        "other",
+    }
+    findings = []
+    for item in value["findings"][:COMPACT_MAX_FINDINGS]:
+        if not isinstance(item, dict):
+            continue
+        sanitized = MODEL_OUTPUT_SANITIZER._sanitize_finding(item)
+        if sanitized["category"] not in schema_categories:
+            sanitized["category"] = "other"
+        findings.append(sanitized)
+    return {"findings": findings}
+
+
 TOKEN_BUDGET_PATTERN = re.compile(
     r"maximum context length is (?P<context>\d+) tokens and your request has (?P<input>\d+) input tokens",
     re.IGNORECASE,
@@ -47,48 +80,16 @@ VLLM_TOKEN_BUDGET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CANDIDATE_RESPONSE_CONTRACT = """
-Return exactly one compact JSON object. No Markdown.
-Top-level keys: summary, score, findings.
-Use Chinese. Keep summary under 50 Chinese chars.
-This is first-stage candidate discovery, not final vulnerability confirmation.
-Goal: return as many real visible candidate findings as possible from PRIMARY SOURCE.
-Return candidate findings in one flat findings list.
-Do not stop after the first obvious issue.
-Do not perform final high-value filtering in this stage.
-Each finding uses exactly: severity, category, title, description, file_path, line.
-Keep title under 24 Chinese chars. Make it direct and specific.
-Keep description under 140 Chinese chars and explain the concrete trigger or visible consequence.
-The line value must point to the exact visible statement or declaration causing the issue.
-Do not use pure data initializer rows, lookup tables, font/bitmap tables, or comments as finding locations.
-Use lowercase enum values exactly. Use null for line only when no precise line exists.
-Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
-Ignore style, maintainability, performance, compatibility, and portability in default mode.
-Before producing findings, internally cover these categories:
-1. integer_overflow / integer_underflow / truncation / divide_by_zero / unsafe size calculation -> integer_safety;
-2. memcpy/memmove/strcpy bounds issue / fixed-array OOB / heap OOB read-write / malloc(n) then access at [n] -> buffer_overflow;
-3. double_free / use_after_free / dangling pointer / free then access -> memory_safety;
-4. visible unreleased path / overwritten pointer before release / recursive stack exhaustion / unbounded allocation loop -> resource_leak;
-5. proven invalid dereference -> pointer_safety;
-6. external size/index/path without validation -> input_validation;
-7. visible race/deadlock/lock imbalance -> concurrency;
-8. concrete wrong condition/state update with visible consequence -> logic;
-9. a real defect candidate that does not cleanly fit above categories -> other.
-Embedded peripheral registers such as CAN->, DAC->, DMA->, CRC->, RCC-> are fixed mapped hardware registers; do not report them as null pointer issues.
-Do not report vendor assert(IS_xxx(...)) checks as missing validation unless the code still dereferences before that check.
-Scan all visible code for arithmetic/size calculations, copy operations, array indexing, malloc/free lifetime, overwritten pointers, missing release, recursion, and allocation loops before finishing the findings list.
-If different defect categories appear in the same function, report them separately.
-Do not merge double free with use-after-free.
-Do not merge out-of-bounds read with out-of-bounds write.
-Do not merge stack OOB with heap OOB.
-Do not merge one unsafe copy issue with another unsafe copy issue.
-For resource_leak, report it only when PRIMARY SOURCE shows a visible unreleased path, pointer overwrite before release, recursion without a visible bound, or allocation until failure.
-Do not use a normal free/close/unlock statement itself as the leak location.
-For pointer-overwrite leaks, point to the overwrite statement, not to a nearby comment.
-For recursion or allocation-loop exhaustion, use titles like 栈耗尽 or 堆耗尽 and describe exhaustion directly instead of generic leak wording.
-If the visible trigger is a recursive call or allocation loop, do not rewrite it as a copy/buffer-overflow issue unless that same local statement is itself a visible copy or array-access trigger.
-Do not use generic text like "某些条件下可能未正确释放" unless the unreleased path is visible and the specific resource is named.
-PRIMARY SOURCE is the proof standard.
-Definition Context only helps understand unknown symbols. It is not the proof standard and not the line-matching standard.
+Return newline-delimited JSON (JSONL), one candidate object per line. No Markdown, array, wrapper object, summary, or score.
+If no candidate exists, return exactly [].
+Each line uses exactly these short keys: p, l, s, t, d.
+- p: relative source path.
+- l: exact integer source line or null.
+- s: high, medium, low, or suggestion.
+- t: concise free-form defect type.
+- d: one concise Chinese sentence describing the trigger or consequence.
+Format template: {"p":"<relative_path>","l":<line_or_null>,"s":"<severity>","t":"<free_form_type>","d":"<short_chinese_description>"}
+Use one physical output line per candidate. Escape quotes and newlines inside strings.
 """
 
 
@@ -104,6 +105,24 @@ The line value must point to the best executable statement or declaration in PRI
 Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
 If category is uncertain but the defect is real, use other instead of forcing logic.
 PRIMARY SOURCE remains the proof standard; Definition Context is semantic compensation only.
+"""
+
+
+CANDIDATE_FORMAT_CONTRACT = """
+Return exactly one compact JSON object. No Markdown.
+The only top-level key is findings.
+This is JSON document normalization, not vulnerability review.
+Process only the supplied CANDIDATE JSONL records. Do not inspect source code, use RAG, verify vulnerability truth, or invent new findings.
+The output finding count must never exceed the input record count.
+Delete records whose type is outside the ALLOWED FINAL CATEGORIES list in the prompt.
+Delete missing declaration/definition, implicit declaration, unknown type, undefined function, and generic missing-null-check records.
+Delete fixed-mapped peripheral-register null-pointer records and vendor assertion missing-validation records.
+For retained records, only map the free-form type to one allowed category and format fields.
+Preserve the original file path, line, severity, and factual description exactly. Do not expand or reinterpret the vulnerability.
+If a type cannot be mapped to an allowed category, delete the record instead of forcing it into logic or other.
+Each finding uses exactly: severity, category, title, description, file_path, line.
+Allowed schema categories: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
+Do not output remediation, snippets, evidence, confidence, call chains, or extra fields.
 """
 
 # Backward-compatible alias kept for tests and legacy callers that inspect the
@@ -169,7 +188,11 @@ def _input_token_budget(settings: Settings) -> int:
     return max(0, min(settings.model_max_input_tokens, context_budget))
 
 
-def _response_format_overhead(settings: Settings, *, response_schema: type[BaseModel] = CompactModelReviewResponse) -> str:
+def _response_format_overhead(
+    settings: Settings,
+    *,
+    response_schema: type[BaseModel] | None = CompactModelReviewResponse,
+) -> str:
     response_format = _response_format(settings, response_schema=response_schema)
     if response_format is None:
         return ""
@@ -185,7 +208,7 @@ def _strict_prompt(
     if retry_instruction:
         strict_prompt = (
             f"{strict_prompt}\n\nPrevious response was rejected by the backend validator:\n"
-            f"{retry_instruction}\nReturn a corrected JSON object only."
+            f"{retry_instruction}\nReturn corrected output only, following the response contract exactly."
         )
     return strict_prompt
 
@@ -196,15 +219,16 @@ def _input_budget_details(
     files: Sequence[ReviewFile],
     settings: Settings,
     response_contract: str,
-    response_schema: type[BaseModel] = CompactModelReviewResponse,
+    response_schema: type[BaseModel] | None = CompactModelReviewResponse,
     retry_instruction: str | None = None,
+    input_message: str | None = None,
 ) -> tuple[int, int]:
     input_text = "\n\n".join(
         part
         for part in (
             _strict_prompt(prompt, response_contract, retry_instruction),
             _response_format_overhead(settings, response_schema=response_schema),
-            _source_message(files),
+            input_message if input_message is not None else _source_message(files),
         )
         if part
     )
@@ -216,7 +240,7 @@ def _source_char_budget(
     prompt: str,
     settings: Settings,
     response_contract: str,
-    response_schema: type[BaseModel] = CompactModelReviewResponse,
+    response_schema: type[BaseModel] | None = CompactModelReviewResponse,
     retry_instruction: str | None = None,
 ) -> int:
     max_input_chars = int(_input_token_budget(settings) * settings.model_token_chars_per_token)
@@ -491,9 +515,10 @@ def _ensure_input_budget(
     prompt: str,
     files: Sequence[ReviewFile],
     settings: Settings,
-    response_contract: str,
-    response_schema: type[BaseModel] = CompactModelReviewResponse,
+    response_contract: str = FINAL_RESPONSE_CONTRACT,
+    response_schema: type[BaseModel] | None = CompactModelReviewResponse,
     retry_instruction: str | None = None,
+    input_message: str | None = None,
 ) -> None:
     estimated_tokens, budget_tokens = _input_budget_details(
         prompt=prompt,
@@ -502,6 +527,7 @@ def _ensure_input_budget(
         response_contract=response_contract,
         response_schema=response_schema,
         retry_instruction=retry_instruction,
+        input_message=input_message,
     )
     if estimated_tokens <= budget_tokens:
         return
@@ -574,6 +600,11 @@ async def _invoke_chunked_review(
     chunk_max_chars: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     batch_prompt_builder: BatchPromptBuilder | None = None,
+    response_contract: str = FINAL_RESPONSE_CONTRACT,
+    response_schema: type[BaseModel] | None = CompactModelReviewResponse,
+    response_model: type[BaseModel] = ModelReviewResponse,
+    response_normalizer: Callable[[Any], Any] | None = _normalize_model_contract,
+    response_parser: Callable[[dict[str, Any]], BaseModel] | None = None,
 ) -> ModelReviewResponse:
     if chunk_max_chars is not None:
         settings = settings.model_copy(update={"model_chunk_max_chars": chunk_max_chars})
@@ -582,6 +613,7 @@ async def _invoke_chunked_review(
             files,
             settings,
             prompt=prompt,
+            response_contract=response_contract,
             retry_instruction=retry_instruction,
             isolate_chunks=dispatch_pool is not None and len(dispatch_pool.nodes) > 1,
         )
@@ -645,7 +677,14 @@ async def _invoke_chunked_review(
                             ),
                             retry_instruction=retry_instruction,
                             settings=settings,
+                            response_contract=response_contract,
+                            response_schema=response_schema,
+                            response_model=response_model,
+                            response_normalizer=response_normalizer,
+                            response_parser=response_parser,
                         )
+                        if not isinstance(result, ModelReviewResponse):
+                            raise ModelInvocationError("candidate batch returned an unexpected response type")
                         return index, result
                     except ModelInvocationError as exc:
                         last_error = exc
@@ -831,10 +870,6 @@ def _category_from_text(value: str) -> str | None:
     return None
 
 
-def _normalize_model_contract(value: Any) -> Any:
-    return MODEL_OUTPUT_SANITIZER.sanitize(value)
-
-
 def _parse_typed_response(
     payload: dict[str, Any],
     *,
@@ -865,8 +900,85 @@ def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
     )
 
 
-def _response_format(settings: Settings, *, response_schema: type[BaseModel] = CompactModelReviewResponse) -> dict[str, Any] | None:
-    if not settings.model_structured_outputs_enabled:
+def _candidate_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    raw_type = value.get("t", value.get("type", value.get("category", "other")))
+    description = value.get("d", value.get("description", value.get("title", raw_type)))
+    return {
+        "severity": value.get("s", value.get("severity", "low")),
+        "category": raw_type,
+        "title": raw_type or description or "候选问题",
+        "description": description or raw_type or "模型发现的候选问题",
+        "file_path": value.get("p", value.get("file", value.get("file_path", "unknown.c"))),
+        "line": value.get("l", value.get("line")),
+    }
+
+
+def _candidate_objects_from_content(content: str) -> list[dict[str, Any]]:
+    stripped = _strip_code_fence(content).strip()
+    if not stripped or stripped in {"[]", "null", "NONE", "none"}:
+        return []
+
+    try:
+        whole = json.loads(stripped)
+    except json.JSONDecodeError:
+        whole = None
+    if isinstance(whole, list):
+        return [item for item in whole if isinstance(item, dict)]
+    if isinstance(whole, dict):
+        findings = whole.get("findings")
+        if isinstance(findings, list):
+            return [item for item in findings if isinstance(item, dict)]
+        if any(key in whole for key in ("p", "file", "file_path")):
+            return [whole]
+
+    candidates: list[dict[str, Any]] = []
+    for raw_line in stripped.splitlines():
+        line = raw_line.strip().lstrip("- ")
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            candidates.append(value)
+    return candidates
+
+
+def _score_for_findings(findings: Sequence[ReviewFinding]) -> float:
+    penalty = {"high": 20, "medium": 10, "low": 3, "suggestion": 1}
+    return float(max(0, 100 - sum(penalty.get(finding.severity.value, 1) for finding in findings)))
+
+
+def _parse_candidate_jsonl_response(payload: dict[str, Any]) -> ModelReviewResponse:
+    content: str | None = None
+    try:
+        content = payload["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise TypeError("assistant content is not text")
+        objects = _candidate_objects_from_content(content)
+        if not objects and _strip_code_fence(content).strip() not in {"", "[]", "null", "NONE", "none"}:
+            raise ValueError("no complete JSONL candidate row was found")
+        findings = [
+            ReviewFinding.model_validate(MODEL_OUTPUT_SANITIZER._sanitize_finding(_candidate_mapping(item)))
+            for item in objects[:COMPACT_MAX_FINDINGS]
+        ]
+        summary = f"第一阶段发现 {len(findings)} 个候选问题。" if findings else "第一阶段未发现候选问题。"
+        return ModelReviewResponse(summary=summary, score=_score_for_findings(findings), findings=findings)
+    except (KeyError, IndexError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
+        raise ModelInvocationError(
+            "model returned an invalid candidate JSONL response",
+            raw_response=content or json.dumps(payload, ensure_ascii=False),
+            details=str(exc),
+        ) from exc
+
+
+def _response_format(
+    settings: Settings,
+    *,
+    response_schema: type[BaseModel] | None = CompactModelReviewResponse,
+) -> dict[str, Any] | None:
+    if not settings.model_structured_outputs_enabled or response_schema is None:
         return None
     return {
         "type": "json_schema",
@@ -907,9 +1019,11 @@ async def invoke_model(
     response_contract: str = FINAL_RESPONSE_CONTRACT,
     retry_instruction: str | None = None,
     settings: Settings | None = None,
-    response_schema: type[BaseModel] = CompactModelReviewResponse,
+    response_schema: type[BaseModel] | None = CompactModelReviewResponse,
     response_model: type[BaseModel] = ModelReviewResponse,
     response_normalizer: Callable[[Any], Any] | None = _normalize_model_contract,
+    response_parser: Callable[[dict[str, Any]], BaseModel] | None = None,
+    input_message: str | None = None,
 ) -> BaseModel:
     settings = settings or get_settings()
     if not node.is_enabled:
@@ -929,13 +1043,14 @@ async def invoke_model(
         response_contract=response_contract,
         response_schema=response_schema,
         retry_instruction=retry_instruction,
+        input_message=input_message,
     )
     strict_prompt = _strict_prompt(prompt, response_contract, retry_instruction)
     body = {
         "model": node.model_identifier,
         "messages": [
             {"role": "system", "content": strict_prompt},
-            {"role": "user", "content": _source_message(files)},
+            {"role": "user", "content": input_message if input_message is not None else _source_message(files)},
         ],
         "temperature": 0,
         "max_tokens": settings.model_max_tokens,
@@ -976,6 +1091,8 @@ async def invoke_model(
         raise
     except (httpx.HTTPError, ValueError) as exc:
         raise ModelInvocationError("selected model node is unavailable", details=str(exc)) from exc
+    if response_parser is not None:
+        return response_parser(payload)
     return _parse_typed_response(payload, response_model=response_model, normalizer=response_normalizer)
 
 
@@ -1193,10 +1310,28 @@ def _refine_candidate_line(files: Sequence[ReviewFile], finding, *, radius: int 
         return None
     source = _review_file_by_path(files, finding.file_path)
     if source is None:
-        return finding.line
+        return None
     lines = source.source_text.splitlines()
     if finding.line < 1 or finding.line > len(lines):
-        return finding.line
+        best_line: int | None = None
+        best_score = -10.0
+        for candidate_line, line_text in enumerate(lines, start=1):
+            score = _candidate_line_anchor_score(line_text, finding)
+            if score > best_score:
+                best_line = candidate_line
+                best_score = score
+        return best_line if best_score >= 3.0 else None
+
+    finding_text = _candidate_text(finding)
+    current_line = lines[finding.line - 1].strip().lower()
+    if (
+        finding.category.value == "memory_safety"
+        and current_line.startswith("free(")
+        and any(token in finding_text for token in ("use_after_free", "use-after-free", "释放后", "继续使用", "继续访问"))
+    ):
+        for candidate_line in range(finding.line + 1, min(len(lines), finding.line + radius) + 1):
+            if _line_has_actionable_c_anchor(lines[candidate_line - 1]) and not lines[candidate_line - 1].strip().lower().startswith("free("):
+                return candidate_line
     current_score = _candidate_line_anchor_score(lines[finding.line - 1], finding)
     if current_score >= 4.5:
         return finding.line
@@ -1275,6 +1410,155 @@ def _dedupe_final_findings(findings: Sequence) -> list:
     return deduped
 
 
+_COMPILATION_ONLY_PATTERNS = (
+    "missing declaration",
+    "missing definition",
+    "implicit declaration",
+    "undefined function",
+    "undefined symbol",
+    "unknown type",
+    "未定义函数",
+    "函数未定义",
+    "缺少声明",
+    "缺少定义",
+    "隐式声明",
+    "未知类型",
+    "找不到声明",
+    "找不到定义",
+)
+_GENERIC_NULL_CHECK_PATTERNS = (
+    "missing null check",
+    "missing nullptr check",
+    "lack of null check",
+    "缺少空指针检查",
+    "未检查空指针",
+    "未进行空指针",
+    "没有进行null",
+    "未校验null",
+    "未判断null",
+)
+_PERIPHERAL_REGISTER_PATTERN = re.compile(
+    r"\b(?:CAN|DAC|DMA\d?|CRC|DBGMCU|RCC|GPIO[A-Z]?|USART\d?|UART\d?|SPI\d?|I2C\d?|TIM\d?|ADC\d?)\s*->",
+    re.IGNORECASE,
+)
+_NULL_POINTER_PATTERN = re.compile(r"空指针|null\s*pointer|nullptr", re.IGNORECASE)
+_VENDOR_ASSERT_PATTERN = re.compile(r"\b(?:assert|IS_[A-Za-z0-9_]+)\b", re.IGNORECASE)
+_MISSING_VALIDATION_PATTERN = re.compile(r"缺少.*(?:校验|检查)|未.*(?:校验|检查)|missing.*(?:validation|check)", re.IGNORECASE)
+
+
+def _is_generic_null_check_candidate(finding: ReviewFinding, line_text: str) -> bool:
+    text = _candidate_text(finding)
+    return any(pattern in text for pattern in _GENERIC_NULL_CHECK_PATTERNS)
+
+
+def _filter_candidate_findings(
+    files: Sequence[ReviewFile],
+    candidates: Sequence[ReviewFinding],
+) -> tuple[list[ReviewFinding], dict[str, int]]:
+    kept: list[ReviewFinding] = []
+    rejected = {
+        "unknown_source": 0,
+        "unanchored": 0,
+        "compilation_only": 0,
+        "generic_null_check": 0,
+        "peripheral_null_pointer": 0,
+        "vendor_assert_validation": 0,
+        "out_of_scope_category": 0,
+    }
+    for finding in candidates:
+        candidate_text = _candidate_text(finding)
+        if any(pattern in candidate_text for pattern in _COMPILATION_ONLY_PATTERNS):
+            rejected["compilation_only"] += 1
+            continue
+        if _is_generic_null_check_candidate(finding, ""):
+            rejected["generic_null_check"] += 1
+            continue
+        source = _review_file_by_path(files, finding.file_path)
+        if source is None:
+            rejected["unknown_source"] += 1
+            continue
+        refined_line = _refine_candidate_line(files, finding)
+        lines = source.source_text.splitlines()
+        if refined_line is None or refined_line < 1 or refined_line > len(lines):
+            rejected["unanchored"] += 1
+            continue
+        line_text = lines[refined_line - 1]
+        if not _line_has_actionable_c_anchor(line_text):
+            rejected["unanchored"] += 1
+            continue
+        combined_text = f"{candidate_text}\n{line_text}"
+        if _NULL_POINTER_PATTERN.search(candidate_text) and _PERIPHERAL_REGISTER_PATTERN.search(combined_text):
+            rejected["peripheral_null_pointer"] += 1
+            continue
+        if _MISSING_VALIDATION_PATTERN.search(candidate_text) and _VENDOR_ASSERT_PATTERN.search(combined_text):
+            rejected["vendor_assert_validation"] += 1
+            continue
+        if finding.category.value in {"style", "maintainability", "performance", "compatibility", "portability"}:
+            rejected["out_of_scope_category"] += 1
+            continue
+        kept.append(
+            finding.model_copy(
+                update={"file_path": source.relative_path, "line": refined_line}
+            )
+        )
+    return _dedupe_final_findings(kept), rejected
+
+
+def _candidate_jsonl(findings: Sequence[ReviewFinding]) -> str:
+    return "\n".join(
+        json.dumps(
+            {
+                "p": finding.file_path,
+                "l": finding.line,
+                "s": finding.severity.value,
+                "t": finding.title,
+                "d": finding.description,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        for finding in findings
+    )
+
+
+def _allowed_final_categories(check_types: Sequence[str]) -> tuple[str, ...]:
+    supported = {
+        "buffer_overflow",
+        "pointer_safety",
+        "memory_safety",
+        "resource_leak",
+        "integer_safety",
+        "input_validation",
+        "concurrency",
+        "logic",
+        "other",
+    }
+    selected = tuple(item for item in check_types if item in supported)
+    return selected or tuple(sorted(supported))
+
+
+def _candidate_format_prompt(allowed_categories: Sequence[str]) -> str:
+    return (
+        "Normalize and filter the supplied candidate JSONL document.\n"
+        f"ALLOWED FINAL CATEGORIES: {', '.join(allowed_categories)}.\n"
+        "The input contains candidate records only. Preserve their factual text and locations; "
+        "remove disallowed or compilation-only records and return the strict final JSON object."
+    )
+
+
+def _candidate_jsonl_batches(candidate_jsonl: str, batch_size: int) -> list[str]:
+    rows = [line for line in candidate_jsonl.splitlines() if line.strip()]
+    return ["\n".join(rows[index : index + batch_size]) for index in range(0, len(rows), batch_size)]
+
+
+def _filter_final_categories(
+    findings: Sequence[ReviewFinding],
+    allowed_categories: Sequence[str],
+) -> list[ReviewFinding]:
+    allowed = set(allowed_categories)
+    return [finding for finding in findings if finding.category.value in allowed]
+
+
 async def _invoke_candidate_review(
     *,
     db: Session,
@@ -1292,25 +1576,131 @@ async def _invoke_candidate_review(
         response_contract=CANDIDATE_RESPONSE_CONTRACT,
         retry_instruction=retry_instruction,
         settings=settings,
+        response_schema=None,
+        response_parser=_parse_candidate_jsonl_response,
     )
-    candidates = _normalize_candidate_findings(files, _select_candidate_findings(candidate_result))
-    final_findings = _dedupe_final_findings(candidates)
+    if not isinstance(candidate_result, ModelReviewResponse):
+        raise ModelInvocationError("first-stage candidate scan returned an unexpected response type")
+    return await _finalize_candidate_review(
+        db=db,
+        task=task,
+        node=node,
+        files=files,
+        candidate_result=candidate_result,
+        settings=settings,
+    )
+
+
+async def _format_candidate_jsonl(
+    *,
+    task: ReviewTask,
+    node: ModelNode,
+    candidate_jsonl: str,
+    allowed_categories: Sequence[str],
+    settings: Settings,
+) -> tuple[list[ReviewFinding], int]:
+    if not candidate_jsonl.strip():
+        return [], 0
+
+    formatted: list[ReviewFinding] = []
+    failed_batches = 0
+    for batch in _candidate_jsonl_batches(candidate_jsonl, settings.candidate_format_batch_size):
+        try:
+            formatted_result = await invoke_model(
+                node=node,
+                files=(),
+                prompt=_candidate_format_prompt(allowed_categories),
+                response_contract=CANDIDATE_FORMAT_CONTRACT,
+                settings=settings,
+                response_schema=FormattedFindingsResponse,
+                response_model=FormattedFindingsResponse,
+                response_normalizer=_normalize_formatted_findings_contract,
+                input_message=f"CANDIDATE JSONL DOCUMENT:\n{batch}",
+            )
+        except ModelInvocationError as exc:
+            failed_batches += 1
+            task.model_log = truncate_model_log(
+                "\n".join(
+                    part
+                    for part in (
+                        task.model_log,
+                        f"[CandidateFormat] Model formatting failed; backend fallback used: {exc}",
+                    )
+                    if part
+                )
+            )
+            formatted.extend(
+                _parse_candidate_jsonl_response(
+                    {"choices": [{"message": {"content": batch}}]}
+                ).findings
+            )
+            continue
+        if not isinstance(formatted_result, FormattedFindingsResponse):
+            failed_batches += 1
+            continue
+        formatted.extend(
+            ReviewFinding.model_validate(finding.model_dump(mode="json"))
+            for finding in formatted_result.findings
+        )
+    return formatted, failed_batches
+
+
+async def _finalize_candidate_review(
+    *,
+    db: Session,
+    task: ReviewTask,
+    node: ModelNode,
+    files: Sequence[ReviewFile],
+    candidate_result: ModelReviewResponse,
+    settings: Settings,
+) -> ModelReviewResponse:
+    candidate_jsonl = _candidate_jsonl(_select_candidate_findings(candidate_result))
+    task.candidate_jsonl = candidate_jsonl
+    db.commit()
+    allowed_categories = _allowed_final_categories(task.check_types)
+    formatted, failed_batches = await _format_candidate_jsonl(
+        task=task,
+        node=node,
+        candidate_jsonl=candidate_jsonl,
+        allowed_categories=allowed_categories,
+        settings=settings,
+    )
+    category_filtered = _filter_final_categories(formatted, allowed_categories)
+    final_findings, rejected = _filter_candidate_findings(files, category_filtered)
+    final_findings.sort(
+        key=lambda finding: (
+            SEVERITY_RANK.get(finding.severity.value, 99),
+            finding.file_path,
+            finding.line or 10**9,
+        )
+    )
+    summary = (
+        f"两阶段审查完成，共输出 {len(final_findings)} 个问题。"
+        if final_findings
+        else "两阶段审查完成，未输出符合类型要求的问题。"
+    )
     task.model_log = truncate_model_log(
         "\n\n".join(
             part
             for part in [
                 task.model_log,
                 (
-                    "[CandidateScan] Single-pass review produced "
-                    f"{len(candidate_result.findings)} candidate(s); forwarded {len(candidates)}; "
-                    f"final_after_postprocess={len(final_findings)}."
+                    "[CandidatePipeline] "
+                    f"discovered={len(candidate_result.findings)}; cached_jsonl_rows={len(candidate_result.findings)}; "
+                    f"formatted={len(formatted)}; category_allowed={len(category_filtered)}; "
+                    f"backend_rejected={sum(rejected.values())} {rejected}; "
+                    f"format_failed_batches={failed_batches}; final={len(final_findings)}."
                 ),
             ]
             if part
         )
     )
     db.commit()
-    return candidate_result.model_copy(update={"findings": final_findings})
+    return ModelReviewResponse(
+        summary=summary,
+        score=_score_for_findings(final_findings),
+        findings=final_findings,
+    )
 
 
 async def invoke_selected_model(
@@ -1323,8 +1713,12 @@ async def invoke_selected_model(
     if task is None:
         raise ModelInvocationError("review task does not exist")
     prompt = get_active_prompt(db)
-    base_prompt = f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
     settings = get_settings()
+    base_prompt = (
+        prompt.body
+        if settings.rag_candidate_scan_enabled
+        else f"{prompt.body}\n\n{check_types_prompt(task.check_types)}"
+    )
     dispatch_pool = _review_node_dispatch_pool(db, task.model_node, task=task, settings=settings)
 
     def rag_batch_prompt(
@@ -1333,7 +1727,8 @@ async def invoke_selected_model(
         batch_count: int,
         batch: Sequence[ChunkedReviewFile],
     ) -> str:
-        enriched = _with_rag_context(db, task, prompt_text, settings, files=batch, persist=False, purpose="default")
+        purpose = "candidate" if settings.rag_candidate_scan_enabled else "default"
+        enriched = _with_rag_context(db, task, prompt_text, settings, files=batch, persist=False, purpose=purpose)
         return _batch_prompt(enriched, batch_index, batch_count, batch)
 
     def update_chunk_progress(completed_chunks: int, total_chunks: int) -> None:
@@ -1365,7 +1760,7 @@ async def invoke_selected_model(
 
     if should_chunk:
         dispatch_files: Sequence[ReviewFile] = _rag_review_unit_files(db, task, settings) or task.files
-        return await _invoke_chunked_review(
+        candidate_result = await _invoke_chunked_review(
             node=task.model_node,
             dispatch_pool=dispatch_pool,
             files=dispatch_files,
@@ -1374,7 +1769,20 @@ async def invoke_selected_model(
             settings=settings,
             progress_callback=update_chunk_progress,
             batch_prompt_builder=rag_batch_prompt,
+            response_contract=CANDIDATE_RESPONSE_CONTRACT if settings.rag_candidate_scan_enabled else FINAL_RESPONSE_CONTRACT,
+            response_schema=None if settings.rag_candidate_scan_enabled else CompactModelReviewResponse,
+            response_parser=_parse_candidate_jsonl_response if settings.rag_candidate_scan_enabled else None,
         )
+        if settings.rag_candidate_scan_enabled:
+            return await _finalize_candidate_review(
+                db=db,
+                task=task,
+                node=task.model_node,
+                files=task.files,
+                candidate_result=candidate_result,
+                settings=settings,
+            )
+        return candidate_result
     try:
         return await invoke_model(
             node=task.model_node,

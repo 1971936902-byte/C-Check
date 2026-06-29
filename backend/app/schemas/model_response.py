@@ -82,3 +82,9 @@ class CompactModelReviewResponse(BaseModel):
     summary: str = Field(min_length=1, max_length=120)
     score: float = Field(ge=0, le=100)
     findings: list[CompactReviewFinding] = Field(default_factory=list, max_length=COMPACT_MAX_FINDINGS)
+
+
+class FormattedFindingsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    findings: list[CompactReviewFinding] = Field(default_factory=list, max_length=COMPACT_MAX_FINDINGS)

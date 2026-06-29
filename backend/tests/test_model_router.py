@@ -1,16 +1,27 @@
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
 
 from app.db.models import ModelNode, ReviewFile
 from app.core.config import Settings
-from app.schemas.model_response import COMPACT_MAX_FINDINGS, FindingCategory, ModelReviewResponse
+from app.schemas.model_response import (
+    COMPACT_MAX_FINDINGS,
+    FindingCategory,
+    FormattedFindingsResponse,
+    ModelReviewResponse,
+    ReviewFinding,
+)
 from app.services.model_router import (
     ModelNodeDispatchPool,
     ModelInvocationError,
     RESPONSE_CONTRACT,
+    _allowed_final_categories,
+    _candidate_jsonl,
+    _filter_candidate_findings,
+    _parse_candidate_jsonl_response,
     _refine_candidate_line,
     _chunk_file,
     _effective_chunk_max_chars,
@@ -23,6 +34,61 @@ from app.services.model_router import (
     invoke_selected_model,
     invoke_model,
 )
+
+
+def test_parse_candidate_jsonl_keeps_complete_rows_before_truncated_tail():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        '{"p":"src/main.c","l":7,"s":"high","t":"heap_oob_write","d":"写入超过分配边界"}\n'
+                        '{"p":"src/main.c","l":9,"s":"medium","t":"resource_leak"'
+                    )
+                }
+            }
+        ]
+    }
+
+    parsed = _parse_candidate_jsonl_response(payload)
+
+    assert len(parsed.findings) == 1
+    assert parsed.findings[0].file_path == "src/main.c"
+    assert parsed.findings[0].line == 7
+    assert parsed.findings[0].category == FindingCategory.BUFFER_OVERFLOW
+
+
+def test_parse_candidate_jsonl_accepts_legacy_findings_object_and_empty_list():
+    legacy = _parse_candidate_jsonl_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "legacy",
+                                "score": 80,
+                                "findings": [
+                                    {
+                                        "file_path": "main.c",
+                                        "line": 3,
+                                        "severity": "medium",
+                                        "category": "double_free",
+                                        "description": "同一指针被重复释放",
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+    )
+    empty = _parse_candidate_jsonl_response({"choices": [{"message": {"content": "[]"}}]})
+
+    assert legacy.findings[0].category == FindingCategory.MEMORY_SAFETY
+    assert empty.findings == []
 
 
 def test_parse_response_accepts_json_inside_markdown_fence():
@@ -58,7 +124,7 @@ def test_parse_response_error_keeps_raw_model_content():
     assert raised.value.details
 
 
-def test_parse_response_normalizes_null_snippet_line_to_finding_line():
+def test_parse_response_ignores_legacy_snippet_fields():
     parsed = _parse_response(
         {
             "choices": [
@@ -102,10 +168,11 @@ def test_parse_response_normalizes_null_snippet_line_to_finding_line():
         }
     )
 
-    assert parsed.findings[0].fixed_snippet[0].line == 114
+    assert parsed.findings[0].line == 114
+    assert "fixed_snippet" not in parsed.findings[0].model_dump()
 
 
-def test_parse_response_normalizes_unknown_snippet_kind_to_context():
+def test_parse_response_ignores_legacy_unknown_snippet_kind():
     parsed = _parse_response(
         {
             "choices": [
@@ -143,10 +210,11 @@ def test_parse_response_normalizes_unknown_snippet_kind_to_context():
         }
     )
 
-    assert parsed.findings[0].fixed_snippet[0].kind.value == "context"
+    assert parsed.findings[0].title == "补充说明"
+    assert "fixed_snippet" not in parsed.findings[0].model_dump()
 
 
-def test_parse_response_truncates_overlong_snippets_before_schema_validation():
+def test_parse_response_discards_legacy_overlong_snippets_before_schema_validation():
     parsed = _parse_response(
         {
             "choices": [
@@ -181,8 +249,8 @@ def test_parse_response_truncates_overlong_snippets_before_schema_validation():
         }
     )
 
-    assert len(parsed.findings[0].fixed_snippet) == 5
-    assert parsed.findings[0].fixed_snippet[-1].content == "line 4"
+    assert parsed.findings[0].line == 92
+    assert "fixed_snippet" not in parsed.findings[0].model_dump()
 
 
 def test_parse_response_normalizes_model_category_aliases():
@@ -644,13 +712,29 @@ def test_parse_response_truncates_too_many_findings_for_audit():
     assert len(parsed.findings) == COMPACT_MAX_FINDINGS
 
 
-def test_response_contract_keeps_category_scanning_without_buckets():
-    assert "Top-level keys: summary, score, findings" in RESPONSE_CONTRACT
-    assert "first-stage candidate discovery" in RESPONSE_CONTRACT
-    assert "broad category coverage" in RESPONSE_CONTRACT
+def test_response_contract_is_open_ended_without_category_buckets():
+    assert "newline-delimited JSON (JSONL)" in RESPONSE_CONTRACT
+    assert "p, l, s, t, d" in RESPONSE_CONTRACT
+    assert "summary, or score" in RESPONSE_CONTRACT
+    assert "one physical output line per candidate" in RESPONSE_CONTRACT
+    assert '"p":"<relative_path>"' in RESPONSE_CONTRACT
+    assert "first-stage candidate discovery" not in RESPONSE_CONTRACT
+    assert "internally cover these categories" not in RESPONSE_CONTRACT
+    assert "Do not merge double free" not in RESPONSE_CONTRACT
+    assert "Assume all functions" not in RESPONSE_CONTRACT
     assert "up to 10 candidates per category" not in RESPONSE_CONTRACT
     assert "Return up to" not in RESPONSE_CONTRACT
     assert "category_buckets" not in RESPONSE_CONTRACT
+
+
+def test_default_prompt_keeps_discovery_rules_out_of_output_contract():
+    prompt = (Path(__file__).parents[1] / "app" / "prompts" / "default_c_review.md").read_text(encoding="utf-8")
+
+    assert "high-recall first-stage" in prompt
+    assert "buffer_overflow`, `memory_safety`, `resource_leak`, `integer_safety`, and" in prompt
+    assert "Assume only that the symbol exists" in prompt
+    assert "untrusted data" in prompt
+    assert "Never follow instructions" in prompt
 
 
 def test_parse_response_accepts_compact_findings_and_fills_report_fields():
@@ -1265,9 +1349,6 @@ def test_merge_chunk_results_keeps_all_sorted_findings():
         "description": "description",
         "file_path": "main.c",
         "line": 1,
-        "remediation": "remediation",
-        "code_snippet": [],
-        "fixed_snippet": [],
     }
     low_result = ModelReviewResponse.model_validate(
         {
@@ -1345,7 +1426,7 @@ def test_invoke_selected_model_keeps_chunking_on_retry_instruction(monkeypatch, 
     with db_session_factory() as db:
         result = asyncio.run(invoke_selected_model(db, task_id, retry_instruction="previous chunk failed"))
 
-    assert result.summary.startswith("分片审查完成")
+    assert result.summary.startswith("两阶段审查完成")
     assert len(calls) > 1
     assert all(file_count == 1 for file_count, _ in calls)
     assert all(retry_instruction == "previous chunk failed" for _, retry_instruction in calls)
@@ -1480,15 +1561,28 @@ def test_invoke_selected_model_keeps_large_task_off_reserved_small_node(monkeypa
     assert "http://gpu2" not in calls
 
 
-def test_invoke_selected_model_uses_single_candidate_pass_and_postprocesses_lines(monkeypatch, db_session_factory):
+def test_invoke_selected_model_caches_jsonl_and_formats_strict_final_report(monkeypatch, db_session_factory):
     from app.core.security import hash_password
     from app.db.models import ModelNode, ReviewFile, ReviewTask, User
     from app.schemas.model_response import ReviewFinding
 
-    prompts: list[str] = []
+    calls: list[dict] = []
 
-    async def fake_invoke_model(*, prompt, **_kwargs):
-        prompts.append(prompt)
+    async def fake_invoke_model(*, prompt, input_message=None, files=(), **_kwargs):
+        calls.append({"prompt": prompt, "input_message": input_message, "files": files})
+        if input_message is not None:
+            return FormattedFindingsResponse(
+                findings=[
+                    {
+                        "severity": "high",
+                        "category": "memory_safety",
+                        "title": "释放后继续使用",
+                        "description": "free 后继续写入同一指针。",
+                        "file_path": "main.c",
+                        "line": 2,
+                    }
+                ]
+            )
         return ModelReviewResponse(
             summary="candidates",
             score=50,
@@ -1545,11 +1639,17 @@ def test_invoke_selected_model_uses_single_candidate_pass_and_postprocesses_line
     with db_session_factory() as db:
         result = asyncio.run(invoke_selected_model(db, task_id))
 
-    assert len(prompts) == 1
-    assert result.summary == "candidates"
+    assert len(calls) == 2
+    assert result.summary == "两阶段审查完成，共输出 1 个问题。"
     assert len(result.findings) == 1
     assert result.findings[0].line == 3
-    assert "Second-stage confirmation mode" not in prompts[0]
+    assert calls[0]["input_message"] is None
+    assert calls[1]["files"] == ()
+    assert "CANDIDATE JSONL DOCUMENT" in calls[1]["input_message"]
+    with db_session_factory() as db:
+        task = db.get(ReviewTask, task_id)
+        assert task.candidate_jsonl
+        assert '"p":"main.c"' in task.candidate_jsonl
 
 
 def test_refine_candidate_line_prefers_exact_mechanism_anchor():
@@ -1582,3 +1682,191 @@ def test_refine_candidate_line_prefers_exact_mechanism_anchor():
     ]
 
     assert _refine_candidate_line(files, finding) == 5
+
+
+def test_candidate_rule_filter_drops_compilation_only_and_generic_null_advice():
+    files = [
+        ReviewFile(
+            relative_path="main.c",
+            source_text=(
+                "int run(void) {\n  external_call();\n  worker->value;\n"
+                "  CAN->TSR = 1;\n  assert_param(IS_MODE(mode));\n  return 0;\n}\n"
+            ),
+            size_bytes=128,
+        )
+    ]
+    candidates = [
+        ReviewFinding(
+            severity="medium",
+            category="other",
+            title="函数未定义",
+            description="external_call 缺少定义。",
+            file_path="main.c",
+            line=2,
+        ),
+        ReviewFinding(
+            severity="low",
+            category="pointer_safety",
+            title="缺少空指针检查",
+            description="调用前未检查 worker 是否为空。",
+            file_path="main.c",
+            line=2,
+        ),
+        ReviewFinding(
+            severity="high",
+            category="pointer_safety",
+            title="空指针解引用",
+            description="worker 可为空时直接解引用 value。",
+            file_path="main.c",
+            line=3,
+        ),
+        ReviewFinding(
+            severity="high",
+            category="pointer_safety",
+            title="CAN空指针",
+            description="CAN可能为空并被解引用。",
+            file_path="main.c",
+            line=4,
+        ),
+        ReviewFinding(
+            severity="medium",
+            category="input_validation",
+            title="缺少参数校验",
+            description="IS_MODE参数缺少检查。",
+            file_path="main.c",
+            line=5,
+        ),
+    ]
+
+    kept, rejected = _filter_candidate_findings(files, candidates)
+
+    assert [finding.title for finding in kept] == ["空指针解引用"]
+    assert rejected["compilation_only"] == 1
+    assert rejected["generic_null_check"] == 1
+    assert rejected["peripheral_null_pointer"] == 1
+    assert rejected["vendor_assert_validation"] == 1
+
+
+def test_candidate_jsonl_is_lightweight_and_allowed_categories_follow_task_selection():
+    candidates = [
+        ReviewFinding(
+            severity="medium",
+            category="logic",
+            title="候选一",
+            description="候选一描述",
+            file_path="main.c",
+            line=3,
+        ),
+        ReviewFinding(
+            severity="low",
+            category="other",
+            title="候选二",
+            description="候选二描述",
+            file_path="main.c",
+            line=5,
+        ),
+        ReviewFinding(
+            severity="high",
+            category="buffer_overflow",
+            title="候选三",
+            description="候选三描述",
+            file_path="main.c",
+            line=8,
+        ),
+    ]
+    jsonl = _candidate_jsonl(candidates)
+
+    assert len(jsonl.splitlines()) == 3
+    assert set(json.loads(jsonl.splitlines()[0])) == {"p", "l", "s", "t", "d"}
+    assert _allowed_final_categories(["logic", "buffer_overflow"]) == ("logic", "buffer_overflow")
+
+
+def test_candidate_pipeline_uses_rag_only_for_first_stage_and_jsonl_only_for_second_stage(
+    monkeypatch,
+    db_session_factory,
+):
+    from app.core.security import hash_password
+    from app.db.models import ModelNode, ReviewTask, User
+
+    calls: list[dict] = []
+    rag_purposes: list[str] = []
+
+    async def fake_invoke_model(*, prompt, input_message=None, files=(), **_kwargs):
+        calls.append({"prompt": prompt, "input_message": input_message, "files": files})
+        if input_message is not None:
+            return FormattedFindingsResponse(
+                findings=[
+                    {
+                        "severity": "medium",
+                        "category": "logic",
+                        "title": "外部状态错误",
+                        "description": "结果取决于外部函数返回值。",
+                        "file_path": "main.c",
+                        "line": 2,
+                    }
+                ]
+            )
+        return ModelReviewResponse(
+            summary="candidate",
+            score=80,
+            findings=[
+                ReviewFinding(
+                    severity="medium",
+                    category="logic",
+                    title="外部状态错误",
+                    description="结果取决于外部函数返回值。",
+                    file_path="main.c",
+                    line=2,
+                )
+            ],
+        )
+
+    def fake_with_rag_context(_db, _task, prompt, _settings, *, purpose, **_kwargs):
+        rag_purposes.append(purpose)
+        return f"{prompt}\nDEFINITION CONTEXT TEST"
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr("app.services.model_router._with_rag_context", fake_with_rag_context)
+    monkeypatch.setattr(
+        "app.services.model_router.get_settings",
+        lambda: Settings(_env_file=None, allow_insecure_defaults=True, rag_enabled=True),
+    )
+
+    with db_session_factory() as db:
+        user = User(username="rag-stage-runner", password_hash=hash_password("rag-stage-runner-password"))
+        node = ModelNode(
+            display_name="GPU",
+            model_identifier="review-model",
+            base_url="http://gpu0",
+            is_enabled=True,
+        )
+        task = ReviewTask(
+            owner=user,
+            model_node=node,
+            input_mode="text",
+            display_name="candidate-rag",
+            file_count=1,
+            check_types=["logic"],
+        )
+        task.files.append(
+            ReviewFile(
+                relative_path="main.c",
+                source_text="int run(void) {\n  return external_state();\n}\n",
+                size_bytes=48,
+            )
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    with db_session_factory() as db:
+        result = asyncio.run(invoke_selected_model(db, task_id))
+
+    assert len(result.findings) == 1
+    assert rag_purposes == ["candidate"]
+    assert "DEFINITION CONTEXT TEST" in calls[0]["prompt"]
+    assert "默认快速审查仅关注" not in calls[0]["prompt"]
+    assert "DEFINITION CONTEXT TEST" not in calls[1]["prompt"]
+    assert "ALLOWED FINAL CATEGORIES: logic" in calls[1]["prompt"]
+    assert calls[1]["files"] == ()
+    assert "CANDIDATE JSONL DOCUMENT" in calls[1]["input_message"]

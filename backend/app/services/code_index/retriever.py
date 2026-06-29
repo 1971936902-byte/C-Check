@@ -923,6 +923,11 @@ def _context_from_chunk(chunk: CodeChunk, reason: str, score: float) -> Retrieve
 
 
 def _referenced_symbols(source_text: str) -> set[str]:
+    identifiers = {
+        name
+        for name in _identifiers(source_text)
+        if name not in _COMMON_IDENTIFIERS and not _is_low_value_rag_identifier(name)
+    }
     calls = {
         match.group(1)
         for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", source_text)
@@ -942,7 +947,7 @@ def _referenced_symbols(source_text: str) -> set[str]:
         match.group(1)
         for match in re.finditer(r"(?:->|\.)\s*([A-Za-z_][A-Za-z0-9_]*)", source_text)
     }
-    referenced = (calls | macros | typed_names | casts) - field_names
+    referenced = (identifiers | calls | macros | typed_names | casts) - field_names
     return {
         name
         for name in referenced

@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     rag_on_demand_enabled: bool = True
     rag_review_units_enabled: bool = False
     rag_candidate_scan_enabled: bool = True
+    candidate_format_batch_size: int = Field(default=30, ge=1, le=100)
     rag_observability_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False

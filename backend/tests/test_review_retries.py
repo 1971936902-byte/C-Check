@@ -96,12 +96,6 @@ def test_postprocess_reanchors_finding_from_comment_to_nearby_code(db_session_fa
                     "description": "memcpy 可能写超过 malloc 分配的空间。",
                     "file_path": "snippet.c",
                     "line": 2,
-                    "evidence_ids": [],
-                    "call_chain": [],
-                    "confidence": 0.9,
-                    "remediation": "按目标缓冲区大小限制拷贝长度。",
-                    "code_snippet": [],
-                    "fixed_snippet": [],
                 }
             ],
         }
@@ -113,7 +107,6 @@ def test_postprocess_reanchors_finding_from_comment_to_nearby_code(db_session_fa
 
     assert len(processed.findings) == 1
     assert processed.findings[0].line == 3
-    assert processed.findings[0].code_snippet
 
 
 def test_postprocess_downgrades_null_pointer_findings_to_suggestions(db_session_factory):
@@ -139,12 +132,6 @@ def test_postprocess_downgrades_null_pointer_findings_to_suggestions(db_session_
                     "description": "CAN 指针未初始化可能导致空指针访问。",
                     "file_path": "snippet.c",
                     "line": 2,
-                    "evidence_ids": [],
-                    "call_chain": [],
-                    "confidence": 0.9,
-                    "remediation": "检查 CAN 指针。",
-                    "code_snippet": [],
-                    "fixed_snippet": [],
                 }
             ],
         }
@@ -157,8 +144,7 @@ def test_postprocess_downgrades_null_pointer_findings_to_suggestions(db_session_
     finding = processed.findings[0]
     assert finding.severity == FindingSeverity.SUGGESTION
     assert finding.category == FindingCategory.MAINTAINABILITY
-    assert finding.confidence == 0.45
-    assert "固定映射地址" in finding.remediation
+    assert "固定映射地址" in finding.description
 
 
 def test_run_review_task_reports_audit_failure_after_max_attempts(db_session_factory, monkeypatch):
@@ -199,7 +185,7 @@ def test_run_review_task_reports_audit_failure_after_max_attempts(db_session_fac
     get_settings.cache_clear()
 
 
-def test_run_review_task_fills_missing_code_snippet_from_source(db_session_factory, monkeypatch):
+def test_run_review_task_persists_strict_finding_fields(db_session_factory, monkeypatch):
     from app.core.config import get_settings
     import app.tasks.reviews as review_tasks
     from app.tasks.reviews import run_review_task
@@ -219,9 +205,6 @@ def test_run_review_task_fills_missing_code_snippet_from_source(db_session_facto
                     "description": "目标缓冲区容量固定，写入前未验证长度。",
                     "file_path": "src/lcd.c",
                     "line": 3,
-                    "remediation": "写入前检查长度并限制复制范围。",
-                    "code_snippet": [],
-                    "fixed_snippet": [],
                 }
             ],
         )
@@ -245,8 +228,8 @@ def test_run_review_task_fills_missing_code_snippet_from_source(db_session_facto
     with db_session_factory() as db:
         task = db.get(ReviewTask, task_id)
         finding = task.report.result_json["findings"][0]
-        assert [line["line"] for line in finding["code_snippet"]] == [1, 2, 3, 4]
-        assert any(line["content"] == "    strcpy(name, input);" for line in finding["code_snippet"])
+        assert finding["line"] == 3
+        assert set(finding) == {"severity", "category", "title", "description", "file_path", "line"}
 
     get_settings.cache_clear()
 
@@ -271,9 +254,6 @@ def test_run_review_task_filters_findings_anchored_to_static_data_rows(db_sessio
                     "description": "模型误把静态点阵数据识别为写入。",
                     "file_path": "src/lcd.c",
                     "line": 3,
-                    "remediation": "不应报告静态数据行。",
-                    "code_snippet": [],
-                    "fixed_snippet": [],
                 },
                 {
                     "severity": "high",
@@ -282,9 +262,6 @@ def test_run_review_task_filters_findings_anchored_to_static_data_rows(db_sessio
                     "description": "复制外部输入前未验证目标缓冲区容量。",
                     "file_path": "src/lcd.c",
                     "line": 6,
-                    "remediation": "使用有边界的复制并检查长度。",
-                    "code_snippet": [],
-                    "fixed_snippet": [],
                 },
             ],
         )
@@ -313,6 +290,6 @@ def test_run_review_task_filters_findings_anchored_to_static_data_rows(db_sessio
         findings = task.report.result_json["findings"]
         assert len(findings) == 1
         assert findings[0]["title"] == "未限制字符串复制"
-        assert any(line["content"] == "    strcpy(name, input);" for line in findings[0]["code_snippet"])
+        assert findings[0]["line"] == 6
 
     get_settings.cache_clear()

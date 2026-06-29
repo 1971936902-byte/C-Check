@@ -310,6 +310,7 @@ def run_review_task(task_id: str) -> None:
             task.progress = 10
             task.error_message = None
             task.model_log = None
+            task.candidate_jsonl = None
             task.started_at = datetime.now(timezone.utc)
             if task.report is not None:
                 db.delete(task.report)

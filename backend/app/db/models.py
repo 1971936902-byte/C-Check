@@ -142,6 +142,7 @@ class ReviewTask(TimestampMixin, Base):
     queue_priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)
     model_log: Mapped[str | None] = mapped_column(Text)
+    candidate_jsonl: Mapped[str | None] = mapped_column(Text().with_variant(mysql.LONGTEXT(), "mysql"))
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     file_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     finding_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

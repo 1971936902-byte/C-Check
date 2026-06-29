@@ -336,7 +336,7 @@ def test_default_rag_query_filters_low_value_embedded_identifiers():
     assert not _is_low_value_rag_identifier("helper_copy")
 
 
-def test_invoke_selected_model_adds_rag_context_to_prompt(monkeypatch, db_session_factory):
+def test_invoke_selected_model_adds_definition_context_to_first_stage(monkeypatch, db_session_factory):
     captured_prompts: list[str] = []
 
     async def fake_invoke_model(*, prompt, files, **_kwargs):
@@ -367,13 +367,13 @@ def test_invoke_selected_model_adds_rag_context_to_prompt(monkeypatch, db_sessio
     with db_session_factory() as db:
         result = asyncio.run(invoke_selected_model(db, task_id))
 
-    assert result.summary == "ok"
+    assert result.summary == "两阶段审查完成，未输出符合类型要求的问题。"
     assert captured_prompts
-    assert "Evidence E1" in captured_prompts[0]
+    assert "Definition Context" in captured_prompts[0] or "DEFINITION CONTEXT" in captured_prompts[0]
     assert "MAX_PACKET_SIZE" in captured_prompts[0]
 
 
-def test_chunked_review_adds_batch_specific_missing_symbol_context(monkeypatch, db_session_factory):
+def test_chunked_first_stage_adds_batch_specific_definition_context(monkeypatch, db_session_factory):
     captured_prompts: list[str] = []
 
     async def fake_invoke_model(*, prompt, files, **_kwargs):
@@ -406,13 +406,13 @@ def test_chunked_review_adds_batch_specific_missing_symbol_context(monkeypatch, 
     with db_session_factory() as db:
         result = asyncio.run(invoke_selected_model(db, task_id))
 
-    assert "分片审查完成" in result.summary
+    assert "两阶段审查完成" in result.summary
     assert captured_prompts
-    assert any("REFERENCE CONTEXT" in prompt or "RAG Evidence Context" in prompt for prompt in captured_prompts)
+    assert any("Definition Context" in prompt or "DEFINITION CONTEXT" in prompt for prompt in captured_prompts)
     assert any("helper_copy" in prompt or "MAX_PACKET_SIZE" in prompt for prompt in captured_prompts)
 
 
-def test_postprocess_review_result_removes_invalid_evidence_and_call_chain(db_session):
+def test_postprocess_review_result_accepts_strict_report_fields(db_session):
     from app.tasks.reviews import _postprocess_review_result
 
     task = _make_task()
@@ -435,20 +435,16 @@ def test_postprocess_review_result_removes_invalid_evidence_and_call_chain(db_se
                 description="bad evidence",
                 file_path="src/driver.c",
                 line=3,
-                evidence_ids=["E1", "E999"],
-                call_chain=["missing", "helper_copy"],
-                confidence=0.9,
-                remediation="fix it",
-                code_snippet=[],
-                fixed_snippet=[],
             )
         ],
     )
 
     postprocessed = _postprocess_review_result(task, result)
 
-    assert postprocessed.findings[0].evidence_ids == ["E1"]
-    assert postprocessed.findings[0].call_chain == []
+    assert postprocessed.findings[0].title == "bad evidence"
+    assert set(postprocessed.findings[0].model_dump()) == {
+        "severity", "category", "title", "description", "file_path", "line"
+    }
 
 
 def test_code_index_builds_extended_edges_embeddings_and_review_units(db_session):
