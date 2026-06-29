@@ -123,6 +123,10 @@ If a type cannot be mapped to an allowed category, delete the record instead of 
 Each finding uses exactly: severity, category, title, description, file_path, line.
 Allowed schema categories: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
 Do not output remediation, snippets, evidence, confidence, call chains, or extra fields.
+JSON shape example with one retained record:
+{"findings":[{"severity":"medium","category":"memory_safety","title":"问题标题","description":"问题描述","file_path":"src/example.c","line":42}]}
+If no record remains, return exactly: {"findings":[]}
+The example shows structure only. Use values from the supplied candidate records and the allowed category list.
 """
 
 # Backward-compatible alias kept for tests and legacy callers that inspect the

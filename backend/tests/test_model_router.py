@@ -15,6 +15,7 @@ from app.schemas.model_response import (
     ReviewFinding,
 )
 from app.services.model_router import (
+    CANDIDATE_FORMAT_CONTRACT,
     ModelNodeDispatchPool,
     ModelInvocationError,
     RESPONSE_CONTRACT,
@@ -725,6 +726,13 @@ def test_response_contract_is_open_ended_without_category_buckets():
     assert "up to 10 candidates per category" not in RESPONSE_CONTRACT
     assert "Return up to" not in RESPONSE_CONTRACT
     assert "category_buckets" not in RESPONSE_CONTRACT
+
+
+def test_candidate_format_contract_contains_strict_json_examples():
+    assert '"findings":[{' in CANDIDATE_FORMAT_CONTRACT
+    assert '"category":"memory_safety"' in CANDIDATE_FORMAT_CONTRACT
+    assert '{"findings":[]}' in CANDIDATE_FORMAT_CONTRACT
+    assert "The example shows structure only" in CANDIDATE_FORMAT_CONTRACT
 
 
 def test_default_prompt_keeps_discovery_rules_out_of_output_contract():
