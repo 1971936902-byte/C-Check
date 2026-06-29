@@ -362,6 +362,42 @@ int inspect(int width) {
     assert {"inspect", "width", "size1", "buffer"}.issubset(locally_defined)
 
 
+def test_parser_does_not_treat_type_usage_or_function_call_as_definition_metadata():
+    source = """
+struct sockaddr_in address;
+int configure(void) {
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(31337);
+    return 0;
+}
+"""
+
+    parsed = parse_c_source("src/socket.c", source)
+    symbols = {(symbol.kind, symbol.name) for symbol in parsed.symbols}
+
+    assert ("struct", "sockaddr_in") not in symbols
+    assert ("callback_binding", "htons") not in symbols
+    assert ("callback_binding", "AF_INET") not in symbols
+    assert ("callback_binding", "INADDR_ANY") not in symbols
+
+
+def test_parser_keeps_real_callback_bindings_and_union_definitions():
+    source = """
+union Payload { int value; char bytes[4]; };
+static int handler(void) { return 0; }
+static struct Ops ops = {
+    .open = handler,
+};
+"""
+
+    parsed = parse_c_source("src/ops.c", source)
+    symbols = {(symbol.kind, symbol.name) for symbol in parsed.symbols}
+
+    assert ("union", "Payload") in symbols
+    assert ("callback_binding", "handler") in symbols
+
+
 def test_default_rag_query_filters_low_value_embedded_identifiers():
     assert _is_low_value_rag_identifier("CAN")
     assert _is_low_value_rag_identifier("CAN_TSR_RQCP0")

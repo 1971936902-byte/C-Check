@@ -125,12 +125,22 @@ def parse_with_tree_sitter(relative_path: str, source_text: str):
                     )
                 )
                 current_function = name
-        elif node_type in {"struct_specifier", "type_definition"}:
+        elif node_type in {"struct_specifier", "union_specifier", "enum_specifier", "type_definition"}:
+            if node_type != "type_definition" and node.child_by_field_name("body") is None:
+                for child in getattr(node, "children", []):
+                    visit(child, current_function)
+                return
             name = name_from_declarator(node)
             if name:
+                symbol_kind = {
+                    "struct_specifier": "struct",
+                    "union_specifier": "union",
+                    "enum_specifier": "enum",
+                    "type_definition": "typedef",
+                }[node_type]
                 symbols.append(
                     ParsedSymbol(
-                        kind="struct" if node_type == "struct_specifier" else "typedef",
+                        kind=symbol_kind,
                         name=name,
                         signature=text(node).splitlines()[0].strip(),
                         start_line=start_line,

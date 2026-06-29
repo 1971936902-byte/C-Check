@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 
-PARSER_VERSION = "hybrid-c-parser-v3"
+PARSER_VERSION = "hybrid-c-parser-v5"
 _IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
 _CONTROL_KEYWORDS = {
     "if",
@@ -30,12 +30,16 @@ _GLOBAL_VAR_RE = re.compile(
     rf"^\s*[A-Za-z_][A-Za-z0-9_*\s]*\s+(?P<name>{_IDENTIFIER})\s*(?:=\s*[^;]+)?;"
 )
 _FUNCTION_POINTER_RE = re.compile(rf"^\s*(?:typedef\s+)?[\w\s*]+\(\s*\*\s*(?P<name>{_IDENTIFIER})\s*\)\s*\([^;]*\)\s*;")
-_CALLBACK_BINDING_RE = re.compile(rf"\.\s*(?P<field>{_IDENTIFIER})\s*=\s*&?\s*(?P<target>{_IDENTIFIER})\b")
+_CALLBACK_BINDING_RE = re.compile(
+    rf"(?:->|\.)\s*(?P<field>{_IDENTIFIER})\s*=\s*&?\s*(?P<target>{_IDENTIFIER})\s*(?=[,;}}])"
+)
 _CALL_RE = re.compile(rf"\b(?P<name>{_IDENTIFIER})\s*\(")
 _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"](?P<target>[^>"]+)[>"]')
 _MACRO_RE = re.compile(rf"^\s*#\s*define\s+(?P<name>{_IDENTIFIER})\b")
 _CONDITIONAL_RE = re.compile(rf"^\s*#\s*(?P<directive>if|ifdef|ifndef|elif)\b\s*(?P<expr>.*)")
-_TYPE_RE = re.compile(rf"^\s*(?:typedef\s+)?(?:struct|enum|union)\s+(?P<name>{_IDENTIFIER})\b")
+_TYPE_RE = re.compile(
+    rf"^\s*(?:typedef\s+)?(?P<kind>struct|enum|union)\s+(?P<name>{_IDENTIFIER})\b"
+)
 MAX_REGEX_LINE_LENGTH = 2000
 MAX_FUNCTION_HEADER_LINES = 12
 MAX_FUNCTION_HEADER_LENGTH = 4000
@@ -182,18 +186,27 @@ def _conditional_name(directive: str, expr: str, line_number: int) -> str:
 def _parse_type_symbols(lines: list[str]) -> list[ParsedSymbol]:
     symbols: list[ParsedSymbol] = []
     for line_number, line in enumerate(lines, start=1):
-        match = _TYPE_RE.match(line)
-        if match:
-            symbols.append(
-                ParsedSymbol(
-                    kind="struct" if line.lstrip().startswith("struct") else "type",
-                    name=match.group("name"),
-                    signature=line.strip(),
-                    start_line=line_number,
-                    end_line=line_number,
-                    confidence=0.65,
-                )
+        stripped = _strip_line_comment(line).strip()
+        match = _TYPE_RE.match(stripped)
+        if not match:
+            continue
+        type_kind = match.group("kind")
+        is_definition = "{" in stripped
+        is_forward_declaration = bool(
+            re.fullmatch(rf"(?:typedef\s+)?{type_kind}\s+{re.escape(match.group('name'))}\s*;", stripped)
+        )
+        if not is_definition and not is_forward_declaration:
+            continue
+        symbols.append(
+            ParsedSymbol(
+                kind=type_kind,
+                name=match.group("name"),
+                signature=stripped,
+                start_line=line_number,
+                end_line=line_number,
+                confidence=0.65,
             )
+        )
     return symbols
 
 
@@ -227,7 +240,7 @@ def _parse_callback_binding_symbols(lines: list[str]) -> list[ParsedSymbol]:
             continue
         for match in _CALLBACK_BINDING_RE.finditer(stripped):
             target = match.group("target")
-            if target in _CONTROL_KEYWORDS:
+            if target in _CONTROL_KEYWORDS or target.isupper():
                 continue
             symbols.append(
                 ParsedSymbol(

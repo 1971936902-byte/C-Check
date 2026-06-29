@@ -107,6 +107,7 @@ _SYMBOL_KIND_WEIGHT = {
     "macro": 0.82,
     "type": 0.66,
     "struct": 0.66,
+    "union": 0.66,
     "typedef": 0.66,
     "enum": 0.66,
     "global_variable": 0.52,
@@ -513,9 +514,9 @@ def _definition_symbol_allowed(kind: str) -> bool:
         "type",
         "typedef",
         "struct",
+        "union",
         "enum",
         "global_variable",
-        "callback_binding",
         "function_pointer",
     }
 
@@ -526,11 +527,11 @@ def _definition_chunk_allowed(chunk: CodeChunk, target_paths: set[str]) -> bool:
         "conditional",
         "type",
         "struct",
+        "union",
         "typedef",
         "enum",
         "declaration",
         "function_pointer",
-        "callback_binding",
         "global_variable",
     }
     if chunk.chunk_kind in useful_kinds:
@@ -1035,6 +1036,7 @@ def _missing_symbol_score(kind: str, name: str, file_path: str, target_paths: se
         "type": 4.3,
         "typedef": 4.3,
         "struct": 4.1,
+        "union": 4.1,
         "enum": 4.0,
         "global_variable": 3.9,
         "callback_binding": 3.5,

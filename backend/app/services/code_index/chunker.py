@@ -22,6 +22,7 @@ def build_chunks_for_file(
             "conditional",
             "type",
             "struct",
+            "union",
             "typedef",
             "enum",
             "declaration",
@@ -43,7 +44,7 @@ def _file_summary_chunk(project: CodeProject, code_file: CodeFile, source: Revie
     declarations = [
         symbol.name
         for symbol in parsed.symbols
-        if symbol.kind in {"declaration", "macro", "conditional", "type", "struct", "typedef", "enum", "function_pointer", "callback_binding"}
+        if symbol.kind in {"declaration", "macro", "conditional", "type", "struct", "union", "typedef", "enum", "function_pointer"}
     ][:30]
     includes = [include.target for include in parsed.includes][:30]
     content = "\n".join(
@@ -87,7 +88,7 @@ def _symbol_chunk(
     used_types = sorted(
         symbol_name.name
         for symbol_name in parsed.symbols
-        if symbol_name.kind in {"type", "struct", "typedef", "enum"} and symbol_name.name in content and symbol_name.name != symbol.name
+        if symbol_name.kind in {"type", "struct", "union", "typedef", "enum"} and symbol_name.name in content and symbol_name.name != symbol.name
     )
     used_globals = sorted(
         symbol_name.name

@@ -154,7 +154,7 @@ def build_usage_edges(project: CodeProject, chunk_symbols: list[CodeSymbol], sym
         for target_kinds, edge_type in (
             ({"macro"}, "FUNCTION_USES_MACRO"),
             ({"conditional"}, "FUNCTION_DEPENDS_ON_CONDITION"),
-            ({"struct", "typedef", "enum", "type"}, "FUNCTION_USES_TYPE"),
+            ({"struct", "union", "typedef", "enum", "type"}, "FUNCTION_USES_TYPE"),
             ({"global_variable"}, "FUNCTION_USES_GLOBAL"),
             ({"function_pointer"}, "FUNCTION_USES_CALLBACK"),
         ):

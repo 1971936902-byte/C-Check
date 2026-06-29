@@ -32,7 +32,7 @@ _STOPWORDS = {
     "struct",
     "typedef",
 }
-_HIGH_VALUE_KINDS = {"function", "declaration", "callsite", "macro", "struct", "typedef", "enum", "type"}
+_HIGH_VALUE_KINDS = {"function", "declaration", "callsite", "macro", "struct", "union", "typedef", "enum", "type"}
 
 
 @dataclass(frozen=True)
