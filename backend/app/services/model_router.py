@@ -736,8 +736,9 @@ def truncate_model_log(value: str | None, limit: int = MAX_MODEL_LOG_CHARS) -> s
     return value[:limit] + f"\n... [truncated {len(value) - limit} chars]"
 
 
-def _is_contract_object(value: Any) -> bool:
-    return isinstance(value, dict) and RESPONSE_REQUIRED_KEYS.issubset(value)
+def _is_contract_object(value: Any, required_keys: set[str] | None = None) -> bool:
+    required_keys = RESPONSE_REQUIRED_KEYS if required_keys is None else required_keys
+    return isinstance(value, dict) and required_keys.issubset(value)
 
 
 def _strip_code_fence(content: str) -> str:
@@ -803,7 +804,9 @@ def _recover_truncated_contract(content: str) -> str | None:
     )
 
 
-def _extract_json_object(content: str) -> str:
+def _extract_json_object(content: str, *, required_keys: set[str] | None = None) -> str:
+    required_keys = RESPONSE_REQUIRED_KEYS if required_keys is None else required_keys
+    required_keys_label = ", ".join(sorted(required_keys))
     stripped = _strip_code_fence(content)
     if stripped.startswith("{") and stripped.endswith("}"):
         try:
@@ -811,7 +814,7 @@ def _extract_json_object(content: str) -> str:
         except json.JSONDecodeError:
             pass
         else:
-            if _is_contract_object(parsed):
+            if _is_contract_object(parsed, required_keys):
                 return stripped
 
     found_json_object = False
@@ -824,23 +827,25 @@ def _extract_json_object(content: str) -> str:
         try:
             parsed, end = decoder.raw_decode(stripped[index:])
         except json.JSONDecodeError:
-            if index == 0 and any(f'"{key}"' in stripped for key in RESPONSE_REQUIRED_KEYS):
+            if index == 0 and any(f'"{key}"' in stripped for key in required_keys):
                 found_partial_contract = True
             continue
         if isinstance(parsed, dict):
             found_json_object = True
-            if _is_contract_object(parsed):
+            if _is_contract_object(parsed, required_keys):
                 return stripped[index : index + end]
     if found_partial_contract:
-        recovered = _recover_truncated_contract(stripped)
+        recovered = _recover_truncated_contract(stripped) if required_keys == RESPONSE_REQUIRED_KEYS else None
         if recovered is not None:
             return recovered
         raise ValueError(
-            "model response contains a truncated top-level JSON object; no complete top-level JSON object with summary, score, and findings was found"
+            "model response contains a truncated top-level JSON object; "
+            f"no complete top-level JSON object with {required_keys_label} was found"
         )
     if found_json_object:
         raise ValueError(
-            "model response contains JSON fragments, but no complete top-level JSON object with summary, score, and findings was found"
+            "model response contains JSON fragments, but no complete top-level JSON object "
+            f"with {required_keys_label} was found"
         )
     return stripped
 
@@ -885,7 +890,8 @@ def _parse_typed_response(
         content = payload["choices"][0]["message"]["content"]
         if not isinstance(content, str):
             raise TypeError("assistant content is not text")
-        raw_value = json.loads(_extract_json_object(content))
+        required_keys = set(response_model.model_fields)
+        raw_value = json.loads(_extract_json_object(content, required_keys=required_keys))
         normalized_value = normalizer(raw_value) if normalizer is not None else raw_value
         return response_model.model_validate(normalized_value)
     except (KeyError, IndexError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:

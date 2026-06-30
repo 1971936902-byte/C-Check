@@ -32,6 +32,7 @@ from app.services.model_router import (
     _chunk_review_files,
     _merge_chunk_results,
     _parse_response,
+    _parse_typed_response,
     invoke_selected_model,
     invoke_model,
 )
@@ -123,6 +124,39 @@ def test_parse_response_error_keeps_raw_model_content():
     assert "invalid structured response" in str(raised.value)
     assert raised.value.raw_response == "not valid json"
     assert raised.value.details
+
+
+def test_parse_typed_response_accepts_findings_only_contract():
+    parsed = _parse_typed_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "findings": [
+                                    {
+                                        "severity": "high",
+                                        "category": "buffer_overflow",
+                                        "title": "越界写入",
+                                        "description": "写入长度超过目标缓冲区。",
+                                        "file_path": "main.c",
+                                        "line": 12,
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        },
+        response_model=FormattedFindingsResponse,
+    )
+
+    assert len(parsed.findings) == 1
+    assert parsed.findings[0].file_path == "main.c"
+    assert parsed.findings[0].line == 12
 
 
 def test_parse_response_ignores_legacy_snippet_fields():
