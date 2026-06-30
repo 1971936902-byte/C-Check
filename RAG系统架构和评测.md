@@ -41,10 +41,10 @@ flowchart TD
 | --- | --- | --- |
 | 后端框架 | FastAPI + SQLAlchemy | API、任务、数据库访问 |
 | 数据库 | 当前兼容 SQLite / 生产可用 PostgreSQL | 本地测试用 SQLite，迁移中已包含 PostgreSQL 检索索引 |
-| 代码解析 | 内置轻量 C 解析器 | 当前主力解析器，已支持多行函数头、指针返回、宏修饰函数 |
-| 可选解析增强 | tree-sitter-c | 小文件可用；复杂真实驱动文件可能回退到内置解析器 |
-| 可选符号增强 | universal-ctags | 已有适配和 probe，环境安装后可补充符号 |
-| 向量层 | hashing embedding + Qdrant 适配器 | 当前使用本地 deterministic embedding；Qdrant 在配置后可 upsert/search |
+| 代码解析 | hybrid-c-parser-v9 | 融合轻量解析、tree-sitter-c、universal-ctags 和 libclang |
+| 语义解析增强 | clangd + libclang | 支持声明、定义、类型和源码位置交叉校验 |
+| 符号增强 | tree-sitter-c + universal-ctags | 补充宏、枚举、结构体、声明和函数符号 |
+| 向量层 | Jina Code Embeddings 1.5B + Qdrant | OpenAI 兼容批量 embedding，1536 维语义向量，按项目 payload 过滤 |
 | 检索层 | Graph RAG + 关键词 + 向量 | 图谱关系优先，关键词/向量兜底 |
 | 评估层 | evaluator.py | Recall@K、Precision@K、MRR、Token Waste Ratio |
 | 测试 | PyTest + 服务器 mock 数据 | 覆盖 RAG 单测、真实 RT-Thread drivers 子集测试 |
@@ -58,8 +58,8 @@ flowchart TD
 | `ctags.py` | universal-ctags 符号补充和部署探测 |
 | `chunker.py` | 构建 file_summary、function、function_window、macro、declaration、callsite 等 chunk |
 | `graph_builder.py` | 构建 FILE_CONTAINS_SYMBOL、FUNCTION_CALLS_FUNCTION、SYMBOL_DEFINED_IN 等图谱边 |
-| `embeddings.py` | 生成 deterministic hashing embedding，维护 code_embeddings |
-| `qdrant.py` | Qdrant upsert/search 适配 |
+| `embeddings.py` | 批量调用真实 embedding 服务，严格校验维度并维护 code_embeddings；哈希仅作可配置回退 |
+| `qdrant.py` | Qdrant 建表、维度校验、分批 upsert 和 payload-filtered search |
 | `keyword_search.py` | 标识符 exact / content fallback 检索 |
 | `retriever.py` | Graph RAG、关键词、向量混合检索和二次重排 |
 | `context_builder.py` | 将检索结果保存为 ReviewContext / ReviewEvidence |
@@ -408,12 +408,16 @@ RAG 检索结果会保存为 ReviewContext / ReviewEvidence，并注入模型提
 
 ### 13.6 Qdrant 正式向量检索
 
-当前已有 Qdrant 适配，但评测主要使用本地 hashing embedding。后续可接入真实 embedding：
+已接入 Jina Code Embeddings 1.5B 与 Qdrant 主链路：
 
-- 代码专用 embedding 模型
-- Qdrant payload filter
-- historical finding 相似检索
-- 修复建议相似样例检索
+- embedding 服务通过本机 vLLM 的 OpenAI 兼容 `/v1/embeddings` 提供。
+- passage/query 使用独立前缀，输出统一归一化为 1536 维向量。
+- 索引按项目 `project_id` 做 payload filter，避免跨项目污染。
+- embedding 输入按字符预算截断，防止代码分词后超过模型上下文。
+- Qdrant 每批最多写入 128 点，避免高维向量批量请求超过 HTTP 限制。
+- 模型、维度、后端或集合变化时，embedding signature 会使旧索引失效并重建。
+
+仍待补充 historical finding 与修复样例的独立集合和生命周期策略。
 
 ### 13.7 PostgreSQL 高级检索
 
@@ -457,14 +461,58 @@ RAG 检索结果会保存为 ReviewContext / ReviewEvidence，并注入模型提
 当前主要短板：
 
 - Precision 和 Token Waste Ratio 仍需优化。
-- 缺少 clangd/libclang 语义级解析。
 - 缺少人工金标评估集。
-- 函数指针、ops 表、宏展开、条件编译仍需专门增强。
+- 宏展开和复杂条件编译仍需专门增强。
+- 纯语义查询仍需与关键词、调用距离和文件关系联合重排。
 
 建议下一阶段优先做：
 
-1. clangd/libclang 语义索引。
-2. 人工金标评估集。
-3. evidence 预算分配和去重压缩。
-4. 函数指针 / ops 表图谱建模。
-5. Qdrant 真实 embedding 检索闭环。
+1. 人工金标评估集。
+2. evidence 预算分配和去重压缩。
+3. 宏展开与条件编译双轨索引。
+4. historical finding 相似检索。
+5. 扩大纯语义改写查询集，持续评估 Recall@K 与 MRR。
+
+## 15. 2026-06-30 Jina 1.5B 语义向量升级验证
+
+### 15.1 主要修改
+
+1. 新增 OpenAI 兼容 embedding 批处理、query/passage 前缀、严格维度校验和可控哈希降级。
+2. 索引签名纳入 embedding 后端、模型、维度和 Qdrant 集合，配置变化后不会错误复用旧向量。
+3. 检索候选改为批量生成 passage 向量，避免逐条 HTTP 调用。
+4. 大型数组与常量表仅保存可检索摘要，保留名称、类型、长度、范围与首尾样本，不把完整数据表送入模型。
+5. embedding 文本限制为 16,000 字符，解决长 C 函数在分词后超过 8,192 tokens 的问题。
+6. Qdrant 高维向量按 128 点分批写入，解决 3555 条 1536 维向量单请求过大的问题。
+7. parser、ctags、libclang 与图谱规则继续过滤匿名类型、局部变量伪全局、宽松 callback 绑定和条件边组合爆炸。
+
+### 15.2 Jansson a83a347 指标
+
+测试输入为 Jansson 的 19 个 C/H 文件，共 12,406 行；仅执行解析、切片、建图、embedding、索引和检索，不执行第一、第二阶段 LLM 审查。
+
+| 指标 | 结果 |
+| --- | ---: |
+| 索引总耗时 | 33.568s |
+| 符号 / chunk / 图谱边 | 1995 / 3555 / 8851 |
+| embedding 与 Qdrant 覆盖率 | 100% / 100% |
+| 人工抽样符号召回 | 30/30，100% |
+| ctags 交叉验证召回 | 506/506，100% |
+| 源码位置有效率 | 1388/1392，99.71% |
+| 调用边解析率 | 1301/1487，87.49% |
+| 关键词 Recall@5 | 100% |
+| Jina 向量 Recall@5 | 100% |
+| 旧 128 维哈希向量 Recall@5 | 60% |
+| 无目标函数名的语义改写 Recall@5 / MRR@10 | 80% / 80% |
+| candidate context 构建 | 0.609s，2045 字符，5 条 evidence |
+| chunk token 均值 / P95 / 最大值 | 85.21 / 296 / 7379 |
+
+真实向量基准中 Qdrant Recall@5 相比旧哈希方案提升 40 个百分点。纯语义改写的 5 个查询中有 4 个目标位于第 1 名；未命中的“从内存字符串解析 JSON”被模型优先映射到字符串构造接口，说明生产检索仍应保留关键词、图关系、同文件关系和风险相关性重排。
+
+### 15.3 部署参数
+
+- 审查模型：Qwen2.5-Coder-14B-Instruct，vLLM 显存比例 0.83。
+- embedding 模型：Jina Code Embeddings 1.5B，BF16，vLLM embedding task，显存比例 0.11。
+- embedding 上下文：8192；业务侧输入字符预算：16000；批大小：8。
+- Qdrant 集合：`c_check_code_jina_1_5b_1536`，向量维度 1536。
+- 严格模式：`RAG_EMBEDDING_ALLOW_HASH_FALLBACK=false`。
+
+Jina Code Embeddings 1.5B 当前许可证为 CC-BY-NC-4.0，商业或公司生产环境正式采用前必须单独确认许可条件。

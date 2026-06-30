@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 
-PARSER_VERSION = "hybrid-c-parser-v6"
+PARSER_VERSION = "hybrid-c-parser-v9"
 _IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
 _CONTROL_KEYWORDS = {
     "if",
@@ -31,7 +31,7 @@ _GLOBAL_VAR_RE = re.compile(
 )
 _FUNCTION_POINTER_RE = re.compile(rf"^\s*(?:typedef\s+)?[\w\s*]+\(\s*\*\s*(?P<name>{_IDENTIFIER})\s*\)\s*\([^;]*\)\s*;")
 _CALLBACK_BINDING_RE = re.compile(
-    rf"(?:->|\.)\s*(?P<field>{_IDENTIFIER})\s*=\s*&?\s*(?P<target>{_IDENTIFIER})\s*(?=[,;}}])"
+    rf"^\s*\.\s*(?P<field>{_IDENTIFIER})\s*=\s*&?\s*(?P<target>{_IDENTIFIER})\s*(?=[,}}])"
 )
 _CALL_RE = re.compile(rf"\b(?P<name>{_IDENTIFIER})\s*\(")
 _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"](?P<target>[^>"]+)[>"]')
@@ -157,12 +157,26 @@ def _parse_macro_symbols(lines: list[str]) -> list[ParsedSymbol]:
 
 def _parse_conditional_symbols(lines: list[str]) -> list[ParsedSymbol]:
     symbols: list[ParsedSymbol] = []
+    open_groups: list[list[int]] = []
     for line_number, line in enumerate(lines, start=1):
         match = _CONDITIONAL_RE.match(line)
         if not match:
+            if re.match(r"^\s*#\s*endif\b", line) and open_groups:
+                for symbol_index in open_groups.pop():
+                    symbol = symbols[symbol_index]
+                    symbols[symbol_index] = ParsedSymbol(
+                        kind=symbol.kind,
+                        name=symbol.name,
+                        signature=symbol.signature,
+                        start_line=symbol.start_line,
+                        end_line=line_number,
+                        confidence=symbol.confidence,
+                        source_tool=symbol.source_tool,
+                    )
             continue
         expr = match.group("expr").strip()
-        name = _conditional_name(match.group("directive"), expr, line_number)
+        directive = match.group("directive")
+        name = _conditional_name(directive, expr, line_number)
         symbols.append(
             ParsedSymbol(
                 kind="conditional",
@@ -173,6 +187,23 @@ def _parse_conditional_symbols(lines: list[str]) -> list[ParsedSymbol]:
                 confidence=0.55,
             )
         )
+        symbol_index = len(symbols) - 1
+        if directive in {"if", "ifdef", "ifndef"}:
+            open_groups.append([symbol_index])
+        elif directive == "elif" and open_groups:
+            open_groups[-1].append(symbol_index)
+    for group in open_groups:
+        for symbol_index in group:
+            symbol = symbols[symbol_index]
+            symbols[symbol_index] = ParsedSymbol(
+                kind=symbol.kind,
+                name=symbol.name,
+                signature=symbol.signature,
+                start_line=symbol.start_line,
+                end_line=len(lines),
+                confidence=symbol.confidence,
+                source_tool=symbol.source_tool,
+            )
     return symbols
 
 

@@ -9,6 +9,8 @@ import httpx
 
 from app.core.config import Settings
 
+QDRANT_UPSERT_BATCH_SIZE = 128
+
 
 @dataclass(frozen=True)
 class QdrantPoint:
@@ -35,6 +37,12 @@ class QdrantCodeIndexClient:
         headers = {"api-key": self.api_key} if self.api_key else {}
         payload = {"vectors": {"size": vector_size, "distance": "Cosine"}}
         async with httpx.AsyncClient(timeout=30) as client:
+            current = await client.get(f"{self.url}/collections/{self.collection}", headers=headers)
+            if current.status_code == 200:
+                _validate_collection_dimension(current.json(), vector_size, self.collection)
+                return
+            if current.status_code != 404:
+                current.raise_for_status()
             response = await client.put(
                 f"{self.url}/collections/{self.collection}",
                 headers=headers,
@@ -50,6 +58,12 @@ class QdrantCodeIndexClient:
         headers = {"api-key": self.api_key} if self.api_key else {}
         payload = {"vectors": {"size": vector_size, "distance": "Cosine"}}
         with httpx.Client(timeout=30) as client:
+            current = client.get(f"{self.url}/collections/{self.collection}", headers=headers)
+            if current.status_code == 200:
+                _validate_collection_dimension(current.json(), vector_size, self.collection)
+                return
+            if current.status_code != 404:
+                current.raise_for_status()
             response = client.put(
                 f"{self.url}/collections/{self.collection}",
                 headers=headers,
@@ -64,46 +78,28 @@ class QdrantCodeIndexClient:
             return
         await self.ensure_collection(vector_size=len(points[0].vector))
         headers = {"api-key": self.api_key} if self.api_key else {}
-        payload = {
-            "points": [
-                {
-                    "id": _qdrant_point_id(point.point_id),
-                    "vector": point.vector,
-                    "payload": _qdrant_payload(point),
-                }
-                for point in points
-            ]
-        }
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.put(
-                f"{self.url}/collections/{self.collection}/points",
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
+            for batch in _point_batches(points):
+                response = await client.put(
+                    f"{self.url}/collections/{self.collection}/points",
+                    headers=headers,
+                    json={"points": [_serialize_point(point) for point in batch]},
+                )
+                response.raise_for_status()
 
     def upsert_points_sync(self, points: list[QdrantPoint]) -> None:
         if not self.enabled or not points:
             return
         self.ensure_collection_sync(vector_size=len(points[0].vector))
         headers = {"api-key": self.api_key} if self.api_key else {}
-        payload = {
-            "points": [
-                {
-                    "id": _qdrant_point_id(point.point_id),
-                    "vector": point.vector,
-                    "payload": _qdrant_payload(point),
-                }
-                for point in points
-            ]
-        }
         with httpx.Client(timeout=30) as client:
-            response = client.put(
-                f"{self.url}/collections/{self.collection}/points",
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
+            for batch in _point_batches(points):
+                response = client.put(
+                    f"{self.url}/collections/{self.collection}/points",
+                    headers=headers,
+                    json={"points": [_serialize_point(point) for point in batch]},
+                )
+                response.raise_for_status()
 
     async def search(self, vector: list[float], *, project_id: str, limit: int = 20) -> list[dict[str, Any]]:
         if not self.enabled:
@@ -165,7 +161,34 @@ def _qdrant_point_id(point_id: str) -> str:
         return str(uuid.UUID(bytes=digest[:16], version=5))
 
 
+def _validate_collection_dimension(payload: dict[str, Any], expected: int, collection: str) -> None:
+    vectors = (
+        payload.get("result", {})
+        .get("config", {})
+        .get("params", {})
+        .get("vectors", {})
+    )
+    actual = vectors.get("size") if isinstance(vectors, dict) else None
+    if actual is not None and int(actual) != expected:
+        raise ValueError(
+            f"Qdrant collection {collection!r} has vector size {actual}; expected {expected}. "
+            "Use a new collection name when changing embedding models."
+        )
+
+
 def _qdrant_payload(point: QdrantPoint) -> dict[str, Any]:
     payload = dict(point.payload)
     payload.setdefault("vector_id", point.point_id)
     return payload
+
+
+def _serialize_point(point: QdrantPoint) -> dict[str, Any]:
+    return {
+        "id": _qdrant_point_id(point.point_id),
+        "vector": point.vector,
+        "payload": _qdrant_payload(point),
+    }
+
+
+def _point_batches(points: list[QdrantPoint]) -> list[list[QdrantPoint]]:
+    return [points[start : start + QDRANT_UPSERT_BATCH_SIZE] for start in range(0, len(points), QDRANT_UPSERT_BATCH_SIZE)]

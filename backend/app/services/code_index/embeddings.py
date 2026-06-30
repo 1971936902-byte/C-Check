@@ -39,13 +39,28 @@ def embed_text(text: str, *, dimension: int = DEFAULT_DIMENSION) -> list[float]:
 
 
 def embed_text_with_settings(text: str, settings: Settings | None = None) -> list[float]:
+    return embed_texts_with_settings([text], settings, input_type="query")[0]
+
+
+def embed_texts_with_settings(
+    texts: list[str],
+    settings: Settings | None = None,
+    *,
+    input_type: str = "passage",
+) -> list[list[float]]:
     settings = settings or get_settings()
+    if not texts:
+        return []
     if settings.rag_embedding_backend.lower() in {"openai", "openai-compatible", "http"} and settings.rag_embedding_base_url:
         try:
-            return _embed_text_remote(text, settings)
+            vectors: list[list[float]] = []
+            for start in range(0, len(texts), settings.rag_embedding_batch_size):
+                vectors.extend(_embed_texts_remote(texts[start : start + settings.rag_embedding_batch_size], settings, input_type=input_type))
+            return vectors
         except Exception:
-            return embed_text(text, dimension=settings.rag_embedding_dimension)
-    return embed_text(text, dimension=settings.rag_embedding_dimension)
+            if not settings.rag_embedding_allow_hash_fallback:
+                raise
+    return [embed_text(text, dimension=settings.rag_embedding_dimension) for text in texts]
 
 
 def sync_project_embeddings(
@@ -53,9 +68,10 @@ def sync_project_embeddings(
     project: CodeProject,
     *,
     settings: Settings | None = None,
-    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    embedding_model: str | None = None,
 ) -> list[EmbeddedChunk]:
     settings = settings or get_settings()
+    embedding_model = embedding_model or settings.rag_embedding_model or DEFAULT_EMBEDDING_MODEL
     existing = {
         embedding.chunk_id: embedding
         for embedding in db.scalars(
@@ -65,9 +81,10 @@ def sync_project_embeddings(
             )
         ).all()
     }
+    chunks = list(project.chunks)
+    vectors = embed_texts_with_settings([chunk.content for chunk in chunks], settings, input_type="passage")
     embedded: list[EmbeddedChunk] = []
-    for chunk in project.chunks:
-        vector = embed_text_with_settings(chunk.content, settings)
+    for chunk, vector in zip(chunks, vectors, strict=True):
         vector_hash = _vector_hash(vector)
         vector_id = f"{project.id}:{chunk.id}:{embedding_model}"
         current = existing.get(chunk.id)
@@ -146,11 +163,16 @@ def _tokens(text: str) -> list[str]:
     return [token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*|\d+", text)]
 
 
-def _embed_text_remote(text: str, settings: Settings) -> list[float]:
+def _embed_texts_remote(texts: list[str], settings: Settings, *, input_type: str) -> list[list[float]]:
     headers = {"Content-Type": "application/json"}
     if settings.rag_embedding_api_key:
         headers["Authorization"] = f"Bearer {settings.rag_embedding_api_key}"
-    payload = {"model": settings.rag_embedding_model, "input": text[:16000]}
+    raw_prefix = settings.rag_embedding_query_prefix if input_type == "query" else settings.rag_embedding_passage_prefix
+    prefix = raw_prefix.replace("\\n", "\n")
+    payload = {
+        "model": settings.rag_embedding_model,
+        "input": [f"{prefix}{text}"[: settings.rag_embedding_max_chars] for text in texts],
+    }
     with httpx.Client(timeout=settings.rag_embedding_timeout_seconds) as client:
         response = client.post(
             f"{settings.rag_embedding_base_url.rstrip('/')}/v1/embeddings",
@@ -159,12 +181,22 @@ def _embed_text_remote(text: str, settings: Settings) -> list[float]:
         )
         response.raise_for_status()
         data = response.json()
-    vector = data.get("data", [{}])[0].get("embedding")
-    if not isinstance(vector, list) or not vector:
-        raise ValueError("embedding response missing data[0].embedding")
-    values = [float(item) for item in vector]
-    norm = math.sqrt(sum(value * value for value in values)) or 1.0
-    return [value / norm for value in values]
+    rows = data.get("data")
+    if not isinstance(rows, list) or len(rows) != len(texts):
+        raise ValueError("embedding response row count does not match input")
+    vectors: list[list[float]] = []
+    for row in sorted(rows, key=lambda item: int(item.get("index", 0))):
+        vector = row.get("embedding") if isinstance(row, dict) else None
+        if not isinstance(vector, list) or not vector:
+            raise ValueError("embedding response missing data[].embedding")
+        values = [float(item) for item in vector]
+        if len(values) != settings.rag_embedding_dimension:
+            raise ValueError(
+                f"embedding dimension mismatch: expected {settings.rag_embedding_dimension}, got {len(values)}"
+            )
+        norm = math.sqrt(sum(value * value for value in values)) or 1.0
+        vectors.append([value / norm for value in values])
+    return vectors
 
 
 def _vector_hash(vector: list[float]) -> str:

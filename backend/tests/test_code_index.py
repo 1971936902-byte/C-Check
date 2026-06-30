@@ -3,12 +3,16 @@ import json
 from pathlib import Path
 from time import perf_counter
 
+import pytest
+
 from app.core.config import Settings
 from app.core.security import hash_password
 from app.db.models import CodeChunk, CodeEdge, CodeEmbedding, CodeParseCache, CodeProject, CodeSymbol, ModelNode, ReviewContext, ReviewFile, ReviewTask, User
 from app.schemas.model_response import FindingCategory, FindingSeverity, ReviewFinding
 from app.schemas.model_response import ModelReviewResponse
 from app.services.code_index.context_builder import build_rag_context, render_rag_context
+from app.services.code_index.chunker import _summarize_large_data_initializer
+from app.services.code_index import embeddings as embedding_service
 from app.services.code_index.evaluator import (
     GoldRetrievalCase,
     evaluate_evidence_quality,
@@ -24,6 +28,91 @@ from app.services.code_index.parser import ParsedFile, ParsedSymbol, parse_c_sou
 from app.services.code_index.planner import plan_review_units
 from app.services.code_index.retriever import RetrievedContext, _is_low_value_rag_identifier, _locally_defined_symbols, _prune_ranked_contexts, _qdrant_contexts, _vector_contexts, retrieve_context_diagnostics, retrieve_context_for_files, retrieve_missing_symbol_contexts
 from app.services.model_router import invoke_selected_model
+
+
+def test_large_constant_table_is_reduced_to_searchable_summary():
+    source = "static const unsigned table[500] = {" + ",".join(str(index) for index in range(500)) + "};"
+
+    summary, metadata = _summarize_large_data_initializer("table", source, start_line=10, end_line=40)
+
+    assert "table[500]" in summary
+    assert "<large initializer omitted>" in summary
+    assert "499" not in summary
+    assert metadata["large_data_summary"] is True
+    assert metadata["approximate_items"] == 500
+    assert metadata["source_lines"] == 31
+
+
+def test_remote_embeddings_are_batched_and_do_not_silently_fallback(monkeypatch):
+    calls: list[tuple[list[str], str]] = []
+
+    def fake_remote(texts, settings, *, input_type):
+        calls.append((texts, input_type))
+        return [[1.0] + [0.0] * 15 for _ in texts]
+
+    monkeypatch.setattr(embedding_service, "_embed_texts_remote", fake_remote)
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        rag_embedding_backend="openai-compatible",
+        rag_embedding_base_url="http://embedding",
+        rag_embedding_dimension=16,
+        rag_embedding_batch_size=2,
+        rag_embedding_allow_hash_fallback=False,
+    )
+
+    vectors = embedding_service.embed_texts_with_settings(["a", "b", "c"], settings, input_type="passage")
+
+    assert vectors == [[1.0] + [0.0] * 15] * 3
+    assert calls == [(["a", "b"], "passage"), (["c"], "passage")]
+
+    monkeypatch.setattr(
+        embedding_service,
+        "_embed_texts_remote",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+    with pytest.raises(RuntimeError, match="offline"):
+        embedding_service.embed_texts_with_settings(["code"], settings)
+
+
+def test_remote_embedding_payload_respects_configured_character_budget(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"index": 0, "embedding": [1.0] + [0.0] * 15}]}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, _url, **kwargs):
+            captured.update(kwargs["json"])
+            return FakeResponse()
+
+    monkeypatch.setattr(embedding_service.httpx, "Client", FakeClient)
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        rag_embedding_base_url="http://embedding",
+        rag_embedding_dimension=16,
+        rag_embedding_max_chars=1000,
+        rag_embedding_passage_prefix="passage:\\n",
+    )
+
+    embedding_service._embed_texts_remote(["x" * 2000], settings, input_type="passage")
+
+    assert len(captured["input"][0]) == 1000
+    assert captured["input"][0].startswith("passage:\n")
 
 
 def _make_task() -> ReviewTask:
@@ -369,6 +458,7 @@ int configure(void) {
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(31337);
+    address.port = port;
     return 0;
 }
 """
@@ -380,6 +470,7 @@ int configure(void) {
     assert ("callback_binding", "htons") not in symbols
     assert ("callback_binding", "AF_INET") not in symbols
     assert ("callback_binding", "INADDR_ANY") not in symbols
+    assert ("callback_binding", "port") not in symbols
 
 
 def test_parser_keeps_real_callback_bindings_and_union_definitions():
@@ -585,6 +676,46 @@ def test_parser_indexes_function_pointers_conditionals_and_callback_edges(db_ses
     assert "conditional" in kinds
     assert "FUNCTION_USES_CALLBACK" in edge_types
     assert "FUNCTION_DEPENDS_ON_CONDITION" in edge_types
+
+
+def test_conditional_edges_only_cover_functions_inside_preprocessor_region(db_session):
+    user = User(username="conditional-user", password_hash=hash_password("pw"))
+    node = ModelNode(display_name="RAG node", model_identifier="review-model", base_url="http://model-node", is_enabled=True)
+    task = ReviewTask(
+        owner=user,
+        model_node=node,
+        input_mode="folder",
+        display_name="conditional-scope",
+        file_count=1,
+        check_types=["logic"],
+    )
+    task.files.append(
+        ReviewFile(
+            relative_path="src/conditional.c",
+            source_text=(
+                "#ifdef FEATURE_A\n"
+                "int enabled(void) { return 1; }\n"
+                "#endif\n"
+                "int always(void) { return 0; }\n"
+            ),
+            size_bytes=100,
+        )
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    project = build_code_index(db_session, task, settings=Settings(_env_file=None, allow_insecure_defaults=True))
+    dependency_edges = (
+        db_session.query(CodeEdge)
+        .filter_by(project_id=project.id, edge_type="FUNCTION_DEPENDS_ON_CONDITION")
+        .all()
+    )
+    source_names = {
+        db_session.get(CodeSymbol, edge.source_id).name
+        for edge in dependency_edges
+    }
+
+    assert source_names == {"enabled"}
 
 
 def test_parser_indexes_struct_callback_bindings(db_session):

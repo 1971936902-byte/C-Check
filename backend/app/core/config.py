@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     rag_embedding_model: str = "hashing-code-embedding-v1"
     rag_embedding_dimension: int = Field(default=128, ge=16, le=4096)
     rag_embedding_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    rag_embedding_batch_size: int = Field(default=16, ge=1, le=128)
+    rag_embedding_max_chars: int = Field(default=16000, ge=1000, le=100000)
+    rag_embedding_allow_hash_fallback: bool = True
+    rag_embedding_query_prefix: str = ""
+    rag_embedding_passage_prefix: str = ""
     rag_qdrant_url: str | None = None
     rag_qdrant_api_key: str | None = None
     rag_qdrant_collection: str = "c_check_code_chunks"

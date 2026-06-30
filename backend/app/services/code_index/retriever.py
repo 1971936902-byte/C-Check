@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.models import CodeChunk, CodeEdge, CodeFile, CodeProject, CodeSymbol, ReviewFile, ReviewTask
-from app.services.code_index.embeddings import embed_text_with_settings
+from app.services.code_index.embeddings import embed_text_with_settings, embed_texts_with_settings
 from app.services.code_index.indexer import load_or_build_code_index
 from app.services.code_index.keyword_search import keyword_search_chunks
 from app.services.code_index.qdrant import QdrantCodeIndexClient
@@ -736,12 +736,16 @@ def _vector_contexts(
     query_vector = embed_text_with_settings(source_text, settings)
     source_identifiers = _identifiers(source_text)
     scored: list[tuple[float, CodeChunk]] = []
+    candidates: list[CodeChunk] = []
     for chunk in db.scalars(select(CodeChunk).where(CodeChunk.project_id == project.id)).all():
         if chunk.file.relative_path in target_paths and chunk.chunk_kind in {"function", "file_summary"}:
             continue
         if source_identifiers and not (_identifiers(chunk.content) & source_identifiers):
             continue
-        score = _cosine_similarity(query_vector, embed_text_with_settings(chunk.content, settings))
+        candidates.append(chunk)
+    vectors = embed_texts_with_settings([chunk.content for chunk in candidates], settings, input_type="passage")
+    for chunk, vector in zip(candidates, vectors, strict=True):
+        score = _cosine_similarity(query_vector, vector)
         if score > 0:
             scored.append((score, chunk))
     scored.sort(key=lambda item: item[0], reverse=True)

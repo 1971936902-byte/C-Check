@@ -6,6 +6,9 @@ from app.db.models import CodeChunk, CodeFile, CodeProject, CodeSymbol, ReviewFi
 from app.services.code_index.parser import ParsedFile
 
 
+LARGE_DATA_CHUNK_MAX_CHARS = 8_000
+
+
 def build_chunks_for_file(
     project: CodeProject,
     code_file: CodeFile,
@@ -76,7 +79,8 @@ def _symbol_chunk(
     parsed: ParsedFile,
 ) -> CodeChunk:
     lines = source_text.splitlines()
-    content = "\n".join(lines[symbol.start_line - 1 : symbol.end_line])
+    chunk_end_line = symbol.start_line if symbol.kind == "conditional" else symbol.end_line
+    content = "\n".join(lines[symbol.start_line - 1 : chunk_end_line])
     if not content:
         content = symbol.signature or symbol.name
     called_symbols = sorted({call.callee_name for call in parsed.calls if call.caller_name == symbol.name})
@@ -105,6 +109,14 @@ def _symbol_chunk(
         for symbol_name in parsed.symbols
         if symbol_name.kind == "conditional" and symbol_name.name.split("_", 1)[-1] in content and symbol_name.name != symbol.name
     )
+    large_data_metadata: dict = {}
+    if symbol.kind == "global_variable" and _looks_like_large_data_initializer(content):
+        content, large_data_metadata = _summarize_large_data_initializer(
+            symbol.name,
+            content,
+            start_line=symbol.start_line,
+            end_line=symbol.end_line,
+        )
     return _chunk(
         project,
         code_file,
@@ -112,7 +124,7 @@ def _symbol_chunk(
         symbol.kind,
         symbol.name,
         symbol.start_line,
-        symbol.end_line,
+        chunk_end_line,
         content,
         {
             "symbol_kind": symbol.kind,
@@ -122,9 +134,50 @@ def _symbol_chunk(
             "used_globals": used_globals,
             "used_callbacks": used_callbacks,
             "used_conditionals": used_conditionals,
+            "scope_end_line": symbol.end_line if symbol.kind == "conditional" else None,
             "source_tool": symbol.source_tool,
+            **large_data_metadata,
         },
     )
+
+
+def _looks_like_large_data_initializer(content: str) -> bool:
+    if len(content) <= LARGE_DATA_CHUNK_MAX_CHARS or "=" not in content:
+        return False
+    declaration = content.split("=", 1)[0]
+    return "[" in declaration or "{" in content
+
+
+def _summarize_large_data_initializer(
+    symbol_name: str,
+    content: str,
+    *,
+    start_line: int,
+    end_line: int,
+) -> tuple[str, dict]:
+    declaration = " ".join(content.split("=", 1)[0].split())
+    declaration = f"{declaration} = <large initializer omitted>;"
+    initializer = content.split("=", 1)[1]
+    approximate_items = initializer.count(",") + 1 if initializer.strip() else 0
+    content_digest = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
+    summary = "\n".join(
+        [
+            declaration,
+            (
+                "/* RAG large-data summary: "
+                f"symbol={symbol_name}; lines={start_line}-{end_line}; "
+                f"source_chars={len(content)}; approximate_items={approximate_items}; "
+                f"sha256={content_digest}. */"
+            ),
+        ]
+    )
+    return summary, {
+        "large_data_summary": True,
+        "source_chars": len(content),
+        "source_lines": max(1, end_line - start_line + 1),
+        "approximate_items": approximate_items,
+        "source_content_hash": content_digest,
+    }
 
 
 def _sliding_window_chunks(

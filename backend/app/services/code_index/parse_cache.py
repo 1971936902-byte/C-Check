@@ -14,8 +14,6 @@ def parser_settings_hash(settings: Settings) -> str:
     payload = "|".join(
         [
             PARSER_VERSION,
-            settings.rag_embedding_backend,
-            str(settings.rag_embedding_dimension),
         ]
     )
     return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()

@@ -99,6 +99,8 @@ def parse_with_libclang(relative_path: str, source_text: str):
     def add_symbol(kind: str, cursor, confidence: float) -> None:
         if not cursor.spelling or not is_current_file(cursor):
             return
+        if kind in {"struct", "union", "enum"} and cursor.spelling.startswith("__anon"):
+            return
         start_line = max(1, int(cursor.extent.start.line or cursor.location.line or 1))
         end_line = max(start_line, int(cursor.extent.end.line or start_line))
         key = (kind, cursor.spelling, start_line)

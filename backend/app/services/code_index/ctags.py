@@ -81,6 +81,8 @@ def extract_ctags_symbols(relative_path: str, source_text: str, *, timeout_secon
         name = item.get("name")
         if not isinstance(name, str) or not name:
             continue
+        if name.startswith("__anon"):
+            continue
         line_number = _safe_int(item.get("line")) or 1
         end_line = _safe_int(item.get("end")) or line_number
         kind = _normalize_kind(item.get("kind"))

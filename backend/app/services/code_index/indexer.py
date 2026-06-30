@@ -25,8 +25,14 @@ def build_code_index(
 ) -> CodeProject:
     settings = settings or get_settings()
     source_hash = _task_source_hash(task.files)
+    embedding_signature = _embedding_signature(settings)
     existing = task.code_project
-    if existing and existing.source_hash == source_hash and existing.parser_version == PARSER_VERSION:
+    if (
+        existing
+        and existing.source_hash == source_hash
+        and existing.parser_version == PARSER_VERSION
+        and existing.embedding_backend == embedding_signature
+    ):
         return existing
     if existing:
         db.delete(existing)
@@ -36,7 +42,7 @@ def build_code_index(
         task=task,
         source_hash=source_hash,
         parser_version=PARSER_VERSION,
-        embedding_backend="qdrant" if settings.rag_qdrant_url else None,
+        embedding_backend=embedding_signature,
         stats_json={},
     )
     db.add(project)
@@ -122,14 +128,17 @@ def build_code_index(
             db.add(edge)
             edge_count += 1
 
-    sync_project_embeddings(db, project, settings=settings)
     qdrant_points = 0
     qdrant_error = None
     if settings.rag_qdrant_url:
         try:
             qdrant_points = upsert_project_embeddings_to_qdrant_sync(db, project, settings=settings)
         except Exception as exc:
+            if not settings.rag_embedding_allow_hash_fallback:
+                raise
             qdrant_error = str(exc)
+    else:
+        sync_project_embeddings(db, project, settings=settings)
     stats_json = {
         "files": len(task.files),
         "symbols": symbol_count,
@@ -137,6 +146,9 @@ def build_code_index(
         "edges": edge_count,
         "embeddings": len(project.chunks),
         "qdrant_points": qdrant_points,
+        "embedding_backend": settings.rag_embedding_backend,
+        "embedding_model": settings.rag_embedding_model,
+        "embedding_dimension": settings.rag_embedding_dimension,
         "parse_cache_hits": parse_cache_hits,
         "parse_cache_misses": parse_cache_misses,
         "parser": PARSER_VERSION,
@@ -165,6 +177,18 @@ def _task_source_hash(files: list[ReviewFile]) -> str:
         digest.update(source.source_text.encode("utf-8", errors="ignore"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _embedding_signature(settings: Settings) -> str:
+    payload = "|".join(
+        [
+            settings.rag_embedding_backend,
+            settings.rag_embedding_model,
+            str(settings.rag_embedding_dimension),
+            settings.rag_qdrant_collection,
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:32]
 
 
 def _hash_text(text: str) -> str:

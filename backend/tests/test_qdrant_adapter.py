@@ -1,5 +1,12 @@
 from app.core.config import Settings
-from app.services.code_index.qdrant import QdrantCodeIndexClient, QdrantPoint, _qdrant_payload, _qdrant_point_id
+from app.services.code_index.qdrant import (
+    QDRANT_UPSERT_BATCH_SIZE,
+    QdrantCodeIndexClient,
+    QdrantPoint,
+    _point_batches,
+    _qdrant_payload,
+    _qdrant_point_id,
+)
 
 
 def test_qdrant_point_id_converts_internal_ids_to_stable_uuid():
@@ -32,3 +39,11 @@ def test_qdrant_client_exposes_sync_and_async_search_paths():
 
     assert callable(client.search)
     assert callable(client.search_sync)
+
+
+def test_qdrant_upserts_are_split_into_bounded_batches():
+    points = [QdrantPoint(point_id=str(index), vector=[1.0], payload={}) for index in range(QDRANT_UPSERT_BATCH_SIZE * 2 + 1)]
+
+    batches = _point_batches(points)
+
+    assert [len(batch) for batch in batches] == [QDRANT_UPSERT_BATCH_SIZE, QDRANT_UPSERT_BATCH_SIZE, 1]
