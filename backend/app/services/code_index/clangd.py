@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import shutil
 import json
+import re
 import shlex
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -117,6 +118,17 @@ def parse_with_libclang(relative_path: str, source_text: str):
             )
         )
 
+    def is_real_type_declaration(cursor, keyword: str) -> bool:
+        start_line = max(1, int(cursor.extent.start.line or cursor.location.line or 1))
+        end_line = max(start_line, int(cursor.extent.end.line or start_line))
+        source = "\n".join(source_lines[start_line - 1 : min(end_line, len(source_lines))]).strip()
+        if "{" in source:
+            return True
+        name = cursor.spelling.strip()
+        if not name:
+            return False
+        return bool(re.fullmatch(rf"{keyword}\s+{re.escape(name)}\s*;", source))
+
     def walk(cursor, current_function: str | None = None) -> None:
         kind = cursor.kind
         if kind == cindex.CursorKind.INCLUSION_DIRECTIVE and is_current_file(cursor):
@@ -130,9 +142,23 @@ def parse_with_libclang(relative_path: str, source_text: str):
                 current_function = function_name or current_function
             else:
                 add_symbol("declaration", cursor, 0.9)
-        elif kind == cindex.CursorKind.STRUCT_DECL and is_current_file(cursor):
+        elif (
+            kind == cindex.CursorKind.STRUCT_DECL
+            and is_current_file(cursor)
+            and is_real_type_declaration(cursor, "struct")
+        ):
             add_symbol("struct", cursor, 0.88)
-        elif kind == cindex.CursorKind.ENUM_DECL and is_current_file(cursor):
+        elif (
+            kind == cindex.CursorKind.UNION_DECL
+            and is_current_file(cursor)
+            and is_real_type_declaration(cursor, "union")
+        ):
+            add_symbol("union", cursor, 0.88)
+        elif (
+            kind == cindex.CursorKind.ENUM_DECL
+            and is_current_file(cursor)
+            and is_real_type_declaration(cursor, "enum")
+        ):
             add_symbol("enum", cursor, 0.88)
         elif kind == cindex.CursorKind.TYPEDEF_DECL and is_current_file(cursor):
             add_symbol("typedef", cursor, 0.9)
