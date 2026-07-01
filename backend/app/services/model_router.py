@@ -26,6 +26,7 @@ from app.schemas.model_response import (
 )
 from app.services.check_types import CHECK_TYPE_LABELS, check_types_prompt
 from app.services.model_output_sanitizer import ModelOutputSanitizer
+from app.services.static_c_rules import detect_static_c_findings
 
 
 MAX_MODEL_LOG_CHARS = 12000
@@ -1241,7 +1242,14 @@ def _candidate_text(finding) -> str:
     ).lower()
 
 
+def _strip_comments_and_strings(line: str) -> str:
+    without_line_comment = line.split("//", 1)[0]
+    without_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', without_line_comment)
+    return re.sub(r"'(?:\\.|[^'\\])*'", "''", without_strings)
+
+
 _CANDIDATE_ANCHOR_IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+_C_IDENTIFIER_RE = _CANDIDATE_ANCHOR_IDENTIFIER_RE
 _CANDIDATE_ANCHOR_STOPWORDS = {
     "high",
     "medium",
@@ -1584,6 +1592,7 @@ def _filter_candidate_findings(
         "generic_null_check": 0,
         "peripheral_null_pointer": 0,
         "vendor_assert_validation": 0,
+        "resource_leak_false_positive": 0,
         "out_of_scope_category": 0,
     }
     for finding in candidates:
@@ -1614,12 +1623,96 @@ def _filter_candidate_findings(
         if _MISSING_VALIDATION_PATTERN.search(candidate_text) and _VENDOR_ASSERT_PATTERN.search(combined_text):
             rejected["vendor_assert_validation"] += 1
             continue
+        if finding.category == FindingCategory.RESOURCE_LEAK and _is_resource_leak_false_positive(
+            source,
+            refined_line,
+            finding,
+        ):
+            rejected["resource_leak_false_positive"] += 1
+            continue
         kept.append(
             finding.model_copy(
                 update={"file_path": source.relative_path, "line": refined_line}
             )
         )
     return _dedupe_final_findings(kept), rejected
+
+
+def _is_resource_leak_false_positive(source: ReviewFile, line_number: int, finding: ReviewFinding) -> bool:
+    lines = source.source_text.splitlines()
+    if line_number < 1 or line_number > len(lines):
+        return False
+    line_text = _strip_comments_and_strings(lines[line_number - 1]).strip()
+    candidate_text = _candidate_text(finding).lower()
+    if _is_stack_or_nonowning_resource_line(line_text):
+        return True
+    identifiers = set(_C_IDENTIFIER_RE.findall(line_text)) | set(_C_IDENTIFIER_RE.findall(candidate_text))
+    identifiers -= {
+        "char",
+        "int",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "size_t",
+        "static",
+        "const",
+        "return",
+        "if",
+        "for",
+        "while",
+        "struct",
+    }
+    function_window = _function_window_for_line(lines, line_number)
+    if function_window is None:
+        return False
+    start, end = function_window
+    function_text = "\n".join(lines[start - 1 : end])
+    if identifiers and _has_visible_release_for_any_identifier(function_text, identifiers):
+        if not _has_allocation_after_last_release(function_text, identifiers):
+            return True
+    return False
+
+
+def _is_stack_or_nonowning_resource_line(line_text: str) -> bool:
+    if re.search(r"\b(?:char|int|uint(?:8|16|32|64)_t|size_t|long|short|float|double)\s+\*?\s*[A-Za-z_][A-Za-z0-9_]*\s*\[[^\]]+\]", line_text):
+        return True
+    if re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\[[^\]]+\]\s*(?:=|;|,)", line_text) and not re.search(
+        r"\b(?:malloc|calloc|realloc|fopen|open)\s*\(",
+        line_text,
+    ):
+        return True
+    return False
+
+
+def _has_visible_release_for_any_identifier(function_text: str, identifiers: set[str]) -> bool:
+    for identifier in identifiers:
+        if re.search(rf"\b(?:free|fclose|close|page_mgr_destroy|destroy|release|unlock)\s*\([^;\n]*\b{re.escape(identifier)}\b", function_text):
+            return True
+        if re.search(rf"\b(?:free_string_array)\s*\(\s*{re.escape(identifier)}\s*,", function_text):
+            return True
+    return False
+
+
+def _has_allocation_after_last_release(function_text: str, identifiers: set[str]) -> bool:
+    for identifier in identifiers:
+        releases = [
+            match.start()
+            for match in re.finditer(
+                rf"\b(?:free|fclose|close|page_mgr_destroy|destroy|release|unlock|free_string_array)\s*\([^;\n]*\b{re.escape(identifier)}\b",
+                function_text,
+            )
+        ]
+        if not releases:
+            continue
+        last_release = max(releases)
+        allocations_after = re.search(
+            rf"\b{re.escape(identifier)}\b\s*=\s*(?:malloc|calloc|realloc|fopen|open)\s*\(",
+            function_text[last_release:],
+        )
+        if allocations_after:
+            return True
+    return False
 
 
 def _candidate_jsonl(findings: Sequence[ReviewFinding]) -> str:
@@ -2035,7 +2128,8 @@ async def _finalize_candidate_review(
     )
     formatting_elapsed = perf_counter() - finalize_started
     validation_started = perf_counter()
-    prevalidated, rejected = _filter_candidate_findings(files, formatted)
+    static_findings = detect_static_c_findings(files)
+    prevalidated, rejected = _filter_candidate_findings(files, [*formatted, *static_findings])
     validation_elapsed = perf_counter() - validation_started
     category_started = perf_counter()
     deterministic, unresolved = _partition_category_candidates(prevalidated, allowed_categories)
@@ -2072,7 +2166,8 @@ async def _finalize_candidate_review(
                 (
                     "[CandidatePipeline] "
                     f"discovered={len(candidate_result.findings)}; cached_jsonl_rows={len(candidate_result.findings)}; "
-                    f"formatted={len(formatted)}; category_allowed={len(category_filtered)}; "
+                    f"formatted={len(formatted)}; static_supplemental={len(static_findings)}; "
+                    f"category_allowed={len(category_filtered)}; "
                     f"deterministic={len(deterministic)}; semantic_unresolved={len(unresolved)}; "
                     f"semantic_resolved={len(semantic_resolved)}; semantic_failed_batches={semantic_failed_batches}; "
                     f"backend_rejected={sum(rejected.values())} {rejected}; "

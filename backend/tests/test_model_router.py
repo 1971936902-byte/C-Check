@@ -42,6 +42,7 @@ from app.services.model_router import (
     invoke_selected_model,
     invoke_model,
 )
+from app.services.static_c_rules import detect_static_c_findings
 
 
 def test_parse_candidate_jsonl_keeps_complete_rows_before_truncated_tail():
@@ -1045,6 +1046,87 @@ def test_finding_category_accepts_frontend_check_type_values():
     assert FindingCategory.BUFFER_OVERFLOW.value == "buffer_overflow"
     assert FindingCategory.INTEGER_SAFETY.value == "integer_safety"
     assert FindingCategory.MAINTAINABILITY.value == "maintainability"
+
+
+def test_static_rules_cover_hard_sample_missed_patterns():
+    source = ReviewFile(
+        relative_path="hard_sample.c",
+        source_text="""#include <stdint.h>
+#include <stdlib.h>
+#define STR_SAFE_COPY(dst, src, len) do{ memcpy(dst, src, len); }while(0)
+#define CALC_PAGE_OFFSET(page, per) (page * per)
+typedef struct { char *msg_content; } LogEntry;
+int read_single_line(char* out_buf, uint32_t buf_max) {
+    uint32_t idx = 0;
+    out_buf[idx] = 'A';
+    idx++;
+    if (idx > buf_max) {
+        return 0;
+    }
+    out_buf[idx] = '\\0';
+    return 1;
+}
+void *page_mgr_create(uint32_t page_size) {
+    return malloc(page_size * sizeof(LogEntry));
+}
+void load_log_page(uint32_t target_page) {
+    uint64_t skip_bytes = CALC_PAGE_OFFSET(target_page, 100) * 128;
+}
+void batch_format_output(char *out_export, uint32_t export_max, char *temp_line) {
+    uint32_t write_pos = 0;
+    uint32_t line_len = strlen(temp_line);
+    if (write_pos + line_len > export_max)
+        return;
+    strcpy(out_export + write_pos, temp_line);
+}
+""",
+        size_bytes=800,
+    )
+
+    findings = detect_static_c_findings([source])
+    titles = {finding.title for finding in findings}
+
+    assert "宏参数缺少括号" in titles
+    assert "分配尺寸乘法溢出" in titles
+    assert "结束符二次越界" in titles
+    assert "拷贝边界缺少等号" in titles
+
+
+def test_candidate_filter_drops_stack_and_released_resource_leak_false_positives():
+    source = ReviewFile(
+        relative_path="leak_fp.c",
+        source_text="""void free_string_array(char **arr, unsigned cnt);
+void demo(void) {
+    char export_buf[512];
+    char* parts[4];
+    free_string_array(parts, 4);
+}
+""",
+        size_bytes=160,
+    )
+    findings = [
+        ReviewFinding(
+            severity="medium",
+            category="resource_leak",
+            title="误报栈缓冲区泄漏",
+            description="export_buf 未释放",
+            file_path="leak_fp.c",
+            line=3,
+        ),
+        ReviewFinding(
+            severity="medium",
+            category="resource_leak",
+            title="误报数组泄漏",
+            description="parts 未释放",
+            file_path="leak_fp.c",
+            line=4,
+        ),
+    ]
+
+    kept, rejected = _filter_candidate_findings([source], findings)
+
+    assert kept == []
+    assert rejected["resource_leak_false_positive"] == 2
 
 
 def test_chunk_file_preserves_original_line_numbers():
