@@ -16,7 +16,8 @@ def test_validate_check_types_rejects_empty_or_unknown_dimensions():
 
 
 def test_check_types_prompt_lists_selected_dimensions():
-    prompt = check_types_prompt(["memory_safety", "logic"])
+    prompt = check_types_prompt(["memory_safety", "logic", "performance"])
     assert "内存安全" in prompt
     assert "逻辑错误" in prompt
+    assert "性能隐患" in prompt
     assert len(ALL_CHECK_TYPES) >= 10

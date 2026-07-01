@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     rag_candidate_scan_enabled: bool = True
     candidate_format_batch_size: int = Field(default=10, ge=1, le=100)
     candidate_format_model_enabled: bool = True
+    candidate_semantic_fallback_enabled: bool = True
+    candidate_semantic_batch_size: int = Field(default=12, ge=1, le=50)
+    candidate_semantic_max_tokens: int = Field(default=384, ge=128, le=4096)
     rag_observability_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False

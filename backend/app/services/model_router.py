@@ -4,9 +4,10 @@ import json
 import math
 import re
 import asyncio
+from time import perf_counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -19,10 +20,11 @@ from app.schemas.model_response import (
     COMPACT_MAX_FINDINGS,
     CompactModelReviewResponse,
     FormattedFindingsResponse,
+    FindingCategory,
     ModelReviewResponse,
     ReviewFinding,
 )
-from app.services.check_types import check_types_prompt
+from app.services.check_types import CHECK_TYPE_LABELS, check_types_prompt
 from app.services.model_output_sanitizer import ModelOutputSanitizer
 
 
@@ -129,6 +131,14 @@ If no record remains, return exactly: {"findings":[]}
 The example shows structure only. Use values from the supplied candidate records and the allowed category list.
 """
 
+SEMANTIC_CATEGORY_RESPONSE_CONTRACT = """
+Return JSONL only, one decision per input candidate. No Markdown or wrapper object.
+Each line must be: {"i":<candidate_id>,"a":"drop|correct","c":"<selected_category_or_null>"}
+Use correct only when the candidate is a concrete defect whose semantics genuinely match one of the SELECTED CATEGORIES.
+Use drop when the candidate does not match any selected category, is only compilation advice, or lacks a concrete defect.
+Do not change or reproduce file paths, line numbers, severity, titles, descriptions, or source code.
+"""
+
 # Backward-compatible alias kept for tests and legacy callers that inspect the
 # first-stage contract text directly.
 RESPONSE_CONTRACT = CANDIDATE_RESPONSE_CONTRACT
@@ -168,6 +178,16 @@ class ModelNodeDispatchPool:
 class ModelInvocationResult:
     value: BaseModel
     finish_reason: str | None
+
+
+class CandidateCategoryDecision(BaseModel):
+    i: int
+    a: Literal["drop", "correct"]
+    c: str | None = None
+
+
+class CandidateCategoryDecisionResponse(BaseModel):
+    decisions: list[CandidateCategoryDecision]
 
 
 def _mock_response(files: Sequence[ReviewFile]) -> ModelReviewResponse:
@@ -937,9 +957,10 @@ def _parse_response(payload: dict[str, Any]) -> ModelReviewResponse:
 
 
 def _candidate_mapping(value: dict[str, Any]) -> dict[str, Any]:
-    raw_type = value.get("t", value.get("type", value.get("category", "other")))
+    raw_type = value.get("c", value.get("category", value.get("t", value.get("type", "other"))))
+    raw_title = value.get("t", value.get("title", raw_type))
     description = value.get("d", value.get("description", value.get("title", raw_type)))
-    return {
+    result = {
         "severity": value.get("s", value.get("severity", "low")),
         "category": raw_type,
         "title": raw_type or description or "候选问题",
@@ -947,6 +968,8 @@ def _candidate_mapping(value: dict[str, Any]) -> dict[str, Any]:
         "file_path": value.get("p", value.get("file", value.get("file_path", "unknown.c"))),
         "line": value.get("l", value.get("line")),
     }
+    result["title"] = raw_title or raw_type or description
+    return result
 
 
 def _candidate_objects_from_content(content: str) -> list[dict[str, Any]]:
@@ -1407,28 +1430,46 @@ def _refine_candidate_line(files: Sequence[ReviewFile], finding, *, radius: int 
     if best_score >= 3.0:
         return best_line
 
-    for candidate_line in range(1, len(lines) + 1):
-        score = _candidate_line_anchor_score(lines[candidate_line - 1], finding)
-        if score > best_score:
-            best_score = score
-            best_line = candidate_line
-
-    if best_score >= 3.0:
-        return best_line
-
-    if _line_matches_candidate_trigger(lines[finding.line - 1], finding):
+    if _line_has_actionable_c_anchor(lines[finding.line - 1]) and _line_matches_candidate_trigger(
+        lines[finding.line - 1], finding
+    ):
         return finding.line
     for distance in range(1, radius + 1):
         for candidate_line in (finding.line - distance, finding.line + distance):
             if candidate_line < start or candidate_line > end:
                 continue
-            if _line_matches_candidate_trigger(lines[candidate_line - 1], finding):
+            if _line_has_actionable_c_anchor(lines[candidate_line - 1]) and _line_matches_candidate_trigger(
+                lines[candidate_line - 1], finding
+            ):
                 return candidate_line
     if function_window is not None:
         for candidate_line in range(function_window[0], function_window[1] + 1):
-            if _line_matches_candidate_trigger(lines[candidate_line - 1], finding):
+            if _line_has_actionable_c_anchor(lines[candidate_line - 1]) and _line_matches_candidate_trigger(
+                lines[candidate_line - 1], finding
+            ):
                 return candidate_line
-    return finding.line
+
+    # Models frequently point at a comment immediately before the faulty
+    # statement. Keep in-range relocation local so repeated defects are not
+    # pulled onto one unrelated high-scoring line elsewhere in the file.
+    local_actionable: list[tuple[int, int, int]] = []
+    for candidate_line in range(start, end + 1):
+        if not _line_has_actionable_c_anchor(lines[candidate_line - 1]):
+            continue
+        distance = abs(candidate_line - finding.line)
+        direction_penalty = 0 if candidate_line >= finding.line else 1
+        local_actionable.append((distance, direction_penalty, candidate_line))
+    if local_actionable:
+        return min(local_actionable)[2]
+    if function_window is not None:
+        function_actionable = [
+            candidate_line
+            for candidate_line in range(function_window[0], function_window[1] + 1)
+            if _line_has_actionable_c_anchor(lines[candidate_line - 1])
+        ]
+        if function_actionable:
+            return min(function_actionable, key=lambda line: (abs(line - finding.line), line < finding.line, line))
+    return None
 
 
 def _normalize_candidate_findings(files: Sequence[ReviewFile], candidates: Sequence) -> list:
@@ -1451,6 +1492,24 @@ def _dedupe_final_findings(findings: Sequence) -> list:
             finding.category.value,
             finding.line,
             finding.title.strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(finding)
+    return deduped
+
+
+def _dedupe_candidate_findings(findings: Sequence[ReviewFinding]) -> list[ReviewFinding]:
+    deduped: list[ReviewFinding] = []
+    seen: set[tuple[str, int | None, str, str, str]] = set()
+    for finding in findings:
+        key = (
+            finding.file_path.replace("\\", "/").strip().lower(),
+            finding.line,
+            finding.category.value,
+            finding.title.strip().lower(),
+            finding.description.strip().lower(),
         )
         if key in seen:
             continue
@@ -1542,9 +1601,6 @@ def _filter_candidate_findings(
         if _MISSING_VALIDATION_PATTERN.search(candidate_text) and _VENDOR_ASSERT_PATTERN.search(combined_text):
             rejected["vendor_assert_validation"] += 1
             continue
-        if finding.category.value in {"style", "maintainability", "performance", "compatibility", "portability"}:
-            rejected["out_of_scope_category"] += 1
-            continue
         kept.append(
             finding.model_copy(
                 update={"file_path": source.relative_path, "line": refined_line}
@@ -1560,6 +1616,7 @@ def _candidate_jsonl(findings: Sequence[ReviewFinding]) -> str:
                 "p": finding.file_path,
                 "l": finding.line,
                 "s": finding.severity.value,
+                "c": finding.category.value,
                 "t": finding.title,
                 "d": finding.description,
             },
@@ -1571,19 +1628,135 @@ def _candidate_jsonl(findings: Sequence[ReviewFinding]) -> str:
 
 
 def _allowed_final_categories(check_types: Sequence[str]) -> tuple[str, ...]:
-    supported = {
-        "buffer_overflow",
-        "pointer_safety",
-        "memory_safety",
-        "resource_leak",
-        "integer_safety",
-        "input_validation",
-        "concurrency",
-        "logic",
-        "other",
-    }
-    selected = tuple(item for item in check_types if item in supported)
-    return selected or tuple(sorted(supported))
+    selected = tuple(dict.fromkeys(item for item in check_types if item in CHECK_TYPE_LABELS))
+    return selected or tuple(CHECK_TYPE_LABELS)
+
+
+def _partition_category_candidates(
+    findings: Sequence[ReviewFinding],
+    allowed_categories: Sequence[str],
+) -> tuple[list[ReviewFinding], list[ReviewFinding]]:
+    allowed = set(allowed_categories)
+    deterministic: list[ReviewFinding] = []
+    unresolved: list[ReviewFinding] = []
+    for finding in findings:
+        category = finding.category.value
+        if category in allowed and category != "other":
+            deterministic.append(finding)
+        else:
+            unresolved.append(finding)
+    return deterministic, unresolved
+
+
+def _candidate_source_excerpt(files: Sequence[ReviewFile], finding: ReviewFinding, *, radius: int = 2) -> str:
+    source = _review_file_by_path(files, finding.file_path)
+    if source is None or finding.line is None:
+        return ""
+    lines = source.source_text.splitlines()
+    if not lines:
+        return ""
+    start = max(1, finding.line - radius)
+    end = min(len(lines), finding.line + radius)
+    return "\n".join(f"{line_number}: {lines[line_number - 1]}" for line_number in range(start, end + 1))
+
+
+def _semantic_candidate_document(files: Sequence[ReviewFile], findings: Sequence[ReviewFinding]) -> str:
+    rows = []
+    for index, finding in enumerate(findings):
+        rows.append(
+            json.dumps(
+                {
+                    "i": index,
+                    "p": finding.file_path,
+                    "l": finding.line,
+                    "c": finding.category.value,
+                    "t": finding.title,
+                    "d": finding.description,
+                    "code": _candidate_source_excerpt(files, finding),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    return "\n".join(rows)
+
+
+def _parse_semantic_category_response(payload: dict[str, Any]) -> CandidateCategoryDecisionResponse:
+    try:
+        content = payload["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError("semantic category response content is not text")
+        decisions = []
+        for item in _candidate_objects_from_content(content):
+            if not isinstance(item, dict):
+                continue
+            decisions.append(CandidateCategoryDecision.model_validate(item))
+        return CandidateCategoryDecisionResponse(decisions=decisions)
+    except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
+        raise ModelInvocationError(
+            "model returned an invalid semantic category response",
+            raw_response=str(payload),
+            details=str(exc),
+        ) from exc
+
+
+async def _resolve_unmatched_categories(
+    *,
+    task: ReviewTask,
+    node: ModelNode,
+    files: Sequence[ReviewFile],
+    findings: Sequence[ReviewFinding],
+    allowed_categories: Sequence[str],
+    settings: Settings,
+) -> tuple[list[ReviewFinding], int]:
+    if not findings or not allowed_categories or not settings.candidate_semantic_fallback_enabled:
+        return [], 0
+    pending = _dedupe_candidate_findings(findings)
+    resolved: list[ReviewFinding] = []
+    failed_batches = 0
+    allowed = set(allowed_categories)
+    for start in range(0, len(pending), settings.candidate_semantic_batch_size):
+        batch = pending[start : start + settings.candidate_semantic_batch_size]
+        output_budget = max(128, min(settings.candidate_semantic_max_tokens, 32 + (24 * len(batch))))
+        semantic_settings = settings.model_copy(update={"model_max_tokens": output_budget})
+        try:
+            decision_result = await invoke_model(
+                node=node,
+                files=(),
+                prompt=(
+                    "Classify only the supplied unresolved candidates.\n"
+                    f"SELECTED CATEGORIES: {', '.join(allowed_categories)}.\n"
+                    "A candidate may be corrected only when its nearby source excerpt proves it belongs to one selected category."
+                ),
+                input_message=f"UNRESOLVED CANDIDATE JSONL:\n{_semantic_candidate_document(files, batch)}",
+                response_contract=SEMANTIC_CATEGORY_RESPONSE_CONTRACT,
+                settings=semantic_settings,
+                response_schema=None,
+                response_parser=_parse_semantic_category_response,
+            )
+        except ModelInvocationError as exc:
+            failed_batches += 1
+            task.model_log = truncate_model_log(
+                "\n".join(
+                    part
+                    for part in (
+                        task.model_log,
+                        f"[CandidateSemantic] Classification failed; unresolved candidates dropped: {exc}",
+                    )
+                    if part
+                )
+            )
+            continue
+        if not isinstance(decision_result, CandidateCategoryDecisionResponse):
+            failed_batches += 1
+            continue
+        by_id = {decision.i: decision for decision in decision_result.decisions}
+        for index, finding in enumerate(batch):
+            decision = by_id.get(index)
+            if decision is None or decision.a == "drop" or decision.c not in allowed:
+                continue
+            resolved.append(finding.model_copy(update={"category": FindingCategory(decision.c)}))
+    return resolved, failed_batches
 
 
 def _candidate_stage_settings(settings: Settings, files: Sequence[ReviewFile] = ()) -> Settings:
@@ -1638,7 +1811,11 @@ async def _invoke_candidate_review(
     retry_instruction: str | None,
 ) -> ModelReviewResponse:
     candidate_settings = _candidate_stage_settings(settings, files)
+    discovery_started = perf_counter()
+    rag_started = perf_counter()
     rag_context = _rag_context(db, task, candidate_settings, files=files, purpose="candidate")
+    rag_elapsed = perf_counter() - rag_started
+    model_started = perf_counter()
     invocation = await invoke_model(
         node=node,
         files=files,
@@ -1694,6 +1871,24 @@ async def _invoke_candidate_review(
                 score=_score_for_findings(list(by_key.values())),
                 findings=list(by_key.values()),
             )
+    model_elapsed = perf_counter() - model_started
+    discovery_timing_log = truncate_model_log(
+        "\n".join(
+            part
+            for part in (
+                getattr(task, "model_log", None),
+                (
+                    "[CandidateDiscoveryTiming] "
+                    f"rag_context_s={rag_elapsed:.4f}; model_candidate_s={model_elapsed:.4f}; "
+                    f"candidate_count={len(candidate_result.findings)}; "
+                    f"discovery_total_s={perf_counter() - discovery_started:.4f}."
+                ),
+            )
+            if part
+        )
+    )
+    if hasattr(task, "model_log"):
+        task.model_log = discovery_timing_log
     return await _finalize_candidate_review(
         db=db,
         task=task,
@@ -1775,6 +1970,7 @@ async def _finalize_candidate_review(
     candidate_result: ModelReviewResponse,
     settings: Settings,
 ) -> ModelReviewResponse:
+    finalize_started = perf_counter()
     candidate_jsonl = _candidate_jsonl(_select_candidate_findings(candidate_result))
     task.candidate_jsonl = candidate_jsonl
     db.commit()
@@ -1786,8 +1982,25 @@ async def _finalize_candidate_review(
         allowed_categories=allowed_categories,
         settings=settings,
     )
-    category_filtered = _filter_final_categories(formatted, allowed_categories)
-    final_findings, rejected = _filter_candidate_findings(files, category_filtered)
+    formatting_elapsed = perf_counter() - finalize_started
+    validation_started = perf_counter()
+    prevalidated, rejected = _filter_candidate_findings(files, formatted)
+    validation_elapsed = perf_counter() - validation_started
+    category_started = perf_counter()
+    deterministic, unresolved = _partition_category_candidates(prevalidated, allowed_categories)
+    semantic_resolved, semantic_failed_batches = await _resolve_unmatched_categories(
+        task=task,
+        node=node,
+        files=files,
+        findings=unresolved,
+        allowed_categories=allowed_categories,
+        settings=settings,
+    )
+    semantic_elapsed = perf_counter() - category_started
+    merge_started = perf_counter()
+    category_filtered = _dedupe_candidate_findings([*deterministic, *semantic_resolved])
+    final_findings = category_filtered
+    merge_elapsed = perf_counter() - merge_started
     final_findings.sort(
         key=lambda finding: (
             SEVERITY_RANK.get(finding.severity.value, 99),
@@ -1809,8 +2022,13 @@ async def _finalize_candidate_review(
                     "[CandidatePipeline] "
                     f"discovered={len(candidate_result.findings)}; cached_jsonl_rows={len(candidate_result.findings)}; "
                     f"formatted={len(formatted)}; category_allowed={len(category_filtered)}; "
+                    f"deterministic={len(deterministic)}; semantic_unresolved={len(unresolved)}; "
+                    f"semantic_resolved={len(semantic_resolved)}; semantic_failed_batches={semantic_failed_batches}; "
                     f"backend_rejected={sum(rejected.values())} {rejected}; "
-                    f"format_failed_batches={failed_batches}; final={len(final_findings)}."
+                    f"format_failed_batches={failed_batches}; final={len(final_findings)}; "
+                    f"timing_format_s={formatting_elapsed:.4f}; timing_validation_s={validation_elapsed:.4f}; "
+                    f"timing_semantic_s={semantic_elapsed:.4f}; timing_merge_s={merge_elapsed:.4f}; "
+                    f"timing_finalize_total_s={perf_counter() - finalize_started:.4f}."
                 ),
             ]
             if part

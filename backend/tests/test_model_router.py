@@ -16,12 +16,17 @@ from app.schemas.model_response import (
 )
 from app.services.model_router import (
     CANDIDATE_FORMAT_CONTRACT,
+    CandidateCategoryDecision,
+    CandidateCategoryDecisionResponse,
     ModelNodeDispatchPool,
     ModelInvocationError,
     ModelInvocationResult,
     RESPONSE_CONTRACT,
     _allowed_final_categories,
     _candidate_jsonl,
+    _dedupe_candidate_findings,
+    _partition_category_candidates,
+    _resolve_unmatched_categories,
     _filter_candidate_findings,
     _parse_candidate_jsonl_response,
     _refine_candidate_line,
@@ -1906,6 +1911,55 @@ def test_refine_candidate_line_prefers_exact_mechanism_anchor():
     assert _refine_candidate_line(files, finding) == 5
 
 
+def test_refine_candidate_line_moves_comment_to_nearest_following_statement_without_global_drift():
+    files = [
+        ReviewFile(
+            relative_path="main.c",
+            source_text="\n".join(
+                [
+                    "void copy(char *dst, const char *src, int n) {",
+                    "  // first unsafe copy",
+                    "  memcpy(dst, src, n);",
+                    "  consume(dst);",
+                    "  // second unsafe copy",
+                    "  memcpy(dst + n, src, n);",
+                    "}",
+                ]
+            ),
+            size_bytes=160,
+        )
+    ]
+    first = ReviewFinding(
+        severity="high",
+        category="buffer_overflow",
+        title="unsafe copy",
+        description="copy may exceed destination bounds",
+        file_path="main.c",
+        line=2,
+    )
+    second = first.model_copy(update={"line": 5})
+
+    assert _refine_candidate_line(files, first) == 3
+    assert _refine_candidate_line(files, second) == 6
+
+
+def test_candidate_dedupe_keeps_repeated_defects_at_distinct_lines():
+    candidate = ReviewFinding(
+        severity="high",
+        category="buffer_overflow",
+        title="unsafe copy",
+        description="copy may exceed destination bounds",
+        file_path="main.c",
+        line=3,
+    )
+
+    deduped = _dedupe_candidate_findings(
+        [candidate, candidate.model_copy(), candidate.model_copy(update={"line": 6})]
+    )
+
+    assert [finding.line for finding in deduped] == [3, 6]
+
+
 def test_candidate_rule_filter_drops_compilation_only_and_generic_null_advice():
     files = [
         ReviewFile(
@@ -1969,6 +2023,29 @@ def test_candidate_rule_filter_drops_compilation_only_and_generic_null_advice():
     assert rejected["vendor_assert_validation"] == 1
 
 
+def test_candidate_rule_filter_keeps_extended_category_after_task_scope_selection():
+    candidate = ReviewFinding(
+        severity="low",
+        category="performance",
+        title="repeated full scan",
+        description="the loop scans the complete buffer on every iteration",
+        file_path="main.c",
+        line=2,
+    )
+    files = [
+        ReviewFile(
+            relative_path="main.c",
+            source_text="void run(void) {\n  scan_all_items();\n}\n",
+            size_bytes=41,
+        )
+    ]
+
+    kept, rejected = _filter_candidate_findings(files, [candidate])
+
+    assert [finding.category for finding in kept] == [FindingCategory.PERFORMANCE]
+    assert rejected["out_of_scope_category"] == 0
+
+
 def test_candidate_jsonl_is_lightweight_and_allowed_categories_follow_task_selection():
     candidates = [
         ReviewFinding(
@@ -1999,8 +2076,147 @@ def test_candidate_jsonl_is_lightweight_and_allowed_categories_follow_task_selec
     jsonl = _candidate_jsonl(candidates)
 
     assert len(jsonl.splitlines()) == 3
-    assert set(json.loads(jsonl.splitlines()[0])) == {"p", "l", "s", "t", "d"}
+    assert set(json.loads(jsonl.splitlines()[0])) == {"p", "l", "s", "c", "t", "d"}
+    assert json.loads(jsonl.splitlines()[0])["c"] == "logic"
+    reparsed = _parse_candidate_jsonl_response({"choices": [{"message": {"content": jsonl}}]})
+    assert reparsed.findings[0].category == FindingCategory.LOGIC
+    assert reparsed.findings[0].title == candidates[0].title
     assert _allowed_final_categories(["logic", "buffer_overflow"]) == ("logic", "buffer_overflow")
+    assert _allowed_final_categories(["performance"]) == ("performance",)
+
+
+def test_category_partition_keeps_exact_matches_and_routes_other_for_semantic_review():
+    matched = ReviewFinding(
+        severity="medium",
+        category="logic",
+        title="wrong_state",
+        description="state update is incorrect",
+        file_path="main.c",
+        line=2,
+    )
+    unresolved = ReviewFinding(
+        severity="low",
+        category="other",
+        title="slow_loop",
+        description="loop repeatedly scans the same buffer",
+        file_path="main.c",
+        line=4,
+    )
+
+    deterministic, semantic = _partition_category_candidates([matched, unresolved], ["logic", "performance"])
+
+    assert deterministic == [matched]
+    assert semantic == [unresolved]
+
+
+def test_unmatched_category_is_corrected_by_semantic_fallback_without_changing_facts(monkeypatch):
+    calls: list[dict] = []
+
+    async def fake_invoke_model(**kwargs):
+        calls.append(kwargs)
+        return CandidateCategoryDecisionResponse(
+            decisions=[CandidateCategoryDecision(i=0, a="correct", c="performance")]
+        )
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    node = ModelNode(display_name="GPU", model_identifier="review-model", base_url="http://gpu0")
+    task = type("Task", (), {"model_log": None})()
+    files = [ReviewFile(relative_path="main.c", source_text="int run(void) { return slow_call(); }\n", size_bytes=39)]
+    candidate = ReviewFinding(
+        severity="low",
+        category="other",
+        title="slow_loop",
+        description="repeated full-buffer scan",
+        file_path="main.c",
+        line=1,
+    )
+
+    resolved, failed = asyncio.run(
+        _resolve_unmatched_categories(
+            task=task,
+            node=node,
+            files=files,
+            findings=[candidate],
+            allowed_categories=["performance"],
+            settings=Settings(_env_file=None, allow_insecure_defaults=True),
+        )
+    )
+
+    assert failed == 0
+    assert len(calls) == 1
+    assert calls[0]["files"] == ()
+    assert calls[0]["settings"].model_max_tokens == 128
+    assert resolved[0].category == FindingCategory.PERFORMANCE
+    assert resolved[0].file_path == candidate.file_path
+    assert resolved[0].line == candidate.line
+    assert resolved[0].description == candidate.description
+
+
+def test_semantic_fallback_deduplicates_identical_inputs_before_dispatch(monkeypatch):
+    calls: list[dict] = []
+
+    async def fake_invoke_model(**kwargs):
+        calls.append(kwargs)
+        return CandidateCategoryDecisionResponse(
+            decisions=[CandidateCategoryDecision(i=0, a="correct", c="performance")]
+        )
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    task = type("Task", (), {"model_log": None})()
+    candidate = ReviewFinding(
+        severity="low",
+        category="other",
+        title="slow loop",
+        description="repeated full-buffer scan",
+        file_path="main.c",
+        line=2,
+    )
+    resolved, failed = asyncio.run(
+        _resolve_unmatched_categories(
+            task=task,
+            node=ModelNode(display_name="GPU", model_identifier="review-model", base_url="http://gpu0"),
+            files=[ReviewFile(relative_path="main.c", source_text="void run(void) {\n  scan();\n}\n", size_bytes=32)],
+            findings=[candidate, candidate.model_copy()],
+            allowed_categories=["performance"],
+            settings=Settings(_env_file=None, allow_insecure_defaults=True),
+        )
+    )
+
+    assert failed == 0
+    assert len(calls) == 1
+    assert calls[0]["input_message"].count('"i":') == 1
+    assert len(resolved) == 1
+
+
+def test_semantic_category_failure_drops_only_unresolved_candidates(monkeypatch):
+    async def failing_invoke_model(**_kwargs):
+        raise ModelInvocationError("offline")
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", failing_invoke_model)
+    task = type("Task", (), {"model_log": None})()
+    candidate = ReviewFinding(
+        severity="low",
+        category="other",
+        title="ambiguous",
+        description="uncertain category",
+        file_path="main.c",
+        line=1,
+    )
+
+    resolved, failed = asyncio.run(
+        _resolve_unmatched_categories(
+            task=task,
+            node=ModelNode(display_name="GPU", model_identifier="review-model", base_url="http://gpu0"),
+            files=[ReviewFile(relative_path="main.c", source_text="int value;\n", size_bytes=11)],
+            findings=[candidate],
+            allowed_categories=["performance"],
+            settings=Settings(_env_file=None, allow_insecure_defaults=True),
+        )
+    )
+
+    assert resolved == []
+    assert failed == 1
+    assert "unresolved candidates dropped" in task.model_log
 
 
 def test_candidate_pipeline_uses_rag_only_for_first_stage_and_jsonl_only_for_second_stage(

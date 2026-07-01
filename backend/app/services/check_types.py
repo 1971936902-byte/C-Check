@@ -41,18 +41,6 @@ def validate_check_types(check_types: list[str] | None) -> list[str]:
 
 
 def check_types_prompt(check_types: list[str]) -> str:
-    selected = [item for item in validate_check_types(check_types) if item in DEFAULT_FAST_CHECK_TYPES]
-    if not selected:
-        selected = [
-            "buffer_overflow",
-            "pointer_safety",
-            "memory_safety",
-            "resource_leak",
-            "integer_safety",
-            "input_validation",
-            "concurrency",
-            "logic",
-            "other",
-        ]
+    selected = validate_check_types(check_types)
     labels = [CHECK_TYPE_LABELS[item] for item in selected]
     return "默认快速审查仅关注以下高价值 C 缺陷类型：\n" + "\n".join(f"- {label}" for label in labels)
