@@ -1212,21 +1212,32 @@ def _looks_like_function_header(header_text: str) -> bool:
 def _function_window_for_line(lines: Sequence[str], line_number: int, *, max_lines: int = 160) -> tuple[int, int] | None:
     if line_number < 1 or line_number > len(lines):
         return None
-    for open_index in range(line_number - 1, -1, -1):
-        if "{" not in lines[open_index]:
-            continue
-        header_start = max(0, open_index - 4)
-        if not _looks_like_function_header("\n".join(lines[header_start : open_index + 1])):
-            continue
-        balance = 0
-        for close_index in range(open_index, len(lines)):
-            balance += lines[close_index].count("{") - lines[close_index].count("}")
-            if balance <= 0 and close_index > open_index:
-                start = open_index + 1
-                end = close_index + 1
-                if start <= line_number <= end and end - start + 1 <= max_lines:
-                    return start, end
+    sanitized = [_strip_comments_and_strings(line) for line in lines]
+    depth = 0
+    function_start: int | None = None
+    header_lines: list[str] = []
+    for index, line in enumerate(sanitized):
+        if depth == 0:
+            before_open = line.split("{", 1)[0]
+            header_lines.append(before_open)
+            if "{" in line:
+                header = "\n".join(header_lines[-8:])
+                if _looks_like_function_header(header):
+                    function_start = index + 1
+                else:
+                    function_start = None
+                header_lines = []
+            elif ";" in line or "}" in line:
+                header_lines = []
+
+        depth += line.count("{") - line.count("}")
+        if depth == 0 and function_start is not None:
+            function_end = index + 1
+            if function_start <= line_number <= function_end:
+                if function_end - function_start + 1 <= max_lines:
+                    return function_start, function_end
                 return None
+            function_start = None
     return None
 
 
@@ -1646,32 +1657,53 @@ def _is_resource_leak_false_positive(source: ReviewFile, line_number: int, findi
     candidate_text = _candidate_text(finding).lower()
     if _is_stack_or_nonowning_resource_line(line_text):
         return True
-    identifiers = set(_C_IDENTIFIER_RE.findall(line_text)) | set(_C_IDENTIFIER_RE.findall(candidate_text))
-    identifiers -= {
-        "char",
-        "int",
-        "uint8_t",
-        "uint16_t",
-        "uint32_t",
-        "uint64_t",
-        "size_t",
-        "static",
-        "const",
-        "return",
-        "if",
-        "for",
-        "while",
-        "struct",
-    }
     function_window = _function_window_for_line(lines, line_number)
     if function_window is None:
         return False
     start, end = function_window
     function_text = "\n".join(lines[start - 1 : end])
-    if identifiers and _has_visible_release_for_any_identifier(function_text, identifiers):
-        if not _has_allocation_after_last_release(function_text, identifiers):
+    acquisitions = _resource_acquisitions(function_text)
+    if not acquisitions:
+        return True
+
+    line_acquisitions = _resource_acquisitions(line_text)
+    subject_identifiers = set(_candidate_subject_identifiers(finding))
+    relevant_identifiers = {
+        identifier
+        for identifier, _ in acquisitions
+        if identifier.lower() in subject_identifiers
+    }
+    relevant_identifiers.update(identifier for identifier, _ in line_acquisitions)
+
+    # A normal function call or stack object is not ownership evidence. Keep a
+    # candidate only when it points to an acquisition, names the owned handle,
+    # or is anchored at a return from a function with one unambiguous resource.
+    if not relevant_identifiers:
+        if re.match(r"^\s*return\b", line_text) and len(acquisitions) == 1:
+            relevant_identifiers = {acquisitions[0][0]}
+        else:
+            return True
+
+    if _has_visible_release_for_any_identifier(function_text, relevant_identifiers):
+        if not _has_allocation_after_last_release(function_text, relevant_identifiers):
             return True
     return False
+
+
+_RESOURCE_ACQUIRE_CALL_RE = re.compile(
+    r"\b(?P<identifier>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?P<api>(?:malloc|calloc|realloc|fopen|open|fdopen|socket|dup|strdup|"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:_create|_alloc|_acquire|_clone|_open)))\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _resource_acquisitions(source_text: str) -> list[tuple[str, str]]:
+    sanitized = "\n".join(_strip_comments_and_strings(line) for line in source_text.splitlines())
+    return [
+        (match.group("identifier"), match.group("api"))
+        for match in _RESOURCE_ACQUIRE_CALL_RE.finditer(sanitized)
+    ]
 
 
 def _is_stack_or_nonowning_resource_line(line_text: str) -> bool:

@@ -1129,6 +1129,71 @@ void demo(void) {
     assert rejected["resource_leak_false_positive"] == 2
 
 
+def test_candidate_filter_checks_complete_multiline_main_resource_lifecycle():
+    source = ReviewFile(
+        relative_path="lifecycle.c",
+        source_text="""int main(
+    int argc,
+    char **argv)
+{
+    FILE *log_fp;
+    PageMgr *mgr;
+    log_fp = fopen(argv[1], "r");
+    mgr = page_mgr_create(32);
+    while (1) {
+        load_log_page(mgr);
+        batch_format_output(mgr);
+        break;
+    }
+    page_mgr_destroy(mgr);
+    fclose(log_fp);
+    return 0;
+}
+""",
+        size_bytes=380,
+    )
+    findings = [
+        ReviewFinding(severity="medium", category="resource_leak", title="file handle leak", description="log_fp is not closed", file_path="lifecycle.c", line=7),
+        ReviewFinding(severity="medium", category="resource_leak", title="manager leak", description="mgr is not released", file_path="lifecycle.c", line=8),
+        ReviewFinding(severity="medium", category="resource_leak", title="call leaks memory", description="load_log_page leaks resources", file_path="lifecycle.c", line=10),
+        ReviewFinding(severity="medium", category="resource_leak", title="stack output leak", description="batch_format_output leaks export_buf", file_path="lifecycle.c", line=11),
+    ]
+
+    kept, rejected = _filter_candidate_findings([source], findings)
+
+    assert kept == []
+    assert rejected["resource_leak_false_positive"] == 4
+
+
+def test_candidate_filter_retains_real_resource_leak_with_ownership_evidence():
+    source = ReviewFile(
+        relative_path="real_leak.c",
+        source_text="""int load_file(const char *path)
+{
+    FILE *stream = fopen(path, "r");
+    if (stream == NULL) return -1;
+    consume(stream);
+    return 0;
+}
+""",
+        size_bytes=170,
+    )
+    finding = ReviewFinding(
+        severity="high",
+        category="resource_leak",
+        title="file handle leak",
+        description="stream is not closed before return",
+        file_path="real_leak.c",
+        line=3,
+    )
+
+    kept, rejected = _filter_candidate_findings([source], [finding])
+
+    assert len(kept) == 1
+    assert kept[0].line == 3
+    assert rejected["resource_leak_false_positive"] == 0
+
+
 def test_chunk_file_preserves_original_line_numbers():
     chunks = _chunk_file(
         ReviewFile(
