@@ -164,6 +164,12 @@ class ModelNodeDispatchPool:
     base_loads: dict[str, int]
 
 
+@dataclass(frozen=True)
+class ModelInvocationResult:
+    value: BaseModel
+    finish_reason: str | None
+
+
 def _mock_response(files: Sequence[ReviewFile]) -> ModelReviewResponse:
     return ModelReviewResponse(
         summary=f"Mock review completed for {len(files)} source file(s).",
@@ -275,6 +281,13 @@ def _numbered_chunk_source(source_text: str, start_line: int, end_line: int) -> 
 
 
 _NUMBERED_SOURCE_LINE_RE = re.compile(rf"^\d{{{CHUNK_LINE_PREFIX_WIDTH}}}:\s")
+_C_FUNCTION_DEFINITION_RE = re.compile(
+    r"(?m)^\s*(?!if\b|for\b|while\b|switch\b)[A-Za-z_][\w\s*]*\b[A-Za-z_]\w*\s*\([^;{}]*\)\s*\{"
+)
+_DANGEROUS_C_OPERATION_RE = re.compile(
+    r"\b(?:memcpy|memmove|strcpy|strcat|sprintf|scanf|gets|malloc|calloc|realloc|free|read|recv|fread)\s*\("
+)
+_POINTER_OR_ARRAY_OPERATION_RE = re.compile(r"(?:->|\[[^\]\n]+\]|\*\s*[A-Za-z_]\w*)")
 
 
 def _render_source_with_absolute_lines(source_text: str) -> str:
@@ -1048,7 +1061,8 @@ async def invoke_model(
     response_parser: Callable[[dict[str, Any]], BaseModel] | None = None,
     input_message: str | None = None,
     user_context: str | None = None,
-) -> BaseModel:
+    return_metadata: bool = False,
+) -> BaseModel | ModelInvocationResult:
     settings = settings or get_settings()
     if not node.is_enabled:
         raise ModelInvocationError("selected model node is disabled")
@@ -1116,9 +1130,19 @@ async def invoke_model(
         raise
     except (httpx.HTTPError, ValueError) as exc:
         raise ModelInvocationError("selected model node is unavailable", details=str(exc)) from exc
-    if response_parser is not None:
-        return response_parser(payload)
-    return _parse_typed_response(payload, response_model=response_model, normalizer=response_normalizer)
+    parsed = (
+        response_parser(payload)
+        if response_parser is not None
+        else _parse_typed_response(payload, response_model=response_model, normalizer=response_normalizer)
+    )
+    if not return_metadata:
+        return parsed
+    finish_reason = None
+    try:
+        finish_reason = str(payload["choices"][0].get("finish_reason") or "") or None
+    except (KeyError, IndexError, TypeError):
+        pass
+    return ModelInvocationResult(value=parsed, finish_reason=finish_reason)
 
 
 def _select_candidate_findings(result: ModelReviewResponse) -> list:
@@ -1566,9 +1590,16 @@ def _candidate_stage_settings(settings: Settings, files: Sequence[ReviewFile] = 
     max_tokens = settings.candidate_model_max_tokens
     if settings.candidate_dynamic_tokens_enabled and files:
         source_lines = sum(max(1, len(source.source_text.splitlines())) for source in files)
+        source_text = "\n".join(source.source_text for source in files)
+        function_count = len(_C_FUNCTION_DEFINITION_RE.findall(source_text))
+        dangerous_operation_count = len(_DANGEROUS_C_OPERATION_RE.findall(source_text))
+        pointer_operation_count = len(_POINTER_OR_ARRAY_OPERATION_RE.findall(source_text))
         estimated = math.ceil(
             settings.candidate_dynamic_base_tokens
             + (source_lines * settings.candidate_dynamic_tokens_per_line)
+            + (function_count * settings.candidate_dynamic_tokens_per_function)
+            + (dangerous_operation_count * settings.candidate_dynamic_tokens_per_dangerous_op)
+            + (pointer_operation_count * settings.candidate_dynamic_tokens_per_pointer_op)
         )
         max_tokens = max(settings.candidate_dynamic_min_tokens, min(max_tokens, estimated))
     return settings.model_copy(update={"model_max_tokens": max_tokens})
@@ -1608,7 +1639,7 @@ async def _invoke_candidate_review(
 ) -> ModelReviewResponse:
     candidate_settings = _candidate_stage_settings(settings, files)
     rag_context = _rag_context(db, task, candidate_settings, files=files, purpose="candidate")
-    candidate_result = await invoke_model(
+    invocation = await invoke_model(
         node=node,
         files=files,
         prompt=prompt,
@@ -1618,9 +1649,51 @@ async def _invoke_candidate_review(
         settings=candidate_settings,
         response_schema=None,
         response_parser=_parse_candidate_jsonl_response,
+        return_metadata=True,
     )
+    if isinstance(invocation, ModelInvocationResult):
+        candidate_result = invocation.value
+        finish_reason = invocation.finish_reason
+    else:
+        candidate_result = invocation
+        finish_reason = None
     if not isinstance(candidate_result, ModelReviewResponse):
         raise ModelInvocationError("first-stage candidate scan returned an unexpected response type")
+    if finish_reason == "length":
+        seen = ", ".join(
+            f"{finding.file_path}:{finding.line or 'null'}:{finding.title}"
+            for finding in candidate_result.findings
+        )[:3000]
+        continuation_context = "\n\n".join(
+            part
+            for part in (
+                rag_context,
+                "CONTINUATION REQUEST: The previous candidate JSONL reached its token limit. "
+                "Return only additional concrete candidates not listed below. Do not repeat existing rows.\n"
+                f"EXISTING CANDIDATE KEYS: {seen}",
+            )
+            if part
+        )
+        continuation = await invoke_model(
+            node=node,
+            files=files,
+            prompt=prompt,
+            user_context=continuation_context,
+            response_contract=CANDIDATE_RESPONSE_CONTRACT,
+            settings=candidate_settings,
+            response_schema=None,
+            response_parser=_parse_candidate_jsonl_response,
+        )
+        if isinstance(continuation, ModelReviewResponse):
+            by_key = {
+                (finding.file_path, finding.line, finding.title): finding
+                for finding in [*candidate_result.findings, *continuation.findings]
+            }
+            candidate_result = ModelReviewResponse(
+                summary=f"第一阶段发现 {len(by_key)} 个候选问题。",
+                score=_score_for_findings(list(by_key.values())),
+                findings=list(by_key.values()),
+            )
     return await _finalize_candidate_review(
         db=db,
         task=task,

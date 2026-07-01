@@ -29,6 +29,7 @@ def build_code_index(
     settings: Settings | None = None,
 ) -> CodeProject:
     settings = settings or get_settings()
+    tree_sitter_status, clang_status = _parser_backend_status(settings)
     source_hash = _task_source_hash(task.files)
     embedding_signature = _embedding_signature(settings)
     existing = task.code_project
@@ -179,8 +180,9 @@ def build_code_index(
         "embedding_cache_hits": embedding_cache_stats.get("hits", 0),
         "embedding_cache_misses": embedding_cache_stats.get("misses", 0),
         "parser": PARSER_VERSION,
-        "tree_sitter": probe_tree_sitter_c().__dict__,
-        "clang": probe_clangd().__dict__,
+        "tree_sitter": tree_sitter_status.__dict__,
+        "clang": clang_status.__dict__,
+        "parser_degraded": not tree_sitter_status.available or not clang_status.libclang_available,
     }
     if qdrant_error:
         stats_json["qdrant_error"] = qdrant_error
@@ -224,6 +226,19 @@ def _hash_text(text: str) -> str:
 
 def _language_for_path(path: str) -> str:
     return "c_header" if path.lower().endswith(".h") else "c"
+
+
+def _parser_backend_status(settings: Settings):
+    tree_sitter_status = probe_tree_sitter_c()
+    clang_status = probe_clangd()
+    failures: list[str] = []
+    if settings.rag_parser_require_tree_sitter and not tree_sitter_status.available:
+        failures.append(tree_sitter_status.reason or "tree-sitter-c unavailable")
+    if settings.rag_parser_require_libclang and not clang_status.libclang_available:
+        failures.append(clang_status.libclang_reason or "libclang unavailable")
+    if failures:
+        raise RuntimeError("required C parser backend unavailable: " + "; ".join(failures))
+    return tree_sitter_status, clang_status
 
 
 def _chunk_template(chunk: CodeChunk) -> dict:

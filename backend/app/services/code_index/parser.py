@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 
-PARSER_VERSION = "hybrid-c-parser-v9"
+PARSER_VERSION = "hybrid-c-parser-v10"
 _IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
 _CONTROL_KEYWORDS = {
     "if",

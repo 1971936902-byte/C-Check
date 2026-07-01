@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     candidate_dynamic_min_tokens: int = Field(default=768, ge=256, le=16384)
     candidate_dynamic_base_tokens: int = Field(default=384, ge=0, le=16384)
     candidate_dynamic_tokens_per_line: float = Field(default=4.5, ge=0.1, le=32.0)
+    candidate_dynamic_tokens_per_function: int = Field(default=24, ge=0, le=256)
+    candidate_dynamic_tokens_per_dangerous_op: int = Field(default=24, ge=0, le=256)
+    candidate_dynamic_tokens_per_pointer_op: int = Field(default=4, ge=0, le=64)
     model_max_input_tokens: int = Field(default=10000, ge=512, le=1048576)
     model_token_chars_per_token: float = Field(default=3.5, ge=1.0, le=8.0)
     model_chunk_max_chars: int = Field(default=18000, ge=1000, le=200000)
@@ -80,6 +83,8 @@ class Settings(BaseSettings):
     rag_qdrant_api_key: str | None = None
     rag_qdrant_collection: str = "c_check_code_chunks"
     rag_cache_enabled: bool = True
+    rag_parser_require_tree_sitter: bool = True
+    rag_parser_require_libclang: bool = True
     rag_on_demand_enabled: bool = True
     rag_review_units_enabled: bool = False
     rag_candidate_scan_enabled: bool = True

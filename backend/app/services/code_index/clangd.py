@@ -76,10 +76,7 @@ def parse_with_libclang(relative_path: str, source_text: str):
             filename,
             args=args,
             unsaved_files=[(filename, source_text)],
-            options=(
-                cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD
-                | cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES
-            ),
+            options=cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD,
         )
     except Exception:
         return None

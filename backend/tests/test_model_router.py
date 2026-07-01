@@ -18,6 +18,7 @@ from app.services.model_router import (
     CANDIDATE_FORMAT_CONTRACT,
     ModelNodeDispatchPool,
     ModelInvocationError,
+    ModelInvocationResult,
     RESPONSE_CONTRACT,
     _allowed_final_categories,
     _candidate_jsonl,
@@ -660,6 +661,55 @@ def test_invoke_model_sends_output_token_budget(monkeypatch):
     )
 
     assert captured["json"]["max_tokens"] == 3072
+
+
+def test_invoke_model_returns_finish_reason_when_requested(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": '{"summary":"ok","score":100,"findings":[]}'},
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.model_router.httpx.AsyncClient", FakeClient)
+    result = asyncio.run(
+        invoke_model(
+            node=ModelNode(
+                display_name="test",
+                model_identifier="qwen-test",
+                base_url="http://model.local",
+                is_enabled=True,
+            ),
+            files=[ReviewFile(relative_path="main.c", source_text="int main(void){return 0;}", size_bytes=25)],
+            prompt="review",
+            settings=Settings(_env_file=None, allow_insecure_defaults=True),
+            return_metadata=True,
+        )
+    )
+
+    assert isinstance(result, ModelInvocationResult)
+    assert result.finish_reason == "length"
+    assert result.value.score == 100
 
 
 def test_invoke_model_requests_json_schema_structured_output(monkeypatch):
@@ -1724,6 +1774,104 @@ def test_candidate_stage_uses_dynamic_output_budget():
 
     assert _candidate_stage_settings(settings, small).model_max_tokens == 768
     assert _candidate_stage_settings(settings, large).model_max_tokens == 2048
+
+
+def test_candidate_stage_increases_budget_for_risky_code_of_equal_size():
+    from app.services.model_router import _candidate_stage_settings
+
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        candidate_model_max_tokens=2048,
+        candidate_dynamic_min_tokens=256,
+        candidate_dynamic_base_tokens=200,
+        candidate_dynamic_tokens_per_line=1,
+        candidate_dynamic_tokens_per_function=24,
+        candidate_dynamic_tokens_per_dangerous_op=24,
+        candidate_dynamic_tokens_per_pointer_op=4,
+    )
+    safe_source = "\n".join(f"int value_{index};" for index in range(40))
+    risky_source = "\n".join(
+        [
+            "int copy(char *dst, const char *src, int size) {",
+            "  memcpy(dst, src, size);",
+            "  return dst[size];",
+            "}",
+            *[f"int value_{index};" for index in range(36)],
+        ]
+    )
+    safe = [ReviewFile(relative_path="safe.c", source_text=safe_source, size_bytes=len(safe_source))]
+    risky = [ReviewFile(relative_path="risky.c", source_text=risky_source, size_bytes=len(risky_source))]
+
+    safe_budget = _candidate_stage_settings(settings, safe).model_max_tokens
+    risky_budget = _candidate_stage_settings(settings, risky).model_max_tokens
+    assert risky_budget > safe_budget
+    assert risky_budget <= settings.candidate_model_max_tokens
+
+
+def test_candidate_stage_continues_once_after_length_truncation(monkeypatch):
+    from app.services.model_router import _invoke_candidate_review
+
+    calls: list[dict] = []
+    first = ModelReviewResponse(
+        summary="first",
+        score=70,
+        findings=[
+            ReviewFinding(
+                severity="high",
+                category="memory_safety",
+                title="越界写入",
+                description="首次候选",
+                file_path="main.c",
+                line=3,
+            )
+        ],
+    )
+    second = ModelReviewResponse(
+        summary="second",
+        score=80,
+        findings=[
+            ReviewFinding(
+                severity="medium",
+                category="resource_leak",
+                title="资源泄漏",
+                description="续审候选",
+                file_path="main.c",
+                line=5,
+            )
+        ],
+    )
+
+    async def fake_invoke_model(**kwargs):
+        calls.append(kwargs)
+        return ModelInvocationResult(value=first, finish_reason="length") if len(calls) == 1 else second
+
+    async def fake_finalize_candidate_review(**kwargs):
+        return kwargs["candidate_result"]
+
+    monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
+    monkeypatch.setattr("app.services.model_router._rag_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("app.services.model_router._finalize_candidate_review", fake_finalize_candidate_review)
+    result = asyncio.run(
+        _invoke_candidate_review(
+            db=object(),
+            task=object(),
+            node=ModelNode(
+                display_name="test",
+                model_identifier="qwen-test",
+                base_url="http://model.local",
+                is_enabled=True,
+            ),
+            files=[ReviewFile(relative_path="main.c", source_text="int main(void) { return 0; }", size_bytes=29)],
+            prompt="review",
+            settings=Settings(_env_file=None, allow_insecure_defaults=True),
+            retry_instruction=None,
+        )
+    )
+
+    assert len(calls) == 2
+    assert "CONTINUATION REQUEST" in calls[1]["user_context"]
+    assert {(finding.line, finding.title) for finding in result.findings} == {(3, "越界写入"), (5, "资源泄漏")}
 
 
 def test_refine_candidate_line_prefers_exact_mechanism_anchor():

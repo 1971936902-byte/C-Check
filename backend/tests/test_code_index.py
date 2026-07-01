@@ -22,7 +22,9 @@ from app.services.code_index.evaluator import (
     evaluate_retrieval,
     measure_latency,
 )
-from app.services.code_index.indexer import build_code_index
+from app.services.code_index.indexer import _parser_backend_status, build_code_index
+from app.services.code_index.clangd import ClangdStatus
+from app.services.code_index.tree_sitter_c import TreeSitterStatus
 from app.services.code_index.keyword_search import expand_query_terms, keyword_search_chunks
 from app.services.code_index.parser import ParsedFile, ParsedSymbol, parse_c_source
 from app.services.code_index.planner import plan_review_units
@@ -321,6 +323,25 @@ def test_build_code_index_persists_graph_entities(db_session):
     call_edge = db_session.query(CodeEdge).filter_by(edge_type="FUNCTION_CALLS_FUNCTION").one()
     assert call_edge.metadata_json["callee_name"] == "helper_copy"
     assert call_edge.target_id is not None
+
+
+def test_required_parser_backend_fails_fast_instead_of_silent_degradation(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.code_index.indexer.probe_tree_sitter_c",
+        lambda: TreeSitterStatus(available=False, reason="tree-sitter-c missing"),
+    )
+    monkeypatch.setattr(
+        "app.services.code_index.indexer.probe_clangd",
+        lambda: ClangdStatus(available=False, libclang_available=True, reason="clangd missing"),
+    )
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        rag_parser_require_tree_sitter=True,
+    )
+
+    with pytest.raises(RuntimeError, match="tree-sitter-c missing"):
+        _parser_backend_status(settings)
 
 
 def test_rag_context_includes_cross_file_callee_definition(db_session):
