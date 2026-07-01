@@ -85,6 +85,46 @@ def store_cached_parse(
     current.parsed_json = payload
 
 
+def load_cached_chunk_templates(
+    db: Session,
+    *,
+    content_hash: str,
+    settings: Settings,
+) -> list[dict] | None:
+    if not settings.rag_cache_enabled:
+        return None
+    cache = db.scalar(
+        select(CodeParseCache).where(
+            CodeParseCache.content_hash == content_hash,
+            CodeParseCache.parser_version == PARSER_VERSION,
+            CodeParseCache.settings_hash == parser_settings_hash(settings),
+        )
+    )
+    if cache is None or cache.chunks_json is None:
+        return None
+    return [dict(item) for item in cache.chunks_json if isinstance(item, dict)]
+
+
+def store_cached_chunk_templates(
+    db: Session,
+    *,
+    content_hash: str,
+    settings: Settings,
+    chunks: list[dict],
+) -> None:
+    if not settings.rag_cache_enabled:
+        return
+    cache = db.scalar(
+        select(CodeParseCache).where(
+            CodeParseCache.content_hash == content_hash,
+            CodeParseCache.parser_version == PARSER_VERSION,
+            CodeParseCache.settings_hash == parser_settings_hash(settings),
+        )
+    )
+    if cache is not None:
+        cache.chunks_json = chunks
+
+
 def parsed_file_to_json(parsed: ParsedFile) -> dict:
     return {
         "relative_path": parsed.relative_path,

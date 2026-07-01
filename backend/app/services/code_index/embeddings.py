@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import CodeChunk, CodeEmbedding, CodeProject
+from app.db.models import CodeChunk, CodeEmbedding, CodeEmbeddingCache, CodeProject
 from app.services.code_index.qdrant import QdrantCodeIndexClient, QdrantPoint
 
 
@@ -69,6 +69,7 @@ def sync_project_embeddings(
     *,
     settings: Settings | None = None,
     embedding_model: str | None = None,
+    cache_stats: dict[str, int] | None = None,
 ) -> list[EmbeddedChunk]:
     settings = settings or get_settings()
     embedding_model = embedding_model or settings.rag_embedding_model or DEFAULT_EMBEDDING_MODEL
@@ -82,9 +83,53 @@ def sync_project_embeddings(
         ).all()
     }
     chunks = list(project.chunks)
-    vectors = embed_texts_with_settings([chunk.content for chunk in chunks], settings, input_type="passage")
+    signature = _embedding_signature(settings, embedding_model)
+    vectors_by_hash: dict[str, list[float]] = {}
+    cached_rows: dict[str, CodeEmbeddingCache] = {}
+    if settings.rag_cache_enabled and chunks:
+        cached_rows = {
+            row.content_hash: row
+            for row in db.scalars(
+                select(CodeEmbeddingCache).where(
+                    CodeEmbeddingCache.embedding_signature == signature,
+                    CodeEmbeddingCache.content_hash.in_({chunk.content_hash for chunk in chunks}),
+                )
+            ).all()
+            if row.dimension == settings.rag_embedding_dimension
+        }
+        for content_hash, row in cached_rows.items():
+            vectors_by_hash[content_hash] = [float(value) for value in row.vector_json]
+
+    missing_by_hash: dict[str, CodeChunk] = {}
+    for chunk in chunks:
+        if chunk.content_hash not in vectors_by_hash:
+            missing_by_hash.setdefault(chunk.content_hash, chunk)
+    missing_chunks = list(missing_by_hash.values())
+    missing_vectors = embed_texts_with_settings(
+        [chunk.content for chunk in missing_chunks], settings, input_type="passage"
+    )
+    for chunk, vector in zip(missing_chunks, missing_vectors, strict=True):
+        vectors_by_hash[chunk.content_hash] = vector
+        if settings.rag_cache_enabled:
+            db.add(
+                CodeEmbeddingCache(
+                    content_hash=chunk.content_hash,
+                    embedding_signature=signature,
+                    dimension=len(vector),
+                    vector_json=vector,
+                    hit_count=0,
+                )
+            )
+    for chunk in chunks:
+        if chunk.content_hash in cached_rows:
+            cached_rows[chunk.content_hash].hit_count += 1
+    if cache_stats is not None:
+        cache_stats["hits"] = sum(1 for chunk in chunks if chunk.content_hash in cached_rows)
+        cache_stats["misses"] = len(missing_chunks)
+
     embedded: list[EmbeddedChunk] = []
-    for chunk, vector in zip(chunks, vectors, strict=True):
+    for chunk in chunks:
+        vector = vectors_by_hash[chunk.content_hash]
         vector_hash = _vector_hash(vector)
         vector_id = f"{project.id}:{chunk.id}:{embedding_model}"
         current = existing.get(chunk.id)
@@ -114,12 +159,13 @@ async def upsert_project_embeddings_to_qdrant(
     project: CodeProject,
     *,
     settings: Settings | None = None,
+    cache_stats: dict[str, int] | None = None,
 ) -> int:
     settings = settings or get_settings()
     client = QdrantCodeIndexClient(settings)
     if not client.enabled:
         return 0
-    embedded = sync_project_embeddings(db, project, settings=settings)
+    embedded = sync_project_embeddings(db, project, settings=settings, cache_stats=cache_stats)
     await client.upsert_points(
         [
             QdrantPoint(
@@ -138,12 +184,13 @@ def upsert_project_embeddings_to_qdrant_sync(
     project: CodeProject,
     *,
     settings: Settings | None = None,
+    cache_stats: dict[str, int] | None = None,
 ) -> int:
     settings = settings or get_settings()
     client = QdrantCodeIndexClient(settings)
     if not client.enabled:
         return 0
-    embedded = sync_project_embeddings(db, project, settings=settings)
+    embedded = sync_project_embeddings(db, project, settings=settings, cache_stats=cache_stats)
     client.upsert_points_sync(
         [
             QdrantPoint(
@@ -202,6 +249,20 @@ def _embed_texts_remote(texts: list[str], settings: Settings, *, input_type: str
 def _vector_hash(vector: list[float]) -> str:
     packed = ",".join(f"{value:.6f}" for value in vector)
     return hashlib.sha256(packed.encode("ascii")).hexdigest()
+
+
+def _embedding_signature(settings: Settings, embedding_model: str) -> str:
+    payload = "|".join(
+        (
+            settings.rag_embedding_backend,
+            settings.rag_embedding_base_url or "",
+            embedding_model,
+            str(settings.rag_embedding_dimension),
+            settings.rag_embedding_passage_prefix,
+            str(settings.rag_embedding_max_chars),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
 
 
 def _payload_for_chunk(chunk: CodeChunk) -> dict:

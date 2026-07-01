@@ -86,8 +86,8 @@ Each line uses exactly these short keys: p, l, s, t, d.
 - p: relative source path.
 - l: exact integer source line or null.
 - s: high, medium, low, or suggestion.
-- t: concise free-form defect type.
-- d: one concise Chinese sentence describing the trigger or consequence.
+- t: snake_case defect type, at most 24 ASCII characters.
+- d: one compact Chinese sentence, at most 36 Chinese characters; omit repeated boilerplate.
 Format template: {"p":"<relative_path>","l":<line_or_null>,"s":"<severity>","t":"<free_form_type>","d":"<short_chinese_description>"}
 Use one physical output line per candidate. Escape quotes and newlines inside strings.
 """
@@ -183,6 +183,16 @@ def _source_message(files: Sequence[ReviewFile]) -> str:
     return "\n\n".join(sections)
 
 
+def _user_message(
+    files: Sequence[ReviewFile],
+    *,
+    input_message: str | None = None,
+    user_context: str | None = None,
+) -> str:
+    source = input_message if input_message is not None else _source_message(files)
+    return "\n\n".join(part for part in (user_context, source) if part)
+
+
 def _estimate_tokens(text: str, settings: Settings) -> int:
     return math.ceil(len(text) / settings.model_token_chars_per_token)
 
@@ -226,13 +236,14 @@ def _input_budget_details(
     response_schema: type[BaseModel] | None = CompactModelReviewResponse,
     retry_instruction: str | None = None,
     input_message: str | None = None,
+    user_context: str | None = None,
 ) -> tuple[int, int]:
     input_text = "\n\n".join(
         part
         for part in (
             _strict_prompt(prompt, response_contract, retry_instruction),
             _response_format_overhead(settings, response_schema=response_schema),
-            input_message if input_message is not None else _source_message(files),
+            _user_message(files, input_message=input_message, user_context=user_context),
         )
         if part
     )
@@ -523,6 +534,7 @@ def _ensure_input_budget(
     response_schema: type[BaseModel] | None = CompactModelReviewResponse,
     retry_instruction: str | None = None,
     input_message: str | None = None,
+    user_context: str | None = None,
 ) -> None:
     estimated_tokens, budget_tokens = _input_budget_details(
         prompt=prompt,
@@ -532,6 +544,7 @@ def _ensure_input_budget(
         response_schema=response_schema,
         retry_instruction=retry_instruction,
         input_message=input_message,
+        user_context=user_context,
     )
     if estimated_tokens <= budget_tokens:
         return
@@ -1034,6 +1047,7 @@ async def invoke_model(
     response_normalizer: Callable[[Any], Any] | None = _normalize_model_contract,
     response_parser: Callable[[dict[str, Any]], BaseModel] | None = None,
     input_message: str | None = None,
+    user_context: str | None = None,
 ) -> BaseModel:
     settings = settings or get_settings()
     if not node.is_enabled:
@@ -1054,13 +1068,14 @@ async def invoke_model(
         response_schema=response_schema,
         retry_instruction=retry_instruction,
         input_message=input_message,
+        user_context=user_context,
     )
     strict_prompt = _strict_prompt(prompt, response_contract, retry_instruction)
     body = {
         "model": node.model_identifier,
         "messages": [
             {"role": "system", "content": strict_prompt},
-            {"role": "user", "content": input_message if input_message is not None else _source_message(files)},
+            {"role": "user", "content": _user_message(files, input_message=input_message, user_context=user_context)},
         ],
         "temperature": 0,
         "max_tokens": settings.model_max_tokens,
@@ -1547,8 +1562,16 @@ def _allowed_final_categories(check_types: Sequence[str]) -> tuple[str, ...]:
     return selected or tuple(sorted(supported))
 
 
-def _candidate_stage_settings(settings: Settings) -> Settings:
-    return settings.model_copy(update={"model_max_tokens": settings.candidate_model_max_tokens})
+def _candidate_stage_settings(settings: Settings, files: Sequence[ReviewFile] = ()) -> Settings:
+    max_tokens = settings.candidate_model_max_tokens
+    if settings.candidate_dynamic_tokens_enabled and files:
+        source_lines = sum(max(1, len(source.source_text.splitlines())) for source in files)
+        estimated = math.ceil(
+            settings.candidate_dynamic_base_tokens
+            + (source_lines * settings.candidate_dynamic_tokens_per_line)
+        )
+        max_tokens = max(settings.candidate_dynamic_min_tokens, min(max_tokens, estimated))
+    return settings.model_copy(update={"model_max_tokens": max_tokens})
 
 
 def _candidate_format_prompt(allowed_categories: Sequence[str]) -> str:
@@ -1583,11 +1606,13 @@ async def _invoke_candidate_review(
     settings: Settings,
     retry_instruction: str | None,
 ) -> ModelReviewResponse:
-    candidate_settings = _candidate_stage_settings(settings)
+    candidate_settings = _candidate_stage_settings(settings, files)
+    rag_context = _rag_context(db, task, candidate_settings, files=files, purpose="candidate")
     candidate_result = await invoke_model(
         node=node,
         files=files,
-        prompt=_with_rag_context(db, task, prompt, candidate_settings, files=files, purpose="candidate"),
+        prompt=prompt,
+        user_context=rag_context,
         response_contract=CANDIDATE_RESPONSE_CONTRACT,
         retry_instruction=retry_instruction,
         settings=candidate_settings,
@@ -1737,7 +1762,7 @@ async def invoke_selected_model(
         raise ModelInvocationError("review task does not exist")
     prompt = get_active_prompt(db)
     settings = get_settings()
-    candidate_settings = _candidate_stage_settings(settings)
+    candidate_settings = _candidate_stage_settings(settings, task.files)
     base_prompt = (
         prompt.body
         if settings.rag_candidate_scan_enabled
@@ -1808,10 +1833,12 @@ async def invoke_selected_model(
             )
         return candidate_result
     try:
+        rag_context = _rag_context(db, task, settings, files=task.files, purpose="default")
         return await invoke_model(
             node=task.model_node,
             files=task.files,
-            prompt=_with_rag_context(db, task, base_prompt, settings, files=task.files, purpose="default"),
+            prompt=base_prompt,
+            user_context=rag_context,
             response_contract=FINAL_RESPONSE_CONTRACT,
             retry_instruction=retry_instruction,
             settings=settings,
@@ -1832,6 +1859,29 @@ async def invoke_selected_model(
         )
 
 
+def _rag_context(
+    db: Session,
+    task: ReviewTask,
+    settings: Settings,
+    *,
+    files: Sequence[ReviewFile] | Sequence[ChunkedReviewFile],
+    persist: bool = True,
+    purpose: str = "default",
+) -> str:
+    if not settings.rag_enabled:
+        return ""
+    try:
+        from app.services.code_index.context_builder import build_rag_context
+
+        rag_context = build_rag_context(db, task, list(files), settings=settings, persist=persist, purpose=purpose)
+    except Exception as exc:  # pragma: no cover - defensive guard for optional RAG services.
+        current_log = task.model_log or ""
+        task.model_log = truncate_model_log(f"{current_log}\n[RAG] Context build skipped: {exc}")
+        db.commit()
+        return ""
+    return rag_context or ""
+
+
 def _with_rag_context(
     db: Session,
     task: ReviewTask,
@@ -1842,20 +1892,8 @@ def _with_rag_context(
     persist: bool = True,
     purpose: str = "default",
 ) -> str:
-    if not settings.rag_enabled:
-        return prompt
-    try:
-        from app.services.code_index.context_builder import build_rag_context
-
-        rag_context = build_rag_context(db, task, list(files), settings=settings, persist=persist, purpose=purpose)
-    except Exception as exc:  # pragma: no cover - defensive guard for optional RAG services.
-        current_log = task.model_log or ""
-        task.model_log = truncate_model_log(f"{current_log}\n[RAG] Context build skipped: {exc}")
-        db.commit()
-        return prompt
-    if not rag_context:
-        return prompt
-    return f"{prompt}\n\n{rag_context}"
+    rag_context = _rag_context(db, task, settings, files=files, persist=persist, purpose=purpose)
+    return f"{prompt}\n\n{rag_context}" if rag_context else prompt
 
 
 def _rag_review_unit_files(db: Session, task: ReviewTask, settings: Settings) -> list[ReviewFile]:

@@ -499,9 +499,11 @@ def test_default_rag_query_filters_low_value_embedded_identifiers():
 
 def test_invoke_selected_model_adds_definition_context_to_first_stage(monkeypatch, db_session_factory):
     captured_prompts: list[str] = []
+    captured_contexts: list[str] = []
 
-    async def fake_invoke_model(*, prompt, files, **_kwargs):
+    async def fake_invoke_model(*, prompt, files, user_context=None, **_kwargs):
         captured_prompts.append(prompt)
+        captured_contexts.append(user_context or "")
         assert len(files) == 4
         return ModelReviewResponse(summary="ok", score=100, findings=[])
 
@@ -530,8 +532,9 @@ def test_invoke_selected_model_adds_definition_context_to_first_stage(monkeypatc
 
     assert result.summary == "两阶段审查完成，未输出符合类型要求的问题。"
     assert captured_prompts
-    assert "Definition Context" in captured_prompts[0] or "DEFINITION CONTEXT" in captured_prompts[0]
-    assert "MAX_PACKET_SIZE" in captured_prompts[0]
+    assert "MAX_PACKET_SIZE" not in captured_prompts[0]
+    assert "Definition Context" in captured_contexts[0] or "DEFINITION CONTEXT" in captured_contexts[0]
+    assert "MAX_PACKET_SIZE" in captured_contexts[0]
 
 
 def test_chunked_first_stage_adds_batch_specific_definition_context(monkeypatch, db_session_factory):
@@ -788,6 +791,10 @@ def test_persistent_parse_cache_reuses_symbols_across_tasks(db_session):
 
     assert first_project.stats_json["parse_cache_misses"] >= 1
     assert second_project.stats_json["parse_cache_hits"] >= 1
+    assert first_project.stats_json["chunk_cache_misses"] >= 1
+    assert second_project.stats_json["chunk_cache_hits"] >= 1
+    assert first_project.stats_json["embedding_cache_misses"] >= 1
+    assert second_project.stats_json["embedding_cache_hits"] >= 1
     assert db_session.query(CodeParseCache).count() >= 1
 
 

@@ -356,6 +356,21 @@ class CodeParseCache(TimestampMixin, Base):
     settings_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     relative_path: Mapped[str] = mapped_column(String(512), nullable=False)
     parsed_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    chunks_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class CodeEmbeddingCache(TimestampMixin, Base):
+    __tablename__ = "code_embedding_cache"
+    __table_args__ = (
+        Index("ix_code_embedding_cache_key", "content_hash", "embedding_signature", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding_signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    vector_json: Mapped[list[float]] = mapped_column(JSON, nullable=False)
     hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 

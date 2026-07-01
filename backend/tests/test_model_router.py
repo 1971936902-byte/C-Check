@@ -1659,6 +1659,7 @@ def test_invoke_selected_model_caches_jsonl_and_formats_strict_final_report(monk
             rag_candidate_scan_enabled=True,
             model_max_tokens=1024,
             candidate_model_max_tokens=2048,
+            candidate_dynamic_tokens_enabled=False,
         ),
     )
 
@@ -1705,6 +1706,24 @@ def test_invoke_selected_model_caches_jsonl_and_formats_strict_final_report(monk
         task = db.get(ReviewTask, task_id)
         assert task.candidate_jsonl
         assert '"p":"main.c"' in task.candidate_jsonl
+
+
+def test_candidate_stage_uses_dynamic_output_budget():
+    from app.services.model_router import _candidate_stage_settings
+
+    settings = Settings(
+        _env_file=None,
+        allow_insecure_defaults=True,
+        candidate_model_max_tokens=2048,
+        candidate_dynamic_min_tokens=768,
+        candidate_dynamic_base_tokens=384,
+        candidate_dynamic_tokens_per_line=4.5,
+    )
+    small = [ReviewFile(relative_path="small.c", source_text="int main(void) { return 0; }\n", size_bytes=29)]
+    large = [ReviewFile(relative_path="large.c", source_text="int value;\n" * 1000, size_bytes=11000)]
+
+    assert _candidate_stage_settings(settings, small).model_max_tokens == 768
+    assert _candidate_stage_settings(settings, large).model_max_tokens == 2048
 
 
 def test_refine_candidate_line_prefers_exact_mechanism_anchor():
@@ -1846,8 +1865,10 @@ def test_candidate_pipeline_uses_rag_only_for_first_stage_and_jsonl_only_for_sec
     calls: list[dict] = []
     rag_purposes: list[str] = []
 
-    async def fake_invoke_model(*, prompt, input_message=None, files=(), **_kwargs):
-        calls.append({"prompt": prompt, "input_message": input_message, "files": files})
+    async def fake_invoke_model(*, prompt, input_message=None, user_context=None, files=(), **_kwargs):
+        calls.append(
+            {"prompt": prompt, "input_message": input_message, "user_context": user_context, "files": files}
+        )
         if input_message is not None:
             return FormattedFindingsResponse(
                 findings=[
@@ -1876,12 +1897,12 @@ def test_candidate_pipeline_uses_rag_only_for_first_stage_and_jsonl_only_for_sec
             ],
         )
 
-    def fake_with_rag_context(_db, _task, prompt, _settings, *, purpose, **_kwargs):
+    def fake_rag_context(_db, _task, _settings, *, purpose, **_kwargs):
         rag_purposes.append(purpose)
-        return f"{prompt}\nDEFINITION CONTEXT TEST"
+        return "DEFINITION CONTEXT TEST"
 
     monkeypatch.setattr("app.services.model_router.invoke_model", fake_invoke_model)
-    monkeypatch.setattr("app.services.model_router._with_rag_context", fake_with_rag_context)
+    monkeypatch.setattr("app.services.model_router._rag_context", fake_rag_context)
     monkeypatch.setattr(
         "app.services.model_router.get_settings",
         lambda: Settings(_env_file=None, allow_insecure_defaults=True, rag_enabled=True),
@@ -1919,7 +1940,8 @@ def test_candidate_pipeline_uses_rag_only_for_first_stage_and_jsonl_only_for_sec
 
     assert len(result.findings) == 1
     assert rag_purposes == ["candidate"]
-    assert "DEFINITION CONTEXT TEST" in calls[0]["prompt"]
+    assert "DEFINITION CONTEXT TEST" not in calls[0]["prompt"]
+    assert "DEFINITION CONTEXT TEST" in calls[0]["user_context"]
     assert "默认快速审查仅关注" not in calls[0]["prompt"]
     assert "DEFINITION CONTEXT TEST" not in calls[1]["prompt"]
     assert "ALLOWED FINAL CATEGORIES: logic" in calls[1]["prompt"]

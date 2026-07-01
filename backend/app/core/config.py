@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     model_context_window: int = Field(default=12288, ge=1024, le=1048576)
     model_max_tokens: int = Field(default=2048, ge=256, le=16384)
     candidate_model_max_tokens: int = Field(default=2048, ge=256, le=16384)
+    candidate_dynamic_tokens_enabled: bool = True
+    candidate_dynamic_min_tokens: int = Field(default=768, ge=256, le=16384)
+    candidate_dynamic_base_tokens: int = Field(default=384, ge=0, le=16384)
+    candidate_dynamic_tokens_per_line: float = Field(default=4.5, ge=0.1, le=32.0)
     model_max_input_tokens: int = Field(default=10000, ge=512, le=1048576)
     model_token_chars_per_token: float = Field(default=3.5, ge=1.0, le=8.0)
     model_chunk_max_chars: int = Field(default=18000, ge=1000, le=200000)
