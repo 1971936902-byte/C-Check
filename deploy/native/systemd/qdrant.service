@@ -1,0 +1,15 @@
+[Unit]
+Description=Qdrant vector database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/qdrant
+ExecStart=/usr/bin/qdrant --config-path /etc/qdrant/config.yaml --disable-telemetry
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

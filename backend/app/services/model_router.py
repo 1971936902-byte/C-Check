@@ -1617,6 +1617,14 @@ async def _format_candidate_jsonl(
     if not candidate_jsonl.strip():
         return [], 0
 
+    if not settings.candidate_format_model_enabled:
+        return (
+            _parse_candidate_jsonl_response(
+                {"choices": [{"message": {"content": candidate_jsonl}}]}
+            ).findings,
+            0,
+        )
+
     formatted: list[ReviewFinding] = []
     failed_batches = 0
     for batch in _candidate_jsonl_batches(candidate_jsonl, settings.candidate_format_batch_size):

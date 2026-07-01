@@ -1,0 +1,17 @@
+[Unit]
+Description=C-Check Jina code embedding service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=HF_HOME=/opt/modelscope
+WorkingDirectory=/opt/c-check
+ExecStart=/opt/vllm-cu124/bin/python -m vllm.entrypoints.openai.api_server --host 127.0.0.1 --port 8002 --model /opt/modelscope/jinaai/jina-code-embeddings-0_5b --served-model-name jina-code-embeddings-0.5b --task embed --trust-remote-code --quantization fp8 --gpu-memory-utilization 0.10 --max-model-len 8192 --max-num-seqs 32 --max-num-batched-tokens 16384
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

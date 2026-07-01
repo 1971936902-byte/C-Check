@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     rag_embedding_model: str = "hashing-code-embedding-v1"
     rag_embedding_dimension: int = Field(default=128, ge=16, le=4096)
     rag_embedding_timeout_seconds: int = Field(default=30, ge=1, le=300)
-    rag_embedding_batch_size: int = Field(default=16, ge=1, le=128)
+    rag_embedding_batch_size: int = Field(default=32, ge=1, le=128)
     rag_embedding_max_chars: int = Field(default=16000, ge=1000, le=100000)
     rag_embedding_allow_hash_fallback: bool = True
     rag_embedding_query_prefix: str = ""
@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     rag_review_units_enabled: bool = False
     rag_candidate_scan_enabled: bool = True
     candidate_format_batch_size: int = Field(default=10, ge=1, le=100)
+    candidate_format_model_enabled: bool = True
     rag_observability_enabled: bool = True
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False
