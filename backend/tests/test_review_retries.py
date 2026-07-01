@@ -229,7 +229,9 @@ def test_run_review_task_persists_strict_finding_fields(db_session_factory, monk
         task = db.get(ReviewTask, task_id)
         finding = task.report.result_json["findings"][0]
         assert finding["line"] == 3
-        assert set(finding) == {"severity", "category", "title", "description", "file_path", "line"}
+        assert set(finding) == {"severity", "category", "title", "description", "file_path", "line", "code_snippet"}
+        assert [item["line"] for item in finding["code_snippet"]] == [1, 2, 3, 4]
+        assert finding["code_snippet"][2]["kind"] == "removed"
 
     get_settings.cache_clear()
 

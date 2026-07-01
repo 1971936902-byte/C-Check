@@ -178,6 +178,9 @@ class ModelNodeDispatchPool:
 class ModelInvocationResult:
     value: BaseModel
     finish_reason: str | None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    elapsed_seconds: float | None = None
 
 
 class CandidateCategoryDecision(BaseModel):
@@ -1120,6 +1123,7 @@ async def invoke_model(
     response_format = _response_format(settings, response_schema=response_schema)
     if response_format is not None:
         body["response_format"] = response_format
+    request_started = perf_counter()
     try:
         async with httpx.AsyncClient(timeout=node.timeout_seconds) as client:
             for _ in range(2):
@@ -1165,7 +1169,16 @@ async def invoke_model(
         finish_reason = str(payload["choices"][0].get("finish_reason") or "") or None
     except (KeyError, IndexError, TypeError):
         pass
-    return ModelInvocationResult(value=parsed, finish_reason=finish_reason)
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    return ModelInvocationResult(
+        value=parsed,
+        finish_reason=finish_reason,
+        prompt_tokens=int(prompt_tokens) if isinstance(prompt_tokens, (int, float)) else None,
+        completion_tokens=int(completion_tokens) if isinstance(completion_tokens, (int, float)) else None,
+        elapsed_seconds=perf_counter() - request_started,
+    )
 
 
 def _select_candidate_findings(result: ModelReviewResponse) -> list:
@@ -1720,7 +1733,7 @@ async def _resolve_unmatched_categories(
         output_budget = max(128, min(settings.candidate_semantic_max_tokens, 32 + (24 * len(batch))))
         semantic_settings = settings.model_copy(update={"model_max_tokens": output_budget})
         try:
-            decision_result = await invoke_model(
+            decision_invocation = await invoke_model(
                 node=node,
                 files=(),
                 prompt=(
@@ -1733,6 +1746,7 @@ async def _resolve_unmatched_categories(
                 settings=semantic_settings,
                 response_schema=None,
                 response_parser=_parse_semantic_category_response,
+                return_metadata=True,
             )
         except ModelInvocationError as exc:
             failed_batches += 1
@@ -1747,6 +1761,33 @@ async def _resolve_unmatched_categories(
                 )
             )
             continue
+        if isinstance(decision_invocation, ModelInvocationResult):
+            decision_result = decision_invocation.value
+            elapsed = decision_invocation.elapsed_seconds or 0.0
+            generation_tps = (
+                decision_invocation.completion_tokens / elapsed
+                if decision_invocation.completion_tokens is not None and elapsed > 0
+                else None
+            )
+            task.model_log = truncate_model_log(
+                "\n".join(
+                    part
+                    for part in (
+                        task.model_log,
+                        (
+                            "[ModelUsage] stage=semantic; "
+                            f"prompt_tokens={decision_invocation.prompt_tokens}; "
+                            f"completion_tokens={decision_invocation.completion_tokens}; elapsed_s={elapsed:.4f}; "
+                            f"generation_tps={generation_tps:.2f}."
+                            if generation_tps is not None
+                            else ""
+                        ),
+                    )
+                    if part
+                )
+            )
+        else:
+            decision_result = decision_invocation
         if not isinstance(decision_result, CandidateCategoryDecisionResponse):
             failed_batches += 1
             continue
@@ -1882,6 +1923,16 @@ async def _invoke_candidate_review(
                     f"rag_context_s={rag_elapsed:.4f}; model_candidate_s={model_elapsed:.4f}; "
                     f"candidate_count={len(candidate_result.findings)}; "
                     f"discovery_total_s={perf_counter() - discovery_started:.4f}."
+                ),
+                (
+                    "[ModelUsage] stage=candidate; "
+                    f"prompt_tokens={invocation.prompt_tokens}; completion_tokens={invocation.completion_tokens}; "
+                    f"elapsed_s={(invocation.elapsed_seconds or 0.0):.4f}; "
+                    f"generation_tps={(invocation.completion_tokens / invocation.elapsed_seconds):.2f}."
+                    if isinstance(invocation, ModelInvocationResult)
+                    and invocation.completion_tokens is not None
+                    and invocation.elapsed_seconds
+                    else ""
                 ),
             )
             if part
@@ -2165,6 +2216,8 @@ def _rag_context(
         from app.services.code_index.context_builder import build_rag_context
 
         rag_context = build_rag_context(db, task, list(files), settings=settings, persist=persist, purpose=purpose)
+        if persist and rag_context:
+            db.commit()
     except Exception as exc:  # pragma: no cover - defensive guard for optional RAG services.
         current_log = task.model_log or ""
         task.model_log = truncate_model_log(f"{current_log}\n[RAG] Context build skipped: {exc}")

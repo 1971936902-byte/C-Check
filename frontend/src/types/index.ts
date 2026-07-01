@@ -18,6 +18,9 @@ export interface Finding {
   severity: Severity; category: string; title: string; description: string; file_path: string; line?: number | null
   remediation?: string; code_snippet?: CodeLine[]; fixed_snippet?: CodeLine[]
 }
+export interface ReviewEvidence {
+  evidence_key: string; file_path: string; symbol_name?: string | null; start_line: number; end_line: number; reason: string; score: number
+}
 export interface Report { id: string; task_id: string; summary: string; score: number; high_count: number; medium_count: number; low_count: number; suggestion_count: number; category_counts: Record<string, number>; result_json: { summary: string; score: number; findings: Finding[] } }
 export interface Dashboard { users: number; enabled_users: number; models: number; enabled_models: number; tasks: number; queued_tasks: number; running_tasks: number; completed_tasks: number; failed_tasks: number }
 export interface SystemResource { cpu_percent?: number | null; load_average_1m?: number | null; memory_total_bytes?: number | null; memory_used_bytes?: number | null; memory_percent?: number | null; disk_total_bytes?: number | null; disk_used_bytes?: number | null; disk_percent?: number | null }

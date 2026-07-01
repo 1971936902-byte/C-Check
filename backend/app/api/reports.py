@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.models import Report, User
 from app.db.session import get_db
-from app.services.reports import ReportRenderError, render_markdown, render_pdf
+from app.services.reports import ReportRenderError, render_markdown, render_pdf, render_text
 
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -75,4 +75,18 @@ def download_pdf(
         content,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="report-{report.id}.pdf"'},
+    )
+
+
+@router.get("/{report_id}/text")
+def download_text(
+    report_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    report = _owned_report(db, report_id, current_user)
+    return Response(
+        render_text(report),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="report-{report.id}.txt"'},
     )

@@ -75,7 +75,7 @@ install_os_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y \
-    ca-certificates curl git nginx redis-server mysql-server clangd \
+    ca-certificates curl git nginx redis-server mysql-server clangd fonts-noto-cjk poppler-utils \
     build-essential pkg-config xz-utils "${PYTHON_BIN}" "${PYTHON_BIN}-venv" "${PYTHON_BIN}-dev"
 }
 

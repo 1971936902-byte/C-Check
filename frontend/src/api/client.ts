@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AdminTask, AdminUser, CodeIndexEdge, CodeIndexObservability, CodeIndexSymbol, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, Report, ResourceSnapshot, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
+import type { AdminTask, AdminUser, CodeIndexEdge, CodeIndexObservability, CodeIndexSymbol, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, Report, ResourceSnapshot, ReviewEvidence, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
 import { mockApi } from './mock'
 
 export const TOKEN_KEY = 'c-check-token'
@@ -80,12 +80,13 @@ export const reviewApi = {
 }
 export const reportApi = {
   get: (id: string) => MOCK_API_ENABLED ? mockApi.reports.get(id) : api.get<Report>(`/reports/${id}`),
-  download: (id: string, format: 'markdown' | 'pdf') => MOCK_API_ENABLED ? mockApi.reports.download(id, format) : api.get(`/reports/${id}/${format}`, { responseType: 'blob' }),
+  download: (id: string, format: 'markdown' | 'pdf' | 'text') => MOCK_API_ENABLED ? mockApi.reports.download(id, format === 'text' ? 'markdown' : format) : api.get(`/reports/${id}/${format}`, { responseType: 'blob' }),
 }
 export const codeIndexApi = {
   symbols: (taskId: string) => api.get<CodeIndexSymbol[]>(`/code-index/${taskId}/symbols`),
   graph: (taskId: string) => api.get<CodeIndexEdge[]>(`/code-index/${taskId}/graph`),
   observability: (taskId: string) => api.get<CodeIndexObservability>(`/code-index/${taskId}/observability`),
+  evidence: (taskId: string) => api.get<ReviewEvidence[]>(`/reviews/${taskId}/evidence/all`),
 }
 export const adminApi = {
   dashboard: () => MOCK_API_ENABLED ? mockApi.admin.dashboard() : api.get<Dashboard>('/admin/dashboard'),

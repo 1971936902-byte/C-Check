@@ -619,6 +619,7 @@ def test_invoke_model_sends_output_token_budget(monkeypatch):
 
         def json(self):
             return {
+                "usage": {"prompt_tokens": 120, "completion_tokens": 30},
                 "choices": [
                     {
                         "message": {
@@ -675,6 +676,7 @@ def test_invoke_model_returns_finish_reason_when_requested(monkeypatch):
 
         def json(self):
             return {
+                "usage": {"prompt_tokens": 120, "completion_tokens": 30},
                 "choices": [
                     {
                         "finish_reason": "length",
@@ -715,6 +717,9 @@ def test_invoke_model_returns_finish_reason_when_requested(monkeypatch):
     assert isinstance(result, ModelInvocationResult)
     assert result.finish_reason == "length"
     assert result.value.score == 100
+    assert result.prompt_tokens == 120
+    assert result.completion_tokens == 30
+    assert result.elapsed_seconds is not None and result.elapsed_seconds >= 0
 
 
 def test_invoke_model_requests_json_schema_structured_output(monkeypatch):

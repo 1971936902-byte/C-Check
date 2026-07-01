@@ -3,9 +3,9 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { errorMessage, reportApi } from '../api/client'
+import { codeIndexApi, errorMessage, reportApi } from '../api/client'
 import ReportChart from '../components/ReportChart.vue'
-import type { Finding, Report, Severity } from '../types'
+import type { Finding, Report, ReviewEvidence, Severity } from '../types'
 import { scoreTone } from './report-metrics'
 
 const severityTabs: Array<{ key: Severity; label: string; empty: string }> = [
@@ -24,6 +24,7 @@ const severityLabels: Record<Severity, string> = {
 const route = useRoute()
 const report = ref<Report>()
 const loading = ref(true)
+const evidence = ref<ReviewEvidence[]>([])
 const activeSeverity = ref<Severity>('high')
 const pageSize = ref(15)
 const pages = reactive<Record<Severity, number>>({
@@ -60,6 +61,7 @@ const activeTotal = computed(() => findingsBySeverity.value[activeSeverity.value
 onMounted(async () => {
   try {
     report.value = (await reportApi.get(String(route.params.id))).data
+    evidence.value = (await codeIndexApi.evidence(report.value.task_id)).data
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -67,14 +69,14 @@ onMounted(async () => {
   }
 })
 
-async function download(format: 'markdown' | 'pdf') {
+async function download(format: 'markdown' | 'pdf' | 'text') {
   if (!report.value) return
   try {
     const { data } = await reportApi.download(report.value.id, format)
     const url = URL.createObjectURL(data)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `report-${report.value.id}.${format === 'markdown' ? 'md' : 'pdf'}`
+    anchor.download = `report-${report.value.id}.${format === 'markdown' ? 'md' : format === 'text' ? 'txt' : 'pdf'}`
     anchor.click()
     URL.revokeObjectURL(url)
   } catch (error) {
@@ -96,6 +98,7 @@ function locationText(finding: Finding) {
       </div>
       <div>
         <el-button :icon="Download" @click="download('markdown')">下载 Markdown</el-button>
+        <el-button :icon="Download" @click="download('text')">下载 TXT</el-button>
         <el-button type="primary" :icon="Download" @click="download('pdf')">下载 PDF</el-button>
       </div>
     </header>
@@ -137,6 +140,18 @@ function locationText(finding: Finding) {
           <article class="panel glass">
             <h2>问题分类</h2>
             <ReportChart :counts="report.category_counts" mode="category" />
+          </article>
+          <article class="panel glass supplemental-info">
+            <h2>审查补充信息</h2>
+            <p>RAG 检索到的相关定义、调用关系和跨文件上下文，仅用于辅助理解。</p>
+            <el-empty v-if="!evidence.length" description="暂无补充信息" :image-size="56" />
+            <ul v-else>
+              <li v-for="item in evidence" :key="item.evidence_key">
+                <strong>{{ item.evidence_key }} · {{ item.symbol_name || '文件上下文' }}</strong>
+                <code>{{ item.file_path }}:{{ item.start_line }}-{{ item.end_line }}</code>
+                <small>{{ item.reason }} · 相关度 {{ item.score.toFixed(2) }}</small>
+              </li>
+            </ul>
           </article>
         </aside>
 
@@ -386,6 +401,12 @@ function locationText(finding: Finding) {
   justify-content: flex-end;
   padding-top: 16px;
 }
+
+.supplemental-info p { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.supplemental-info ul { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
+.supplemental-info li { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; }
+.supplemental-info code { overflow-wrap: anywhere; font-size: 12px; }
+.supplemental-info small { color: var(--text-secondary); }
 
 @media (max-width: 720px) {
   .report-layout {
