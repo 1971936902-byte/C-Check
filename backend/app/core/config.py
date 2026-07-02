@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     candidate_semantic_batch_size: int = Field(default=12, ge=1, le=50)
     candidate_semantic_max_tokens: int = Field(default=384, ge=128, le=4096)
     rag_observability_enabled: bool = True
+    clang_static_analysis_enabled: bool = False
+    clang_static_analysis_executable: str = "clang"
+    clang_static_analysis_timeout_seconds: int = Field(default=45, ge=5, le=600)
+    clang_static_analysis_max_files: int = Field(default=50, ge=1, le=1000)
+    clang_static_analysis_ctu_enabled: bool = True
+    codechecker_executable: str = "CodeChecker"
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"
     model_deployment_enabled: bool = False
     model_deployment_script: Path = REPOSITORY_ROOT / "deploy" / "models" / "deploy-vllm-model.sh"

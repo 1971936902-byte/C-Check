@@ -1,0 +1,79 @@
+#include "resource.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct LogContext {
+    FILE *stream;
+    char *scratch;
+} LogContext;
+
+int clean_unified_cleanup(const char *path)
+{
+    FILE *stream = fopen(path, "r");
+    char *buffer = NULL;
+    int result = -1;
+    if (stream == NULL)
+        return -1;
+    buffer = malloc(128);
+    if (buffer == NULL)
+        goto cleanup;
+    if (fgets(buffer, 128, stream) != NULL)
+        result = 0;
+cleanup:
+    free(buffer);
+    fclose(stream);
+    return result;
+}
+
+int leak_on_early_return(const char *path, int stop)
+{
+    FILE *stream = fopen(path, "r");
+    if (stream == NULL)
+        return -1;
+    if (stop)
+        return 1;
+    fclose(stream);
+    return 0;
+}
+
+int clean_struct_member(const char *path)
+{
+    LogContext context = {0};
+    context.stream = fopen(path, "r");
+    context.scratch = malloc(64);
+    if (context.stream == NULL || context.scratch == NULL)
+        goto cleanup;
+    context.scratch[0] = '\0';
+cleanup:
+    free(context.scratch);
+    if (context.stream != NULL)
+        fclose(context.stream);
+    return 0;
+}
+
+int leak_struct_member(const char *path)
+{
+    LogContext context = {0};
+    context.stream = fopen(path, "r");
+    if (context.stream == NULL)
+        return -1;
+    return 0;
+}
+
+int clean_custom_resource(void)
+{
+    PageManager *manager = page_mgr_create(64);
+    if (manager == NULL)
+        return -1;
+    page_mgr_load(manager);
+    page_mgr_destroy(manager);
+    return 0;
+}
+
+int leak_custom_resource(void)
+{
+    PageManager *manager = page_mgr_create(64);
+    if (manager == NULL)
+        return -1;
+    return page_mgr_load(manager);
+}

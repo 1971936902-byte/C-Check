@@ -27,6 +27,7 @@ from app.schemas.model_response import (
 from app.services.check_types import CHECK_TYPE_LABELS, check_types_prompt
 from app.services.model_output_sanitizer import ModelOutputSanitizer
 from app.services.static_c_rules import detect_static_c_findings
+from app.services.code_index.clang_static_analyzer import diagnostics_to_findings, run_clang_static_analysis
 
 
 MAX_MODEL_LOG_CHARS = 12000
@@ -2161,7 +2162,32 @@ async def _finalize_candidate_review(
     formatting_elapsed = perf_counter() - finalize_started
     validation_started = perf_counter()
     static_findings = detect_static_c_findings(files)
-    prevalidated, rejected = _filter_candidate_findings(files, [*formatted, *static_findings])
+    clang_findings: list[ReviewFinding] = []
+    clang_summary = "disabled"
+    if settings.clang_static_analysis_enabled:
+        try:
+            clang_result = run_clang_static_analysis(files, settings)
+            clang_findings = diagnostics_to_findings(clang_result.diagnostics)
+            clang_summary = (
+                f"available={clang_result.available}; completed={clang_result.completed}; "
+                f"files={len(clang_result.analyzed_files)}; diagnostics={len(clang_result.diagnostics)}; "
+                f"elapsed_s={clang_result.elapsed_seconds:.4f}; errors={clang_result.errors[:3]}"
+            )
+        except Exception as exc:
+            # External analyzer failures must never break the established LLM
+            # review path. The adapter remains optional until acceptance data
+            # proves it should be enabled by default.
+            clang_summary = f"failed={type(exc).__name__}: {exc}"
+    prevalidated, rejected = _filter_candidate_findings(
+        files,
+        [*formatted, *static_findings],
+    )
+    # Clang diagnostics already carry a feasible symbolic-execution path.
+    # Running them through the lightweight path-insensitive leak suppressor
+    # could discard a real early-return leak merely because another branch
+    # releases the same handle later in the function.
+    clang_prevalidated = _normalize_candidate_findings(files, clang_findings)
+    prevalidated = _dedupe_candidate_findings([*prevalidated, *clang_prevalidated])
     validation_elapsed = perf_counter() - validation_started
     category_started = perf_counter()
     deterministic, unresolved = _partition_category_candidates(prevalidated, allowed_categories)
@@ -2199,6 +2225,7 @@ async def _finalize_candidate_review(
                     "[CandidatePipeline] "
                     f"discovered={len(candidate_result.findings)}; cached_jsonl_rows={len(candidate_result.findings)}; "
                     f"formatted={len(formatted)}; static_supplemental={len(static_findings)}; "
+                    f"clang_supplemental={len(clang_findings)}; clang=({clang_summary}); "
                     f"category_allowed={len(category_filtered)}; "
                     f"deterministic={len(deterministic)}; semantic_unresolved={len(unresolved)}; "
                     f"semantic_resolved={len(semantic_resolved)}; semantic_failed_batches={semantic_failed_batches}; "

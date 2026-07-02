@@ -1,0 +1,34 @@
+#include "resource.h"
+#include <stdlib.h>
+
+struct PageManager {
+    char *buffer;
+    size_t capacity;
+};
+
+PageManager *page_mgr_create(size_t capacity)
+{
+    PageManager *manager = malloc(sizeof(*manager));
+    if (manager == NULL)
+        return NULL;
+    manager->buffer = malloc(capacity);
+    if (manager->buffer == NULL) {
+        free(manager);
+        return NULL;
+    }
+    manager->capacity = capacity;
+    return manager;
+}
+
+void page_mgr_destroy(PageManager *manager)
+{
+    if (manager == NULL)
+        return;
+    free(manager->buffer);
+    free(manager);
+}
+
+int page_mgr_load(PageManager *manager)
+{
+    return manager != NULL && manager->capacity > 0;
+}

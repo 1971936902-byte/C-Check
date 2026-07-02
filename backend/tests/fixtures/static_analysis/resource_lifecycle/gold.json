@@ -1,0 +1,13 @@
+{
+  "expected_leaks": [
+    "leak_on_early_return",
+    "leak_struct_member",
+    "leak_custom_resource"
+  ],
+  "expected_clean": [
+    "clean_unified_cleanup",
+    "clean_struct_member",
+    "clean_custom_resource"
+  ],
+  "notes": "The custom PageManager pair requires CTU analysis or a project resource protocol."
+}
