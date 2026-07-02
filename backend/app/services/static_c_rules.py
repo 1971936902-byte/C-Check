@@ -9,9 +9,12 @@ from app.schemas.model_response import FindingCategory, FindingSeverity, ReviewF
 
 
 _FUNC_MACRO_RE = re.compile(r"^\s*#\s*define\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^)]*)\)\s*(?P<body>.*)")
-_ALLOC_SIZE_RE = re.compile(r"\b(?:malloc|realloc)\s*\((?P<size>[^;]*\*[^;]*)\)")
+_ALLOC_SIZE_RE = re.compile(r"\b(?:malloc|realloc)\s*\((?P<size>[^;]+)\)")
 _CALLOC_SIZE_RE = re.compile(r"\bcalloc\s*\((?P<count>[^,;]+),(?P<size>[^;]+)\)")
-_UNSIGNED_DIFF_RE = re.compile(r"\b(?:u?int(?:8|16|32|64)_t|size_t|uint32_t|uint64_t|unsigned\s+\w+)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^;]+-[^;]+;")
+_UNSIGNED_INIT_RE = re.compile(
+    r"\b(?:u?int(?:8|16|32|64)_t|size_t|uint32_t|uint64_t|unsigned\s+\w+)\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<expression>[^;]+);"
+)
 _SIGNED_ACCUM_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*\*\s*(?:10|[A-Za-z_][A-Za-z0-9_]*)\s*[+-]")
 _OFF_BY_ONE_GUARD_RE = re.compile(r"\bif\s*\(\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*>\s*(?P<limit>[A-Za-z_][A-Za-z0-9_]*)\s*\)")
 _NULL_TERMINATOR_WRITE_RE = re.compile(r"(?P<buffer>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]\s*=\s*'\\0'")
@@ -108,7 +111,11 @@ def _param_used_without_parentheses(body: str, param: str) -> bool:
 def _allocation_size_findings(source: ReviewFile, lines: list[str]) -> list[ReviewFinding]:
     findings: list[ReviewFinding] = []
     for line_number, line in enumerate(lines, start=1):
-        if _ALLOC_SIZE_RE.search(line) or _CALLOC_SIZE_RE.search(line):
+        allocation = _ALLOC_SIZE_RE.search(line)
+        calloc = _CALLOC_SIZE_RE.search(line)
+        risky_size = allocation is not None and _has_binary_multiplication(allocation.group("size"))
+        risky_calloc = calloc is not None and not _is_compile_time_constant(calloc.group("count"))
+        if risky_size or risky_calloc:
             findings.append(
                 _finding(
                     source,
@@ -120,6 +127,17 @@ def _allocation_size_findings(source: ReviewFile, lines: list[str]) -> list[Revi
                 )
             )
     return findings
+
+
+def _has_binary_multiplication(expression: str) -> bool:
+    # Ignore pointer declarators inside sizeof(*ptr); they are not arithmetic.
+    without_sizeof = re.sub(r"\bsizeof\s*\([^()]*\)", "1", expression)
+    without_sizeof = re.sub(r"\bsizeof\s+[A-Za-z_][A-Za-z0-9_]*", "1", without_sizeof)
+    return re.search(r"(?:\b[A-Za-z_][A-Za-z0-9_]*\b|\d+|\))\s*\*\s*(?:\b[A-Za-z_][A-Za-z0-9_]*\b|\d+|\()", without_sizeof) is not None
+
+
+def _is_compile_time_constant(expression: str) -> bool:
+    return re.fullmatch(r"\s*(?:\d+|sizeof\s*(?:\([^()]+\)|[A-Za-z_][A-Za-z0-9_]*))\s*", expression) is not None
 
 
 def _integer_expression_findings(source: ReviewFile, lines: list[str]) -> list[ReviewFinding]:
@@ -136,7 +154,8 @@ def _integer_expression_findings(source: ReviewFile, lines: list[str]) -> list[R
                     description="有符号整数在循环中累乘累加，未先检查上下界，极端输入会触发有符号整数溢出。",
                 )
             )
-        if _UNSIGNED_DIFF_RE.search(line):
+        unsigned_init = _UNSIGNED_INIT_RE.search(line)
+        if unsigned_init and re.search(r"-(?!>)", unsigned_init.group("expression")):
             findings.append(
                 _finding(
                     source,

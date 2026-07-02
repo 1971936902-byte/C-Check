@@ -1525,6 +1525,7 @@ def _dedupe_final_findings(findings: Sequence) -> list:
             finding.category.value,
             finding.line,
             finding.title.strip().lower(),
+            finding.description.strip().lower(),
         )
         if key in seen:
             continue
@@ -1703,6 +1704,7 @@ def _filter_candidate_findings(
         "out_of_scope_category": 0,
     }
     for finding in candidates:
+        finding = _normalize_lifetime_candidate(files, finding)
         candidate_text = _candidate_text(finding)
         if any(pattern in candidate_text for pattern in _COMPILATION_ONLY_PATTERNS):
             rejected["compilation_only"] += 1
@@ -1743,6 +1745,49 @@ def _filter_candidate_findings(
             )
         )
     return _dedupe_final_findings(kept), rejected
+
+
+_LIFETIME_DEFECT_PATTERN = re.compile(
+    r"double[ _-]?free|use[ _-]?after[ _-]?free|dangling|stale|"
+    r"二次释放|重复释放|释放后|悬空|野指针|函数指针",
+    re.IGNORECASE,
+)
+
+
+def _normalize_lifetime_candidate(
+    files: Sequence[ReviewFile],
+    finding: ReviewFinding,
+) -> ReviewFinding:
+    if finding.category != FindingCategory.RESOURCE_LEAK:
+        return finding
+    source = _review_file_by_path(files, finding.file_path)
+    if source is None or finding.line is None:
+        return finding
+    lines = source.source_text.splitlines()
+    if finding.line < 1 or finding.line > len(lines):
+        return finding
+    start = max(0, finding.line - 3)
+    end = min(len(lines), finding.line + 4)
+    nearby = "\n".join(lines[start:end])
+    text = f"{_candidate_text(finding)}\n{nearby}"
+    has_lifetime_language = _LIFETIME_DEFECT_PATTERN.search(text) is not None
+    has_release_lifecycle = re.search(r"\b(?:free|dlclose)\s*\(", nearby) is not None
+    has_subsequent_use = re.search(
+        r"\b(?:free\s*\(|[A-Za-z_][A-Za-z0-9_]*\s*\(|[A-Za-z_][A-Za-z0-9_]*\s*=)",
+        "\n".join(lines[finding.line : end]),
+    ) is not None
+    sanitized_nearby = "\n".join(_strip_comments_and_strings(line) for line in lines[start:end])
+    has_stale_dynamic_symbol = (
+        "dlclose" in sanitized_nearby
+        and re.search(
+            r"\b(?P<symbol>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P=symbol)\s*;",
+            sanitized_nearby,
+        )
+        is not None
+    )
+    if has_lifetime_language or has_stale_dynamic_symbol or (has_release_lifecycle and has_subsequent_use):
+        return finding.model_copy(update={"category": FindingCategory.MEMORY_SAFETY})
+    return finding
 
 
 def _is_resource_leak_false_positive(source: ReviewFile, line_number: int, finding: ReviewFinding) -> bool:
@@ -1874,12 +1919,43 @@ def _partition_category_candidates(
     deterministic: list[ReviewFinding] = []
     unresolved: list[ReviewFinding] = []
     for finding in findings:
+        corrected = _deterministic_category_correction(finding, allowed)
+        if corrected is not None:
+            deterministic.append(corrected)
+            continue
         category = finding.category.value
         if category in allowed and category != "other":
             deterministic.append(finding)
         else:
             unresolved.append(finding)
     return deterministic, unresolved
+
+
+_DETERMINISTIC_TYPE_CATEGORY = {
+    "sql_injection": "input_validation",
+    "format_string": "input_validation",
+    "format_string_vulnerability": "input_validation",
+    "double_free": "memory_safety",
+    "use_after_free": "memory_safety",
+    "dangling_pointer": "memory_safety",
+    "function_pointer_dangling": "pointer_safety",
+    "permissions": "other",
+    "weak_crypto": "other",
+    "crypto_vulnerability": "other",
+    "timing_attack": "other",
+    "timing_side_channel": "other",
+}
+
+
+def _deterministic_category_correction(
+    finding: ReviewFinding,
+    allowed: set[str],
+) -> ReviewFinding | None:
+    defect_type = finding.title.strip().lower().replace("-", "_").replace(" ", "_")
+    target = _DETERMINISTIC_TYPE_CATEGORY.get(defect_type)
+    if target is None or target not in allowed:
+        return None
+    return finding.model_copy(update={"category": FindingCategory(target)})
 
 
 def _candidate_source_excerpt(files: Sequence[ReviewFile], finding: ReviewFinding, *, radius: int = 2) -> str:

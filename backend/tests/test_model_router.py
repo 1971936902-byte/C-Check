@@ -1094,6 +1094,24 @@ void batch_format_output(char *out_export, uint32_t export_max, char *temp_line)
     assert "拷贝边界缺少等号" in titles
 
 
+def test_static_rules_do_not_treat_sizeof_pointer_or_arrow_as_arithmetic():
+    source = ReviewFile(
+        relative_path="safe_patterns.c",
+        source_text="""typedef struct Item { unsigned width; } Item;
+Item *make_item(void) {
+    Item *item = malloc(sizeof(*item));
+    uint32_t width = item->width;
+    return item;
+}
+""",
+        size_bytes=170,
+    )
+
+    findings = detect_static_c_findings([source])
+
+    assert findings == []
+
+
 def test_candidate_filter_drops_stack_and_released_resource_leak_false_positives():
     source = ReviewFile(
         relative_path="leak_fp.c",
@@ -1194,6 +1212,78 @@ def test_candidate_filter_retains_real_resource_leak_with_ownership_evidence():
     assert len(kept) == 1
     assert kept[0].line == 3
     assert rejected["resource_leak_false_positive"] == 0
+
+
+def test_candidate_filter_reclassifies_lifetime_defects_before_leak_suppression():
+    source = ReviewFile(
+        relative_path="cache.c",
+        source_text="""static char *cached;
+void release_cache(void) {
+    free(cached);
+}
+void reset_cache(void) {
+    free(cached);
+}
+""",
+        size_bytes=120,
+    )
+    finding = ReviewFinding(
+        severity="high",
+        category="resource_leak",
+        title="double_free",
+        description="cached may be released twice",
+        file_path="cache.c",
+        line=3,
+    )
+
+    kept, rejected = _filter_candidate_findings([source], [finding])
+
+    assert len(kept) == 1
+    assert kept[0].category == FindingCategory.MEMORY_SAFETY
+    assert rejected["resource_leak_false_positive"] == 0
+
+
+def test_candidate_filter_reclassifies_stale_symbol_after_dlclose():
+    source = ReviewFile(
+        relative_path="plugin.c",
+        source_text="""static void *handle;
+static int (*entrypoint)(void);
+void unload(void) {
+    if (handle) dlclose(handle); entrypoint = entrypoint;
+}
+""",
+        size_bytes=140,
+    )
+    finding = ReviewFinding(
+        severity="high",
+        category="resource_leak",
+        title="resource_leak",
+        description="entrypoint is not reset",
+        file_path="plugin.c",
+        line=4,
+    )
+
+    kept, rejected = _filter_candidate_findings([source], [finding])
+
+    assert len(kept) == 1
+    assert kept[0].category == FindingCategory.MEMORY_SAFETY
+    assert rejected["resource_leak_false_positive"] == 0
+
+
+def test_candidate_filter_keeps_distinct_operations_on_same_line():
+    source = ReviewFile(
+        relative_path="config.c",
+        source_text='void parse(void) { fscanf(fp, "%s=%s", key, value); }\n',
+        size_bytes=58,
+    )
+    findings = [
+        ReviewFinding(severity="high", category="buffer_overflow", title="buffer_overflow", description="key buffer can overflow", file_path="config.c", line=1),
+        ReviewFinding(severity="high", category="buffer_overflow", title="buffer_overflow", description="value buffer can overflow", file_path="config.c", line=1),
+    ]
+
+    kept, _ = _filter_candidate_findings([source], findings)
+
+    assert len(kept) == 2
 
 
 def test_compiler_findings_keep_exact_location_and_merge_same_resource():
@@ -2322,6 +2412,26 @@ def test_category_partition_keeps_exact_matches_and_routes_other_for_semantic_re
 
     assert deterministic == [matched]
     assert semantic == [unresolved]
+
+
+def test_category_partition_maps_known_security_types_without_model_round_trip():
+    findings = [
+        ReviewFinding(severity="high", category="other", title="sql_injection", description="query includes user input", file_path="db.c", line=4),
+        ReviewFinding(severity="high", category="other", title="format_string_vulnerability", description="printf uses user format", file_path="log.c", line=8),
+        ReviewFinding(severity="medium", category="other", title="crypto_vulnerability", description="fixed key is used", file_path="crypto.c", line=3),
+    ]
+
+    deterministic, semantic = _partition_category_candidates(
+        findings,
+        ["input_validation", "other"],
+    )
+
+    assert [finding.category for finding in deterministic] == [
+        FindingCategory.INPUT_VALIDATION,
+        FindingCategory.INPUT_VALIDATION,
+        FindingCategory.OTHER,
+    ]
+    assert semantic == []
 
 
 def test_unmatched_category_is_corrected_by_semantic_fallback_without_changing_facts(monkeypatch):
