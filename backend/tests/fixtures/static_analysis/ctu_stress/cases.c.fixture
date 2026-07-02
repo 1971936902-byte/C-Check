@@ -1,0 +1,89 @@
+#include "handle.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct Owner {
+    Handle *handle;
+} Owner;
+
+int safe_custom_handle(void)
+{
+    Handle *handle = handle_create(64);
+    if (handle == NULL)
+        return -1;
+    int result = handle_touch(handle);
+    handle_destroy(handle);
+    return result;
+}
+
+int leak_custom_handle(int stop)
+{
+    Handle *handle = handle_create(64);
+    if (handle == NULL)
+        return -1;
+    if (stop)
+        return 1;
+    handle_destroy(handle);
+    return 0;
+}
+
+int safe_owner(void)
+{
+    Owner owner = {0};
+    owner.handle = handle_create(32);
+    if (owner.handle == NULL)
+        return -1;
+    handle_touch(owner.handle);
+    handle_destroy(owner.handle);
+    owner.handle = NULL;
+    return 0;
+}
+
+int leak_owner(void)
+{
+    Owner owner = {0};
+    owner.handle = handle_create(32);
+    if (owner.handle == NULL)
+        return -1;
+    return handle_touch(owner.handle);
+}
+
+int safe_stream(const char *path)
+{
+    FILE *stream = fopen(path, "r");
+    if (stream == NULL)
+        return -1;
+    int value = fgetc(stream);
+    fclose(stream);
+    return value;
+}
+
+int leak_stream(const char *path, int stop)
+{
+    FILE *stream = fopen(path, "r");
+    if (stream == NULL)
+        return -1;
+    if (stop)
+        return 1;
+    fclose(stream);
+    return 0;
+}
+
+int double_free_buffer(void)
+{
+    char *buffer = malloc(16);
+    if (buffer == NULL)
+        return -1;
+    free(buffer);
+    free(buffer);
+    return 0;
+}
+
+int use_after_free_buffer(void)
+{
+    char *buffer = malloc(16);
+    if (buffer == NULL)
+        return -1;
+    free(buffer);
+    return buffer[0];
+}

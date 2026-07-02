@@ -1,0 +1,4 @@
+{
+  "expected_vulnerable_functions": ["leak_device"],
+  "expected_clean_functions": ["safe_device"]
+}

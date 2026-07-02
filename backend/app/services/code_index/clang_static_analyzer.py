@@ -17,7 +17,7 @@ from app.db.models import ReviewFile
 from app.schemas.model_response import ReviewFinding
 
 
-BASE_CHECKERS = ("core", "unix.Malloc", "unix.MismatchedDeallocator")
+BASE_CHECKERS = ("unix.Malloc", "unix.MismatchedDeallocator")
 STREAM_CHECKER_PREFERENCE = ("unix.Stream", "alpha.unix.Stream", "alpha.unix.SimpleStream")
 
 
@@ -49,6 +49,8 @@ class ClangAnalysisResult:
     errors: list[str] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     executable: str | None = None
+    partial: bool = False
+    skipped_files: int = 0
 
 
 def run_clang_static_analysis(
@@ -67,14 +69,33 @@ def run_clang_static_analysis(
 
     source_files = [source for source in files if source.relative_path.lower().endswith(".c")]
     if len(source_files) > settings.clang_static_analysis_max_files:
-        source_files = source_files[: settings.clang_static_analysis_max_files]
+        skipped = len(source_files) - settings.clang_static_analysis_max_files
+        return ClangAnalysisResult(
+            available=True,
+            completed=False,
+            partial=True,
+            skipped_files=skipped,
+            executable=executable,
+            errors=[
+                f"analysis skipped: {len(source_files)} C files exceed "
+                f"CLANG_STATIC_ANALYSIS_MAX_FILES={settings.clang_static_analysis_max_files}"
+            ],
+            elapsed_seconds=perf_counter() - started,
+        )
     result = ClangAnalysisResult(available=True, completed=True, executable=executable)
     checker_argument = _checker_argument(executable)
     with tempfile.TemporaryDirectory(prefix="c-check-clang-") as temp_dir:
         root = Path(temp_dir)
         _materialize_sources(root, files)
+        include_arguments = _include_arguments(root, files)
         if settings.clang_static_analysis_ctu_enabled and len(source_files) > 1:
-            ctu_result = _run_codechecker_ctu(root, source_files, executable, settings)
+            ctu_result = _run_codechecker_ctu(
+                root,
+                source_files,
+                executable,
+                include_arguments,
+                settings,
+            )
             if ctu_result is not None and ctu_result.completed:
                 ctu_result.elapsed_seconds = perf_counter() - started
                 return ctu_result
@@ -90,8 +111,7 @@ def run_clang_static_analysis(
                 "-x",
                 "c",
                 "-std=c11",
-                "-I",
-                str(root),
+                *include_arguments,
                 "-Xanalyzer",
                 f"-analyzer-checker={checker_argument}",
                 "-Xanalyzer",
@@ -135,6 +155,7 @@ def _run_codechecker_ctu(
     root: Path,
     source_files: Sequence[ReviewFile],
     clang_executable: str,
+    include_arguments: Sequence[str],
     settings: Settings,
 ) -> ClangAnalysisResult | None:
     codechecker = _resolve_codechecker(settings.codechecker_executable)
@@ -149,8 +170,7 @@ def _run_codechecker_ctu(
                 "directory": str(root),
                 "arguments": [
                     clang_executable,
-                    "-I",
-                    str(root),
+                    *include_arguments,
                     "-std=c11",
                     "-c",
                     str(root / relative_path),
@@ -176,7 +196,8 @@ def _run_codechecker_ctu(
         "--ctu-ast-mode",
         "load-from-pch",
         "--jobs",
-        "2",
+        str(settings.clang_static_analysis_jobs),
+        "--disable-all",
     ]
     for checker in enabled_checkers:
         command.extend(["-e", checker])
@@ -189,7 +210,7 @@ def _run_codechecker_ctu(
             env=env,
             capture_output=True,
             text=True,
-            timeout=max(settings.clang_static_analysis_timeout_seconds, 120),
+            timeout=settings.clang_static_analysis_timeout_seconds,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -289,6 +310,17 @@ def _materialize_sources(root: Path, files: Sequence[ReviewFile]) -> None:
         target.write_text(source.source_text, encoding="utf-8")
 
 
+def _include_arguments(root: Path, files: Sequence[ReviewFile]) -> list[str]:
+    directories = {root}
+    for source in files:
+        relative_path = _safe_relative_path(source.relative_path)
+        directories.add((root / relative_path).parent)
+    arguments: list[str] = []
+    for directory in sorted(directories, key=lambda item: item.as_posix()):
+        arguments.extend(["-I", str(directory)])
+    return arguments
+
+
 def _safe_relative_path(value: str) -> Path:
     normalized = value.replace("\\", "/").lstrip("/")
     parts = [part for part in normalized.split("/") if part not in {"", ".", ".."}]
@@ -344,11 +376,23 @@ def _plist_file_path(files: list[str], index: object, root: Path) -> str:
 
 def _finding_classification(diagnostic: AnalyzerDiagnostic) -> tuple[str, str]:
     text = f"{diagnostic.checker} {diagnostic.category} {diagnostic.message}".lower()
-    if "leak" in text or "stream" in diagnostic.checker.lower():
+    checker = diagnostic.checker.lower()
+    if any(
+        token in text
+        for token in (
+            "use-after-free",
+            "use after free",
+            "use of memory after it is freed",
+            "double free",
+            "released memory",
+        )
+    ):
+        return "memory_safety", "high"
+    if "mismatcheddeallocator" in checker:
+        return "memory_safety", "high"
+    if "leak" in text or "stream" in checker:
         is_memory_leak = "malloc" in diagnostic.checker.lower() or "memory" in text
         return "resource_leak", "high" if is_memory_leak else "medium"
-    if any(token in text for token in ("use-after-free", "double free", "released memory")):
-        return "memory_safety", "high"
     if any(token in text for token in ("out of bound", "buffer overflow", "array bound")):
         return "buffer_overflow", "high"
     if "null" in text:

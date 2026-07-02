@@ -1,0 +1,11 @@
+#ifndef HANDLE_H
+#define HANDLE_H
+
+#include <stddef.h>
+
+typedef struct Handle Handle;
+Handle *handle_create(size_t size);
+void handle_destroy(Handle *handle);
+int handle_touch(Handle *handle);
+
+#endif

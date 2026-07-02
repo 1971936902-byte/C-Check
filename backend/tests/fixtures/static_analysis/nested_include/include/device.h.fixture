@@ -1,0 +1,9 @@
+#ifndef DEVICE_H
+#define DEVICE_H
+
+typedef struct Device Device;
+Device *device_open(void);
+void device_close(Device *device);
+int device_poll(Device *device);
+
+#endif

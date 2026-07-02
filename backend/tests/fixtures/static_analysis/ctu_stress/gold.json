@@ -1,0 +1,14 @@
+{
+  "expected_vulnerable_functions": [
+    "leak_custom_handle",
+    "leak_owner",
+    "leak_stream",
+    "double_free_buffer",
+    "use_after_free_buffer"
+  ],
+  "expected_clean_functions": [
+    "safe_custom_handle",
+    "safe_owner",
+    "safe_stream"
+  ]
+}

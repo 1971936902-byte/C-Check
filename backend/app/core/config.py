@@ -98,6 +98,7 @@ class Settings(BaseSettings):
     clang_static_analysis_executable: str = "clang"
     clang_static_analysis_timeout_seconds: int = Field(default=45, ge=5, le=600)
     clang_static_analysis_max_files: int = Field(default=50, ge=1, le=1000)
+    clang_static_analysis_jobs: int = Field(default=1, ge=1, le=4)
     clang_static_analysis_ctu_enabled: bool = True
     codechecker_executable: str = "CodeChecker"
     model_catalog_path: Path = REPOSITORY_ROOT / "deploy" / "models" / "catalog.json"

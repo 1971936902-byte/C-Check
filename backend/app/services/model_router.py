@@ -1551,6 +1551,101 @@ def _dedupe_candidate_findings(findings: Sequence[ReviewFinding]) -> list[Review
     return deduped
 
 
+def _validate_compiler_findings(
+    files: Sequence[ReviewFile],
+    findings: Sequence[ReviewFinding],
+) -> list[ReviewFinding]:
+    validated: list[ReviewFinding] = []
+    for finding in findings:
+        source = _review_file_by_path(files, finding.file_path)
+        if source is None or finding.line is None:
+            continue
+        line_count = len(source.source_text.splitlines())
+        if finding.line < 1 or finding.line > max(1, line_count):
+            continue
+        validated.append(finding.model_copy(update={"file_path": source.relative_path}))
+    return validated
+
+
+def _merge_compiler_findings(
+    files: Sequence[ReviewFile],
+    existing: Sequence[ReviewFinding],
+    compiler_findings: Sequence[ReviewFinding],
+) -> list[ReviewFinding]:
+    merged = list(existing)
+    for compiler_finding in compiler_findings:
+        merged = [
+            finding
+            for finding in merged
+            if not _findings_describe_same_issue(files, finding, compiler_finding)
+        ]
+        merged.append(compiler_finding)
+    return _dedupe_candidate_findings(merged)
+
+
+def _findings_describe_same_issue(
+    files: Sequence[ReviewFile],
+    left: ReviewFinding,
+    right: ReviewFinding,
+) -> bool:
+    if left.category != right.category:
+        return False
+    left_source = _review_file_by_path(files, left.file_path)
+    right_source = _review_file_by_path(files, right.file_path)
+    if left_source is None or right_source is None:
+        return False
+    if left_source.relative_path.replace("\\", "/").lower() != right_source.relative_path.replace("\\", "/").lower():
+        return False
+    if left.line is None or right.line is None:
+        return False
+    if abs(left.line - right.line) <= 1:
+        return True
+    if left.category != FindingCategory.RESOURCE_LEAK:
+        return False
+    subjects = _resource_identity_tokens(left) & _resource_identity_tokens(right)
+    if not subjects:
+        return False
+    lines = left_source.source_text.splitlines()
+    left_window = _function_window_for_line(lines, left.line)
+    right_window = _function_window_for_line(lines, right.line)
+    return left_window is not None and left_window == right_window
+
+
+_RESOURCE_IDENTITY_STOPWORDS = {
+    "clang",
+    "stream",
+    "file",
+    "handle",
+    "resource",
+    "memory",
+    "leak",
+    "opened",
+    "closed",
+    "released",
+    "never",
+    "return",
+    "path",
+    "this",
+    "that",
+    "with",
+    "without",
+    "from",
+    "before",
+    "after",
+    "not",
+    "may",
+    "is",
+}
+
+
+def _resource_identity_tokens(finding: ReviewFinding) -> set[str]:
+    return {
+        token.lower()
+        for token in _C_IDENTIFIER_RE.findall(finding.description)
+        if len(token) >= 3 and token.lower() not in _RESOURCE_IDENTITY_STOPWORDS
+    }
+
+
 _COMPILATION_ONLY_PATTERNS = (
     "missing declaration",
     "missing definition",
@@ -2166,11 +2261,12 @@ async def _finalize_candidate_review(
     clang_summary = "disabled"
     if settings.clang_static_analysis_enabled:
         try:
-            clang_result = run_clang_static_analysis(files, settings)
+            clang_result = await asyncio.to_thread(run_clang_static_analysis, files, settings)
             clang_findings = diagnostics_to_findings(clang_result.diagnostics)
             clang_summary = (
                 f"available={clang_result.available}; completed={clang_result.completed}; "
                 f"files={len(clang_result.analyzed_files)}; diagnostics={len(clang_result.diagnostics)}; "
+                f"partial={clang_result.partial}; skipped_files={clang_result.skipped_files}; "
                 f"elapsed_s={clang_result.elapsed_seconds:.4f}; errors={clang_result.errors[:3]}"
             )
         except Exception as exc:
@@ -2186,8 +2282,8 @@ async def _finalize_candidate_review(
     # Running them through the lightweight path-insensitive leak suppressor
     # could discard a real early-return leak merely because another branch
     # releases the same handle later in the function.
-    clang_prevalidated = _normalize_candidate_findings(files, clang_findings)
-    prevalidated = _dedupe_candidate_findings([*prevalidated, *clang_prevalidated])
+    clang_prevalidated = _validate_compiler_findings(files, clang_findings)
+    prevalidated = _merge_compiler_findings(files, prevalidated, clang_prevalidated)
     validation_elapsed = perf_counter() - validation_started
     category_started = perf_counter()
     deterministic, unresolved = _partition_category_candidates(prevalidated, allowed_categories)

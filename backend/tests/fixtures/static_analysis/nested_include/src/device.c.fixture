@@ -1,0 +1,24 @@
+#include "device.h"
+#include <stdlib.h>
+
+struct Device {
+    int state;
+};
+
+Device *device_open(void)
+{
+    Device *device = malloc(sizeof(*device));
+    if (device != NULL)
+        device->state = 1;
+    return device;
+}
+
+void device_close(Device *device)
+{
+    free(device);
+}
+
+int device_poll(Device *device)
+{
+    return device == NULL ? -1 : device->state;
+}

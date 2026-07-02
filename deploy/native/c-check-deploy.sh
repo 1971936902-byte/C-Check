@@ -75,7 +75,7 @@ install_os_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y \
-    ca-certificates curl git nginx redis-server mysql-server clangd fonts-noto-cjk poppler-utils \
+    ca-certificates curl git nginx redis-server mysql-server clang clangd clang-tools fonts-noto-cjk poppler-utils \
     build-essential pkg-config xz-utils "${PYTHON_BIN}" "${PYTHON_BIN}-venv" "${PYTHON_BIN}-dev"
 }
 
@@ -248,7 +248,7 @@ install_backend() {
   log "Installing backend Python environment"
   create_backend_venv
   .venv/bin/python -m pip install --upgrade pip setuptools wheel
-  .venv/bin/python -m pip install -e "backend[test]"
+  .venv/bin/python -m pip install -e "backend[test,static-analysis]"
   cd backend
   "${APP_DIR}/.venv/bin/alembic" upgrade head
 }

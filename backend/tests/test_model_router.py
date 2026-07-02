@@ -28,8 +28,10 @@ from app.services.model_router import (
     _partition_category_candidates,
     _resolve_unmatched_categories,
     _filter_candidate_findings,
+    _merge_compiler_findings,
     _parse_candidate_jsonl_response,
     _refine_candidate_line,
+    _validate_compiler_findings,
     _chunk_file,
     _effective_chunk_max_chars,
     _ensure_input_budget,
@@ -1192,6 +1194,67 @@ def test_candidate_filter_retains_real_resource_leak_with_ownership_evidence():
     assert len(kept) == 1
     assert kept[0].line == 3
     assert rejected["resource_leak_false_positive"] == 0
+
+
+def test_compiler_findings_keep_exact_location_and_merge_same_resource():
+    source = ReviewFile(
+        relative_path="branch_leak.c",
+        source_text="""int read_log(const char *path, int stop)
+{
+    FILE *stream = fopen(path, "r");
+    if (stream == NULL) return -1;
+    if (stop) return 1;
+    fclose(stream);
+    return 0;
+}
+""",
+        size_bytes=180,
+    )
+    model_finding = ReviewFinding(
+        severity="medium",
+        category="resource_leak",
+        title="stream resource leak",
+        description="log_stream may not be closed",
+        file_path="branch_leak.c",
+        line=3,
+    )
+    compiler_finding = ReviewFinding(
+        severity="medium",
+        category="resource_leak",
+        title="Clang Stream: opened stream never closed",
+        description="log_stream is never closed on this return path",
+        file_path="branch_leak.c",
+        line=5,
+    )
+
+    validated = _validate_compiler_findings([source], [compiler_finding])
+    merged = _merge_compiler_findings([source], [model_finding], validated)
+
+    assert len(merged) == 1
+    assert merged[0].line == 5
+    assert merged[0].title.startswith("Clang")
+
+
+def test_compiler_merge_keeps_distinct_resources_in_same_function():
+    source = ReviewFile(
+        relative_path="two_leaks.c",
+        source_text="""int demo(void)
+{
+    FILE *first = fopen("a", "r");
+    FILE *second = fopen("b", "r");
+    consume(first);
+    consume(second);
+    return 0;
+}
+""",
+        size_bytes=150,
+    )
+    first = ReviewFinding(severity="medium", category="resource_leak", title="first leak", description="first is not closed", file_path="two_leaks.c", line=3)
+    second = ReviewFinding(severity="medium", category="resource_leak", title="Clang Stream leak", description="second is not closed", file_path="two_leaks.c", line=7)
+
+    merged = _merge_compiler_findings([source], [first], [second])
+
+    assert len(merged) == 2
 
 
 def test_chunk_file_preserves_original_line_numbers():

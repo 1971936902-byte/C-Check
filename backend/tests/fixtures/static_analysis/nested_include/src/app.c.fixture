@@ -1,0 +1,22 @@
+#include "device.h"
+
+int safe_device(void)
+{
+    Device *device = device_open();
+    if (device == 0)
+        return -1;
+    int state = device_poll(device);
+    device_close(device);
+    return state;
+}
+
+int leak_device(int stop)
+{
+    Device *device = device_open();
+    if (device == 0)
+        return -1;
+    if (stop)
+        return 1;
+    device_close(device);
+    return 0;
+}
