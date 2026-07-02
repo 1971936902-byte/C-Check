@@ -171,6 +171,13 @@ class ChunkedReviewFile:
 
 
 @dataclass(frozen=True)
+class SemanticSourceBlock:
+    kind: str
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True)
 class ModelNodeDispatchPool:
     nodes: tuple[ModelNode, ...]
     base_loads: dict[str, int]
@@ -358,6 +365,20 @@ def _chunk_file(source: ReviewFile, max_chars: int, *, no_slice_max_bytes: int =
             )
         ]
 
+    semantic_blocks = _semantic_source_blocks(lines)
+    if semantic_blocks and not any(
+        len(f"{line_number:0{CHUNK_LINE_PREFIX_WIDTH}d}: {line}") > max_chars
+        for line_number, line in enumerate(lines, start=1)
+    ):
+        return _chunk_file_on_semantic_boundaries(source, lines, max_chars, semantic_blocks)
+    return _chunk_file_by_lines(source, lines, max_chars)
+
+
+def _chunk_file_by_lines(
+    source: ReviewFile,
+    lines: Sequence[str],
+    max_chars: int,
+) -> list[ChunkedReviewFile]:
     chunks: list[ChunkedReviewFile] = []
     current_lines: list[str] = []
     current_chars = 0
@@ -396,6 +417,159 @@ def _chunk_file(source: ReviewFile, max_chars: int, *, no_slice_max_bytes: int =
 
     flush()
     return chunks
+
+
+def _chunk_file_on_semantic_boundaries(
+    source: ReviewFile,
+    lines: Sequence[str],
+    max_chars: int,
+    semantic_blocks: Sequence[SemanticSourceBlock],
+) -> list[ChunkedReviewFile]:
+    rendered_costs = [
+        len(f"{line_number:0{CHUNK_LINE_PREFIX_WIDTH}d}: {line}") + 1
+        for line_number, line in enumerate(lines, start=1)
+    ]
+    prefix_costs = [0]
+    for cost in rendered_costs:
+        prefix_costs.append(prefix_costs[-1] + cost)
+
+    def span_cost(start_line: int, end_line: int) -> int:
+        return prefix_costs[end_line] - prefix_costs[start_line - 1]
+
+    def containing_block(line_number: int) -> SemanticSourceBlock | None:
+        return next(
+            (
+                block
+                for block in semantic_blocks
+                if block.start_line <= line_number < block.end_line
+            ),
+            None,
+        )
+
+    chunks: list[ChunkedReviewFile] = []
+    start_line = 1
+    total_lines = len(lines)
+    minimum_boundary_fill = max(1, int(max_chars * 0.35))
+    overlap_budget = max(1, int(max_chars * 0.15))
+    while start_line <= total_lines:
+        end_line = start_line
+        while end_line < total_lines and span_cost(start_line, end_line + 1) <= max_chars:
+            end_line += 1
+
+        if end_line < total_lines:
+            block = containing_block(end_line)
+            if block is not None and block.start_line > start_line:
+                boundary_end = block.start_line - 1
+                block_fits_whole = span_cost(block.start_line, block.end_line) <= max_chars
+                if block_fits_whole or span_cost(start_line, boundary_end) >= minimum_boundary_fill:
+                    end_line = boundary_end
+
+        chunks.append(
+            ChunkedReviewFile(
+                relative_path=source.relative_path,
+                source_text=_numbered_chunk_source(source.source_text, start_line, end_line),
+                size_bytes=0,
+                start_line=start_line,
+                end_line=end_line,
+            )
+        )
+        if end_line >= total_lines:
+            break
+
+        block = containing_block(end_line)
+        if block is None or block.start_line > start_line:
+            start_line = end_line + 1
+            continue
+
+        # A single function/type block exceeds the budget. Preserve a small
+        # overlap so lifecycle and declaration context survive the split.
+        overlap_start = end_line
+        while overlap_start > start_line and span_cost(overlap_start - 1, end_line) <= overlap_budget:
+            overlap_start -= 1
+        start_line = max(start_line + 1, overlap_start)
+    return chunks
+
+
+def _semantic_source_blocks(lines: Sequence[str]) -> list[SemanticSourceBlock]:
+    sanitized = _sanitize_c_structure_lines(lines)
+    blocks: list[SemanticSourceBlock] = []
+    depth = 0
+    header_start = 1
+    active: tuple[str, int] | None = None
+    for index, line in enumerate(sanitized, start=1):
+        if depth == 0:
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                header_start = index + 1
+                continue
+            if "{" in line:
+                header = "\n".join(sanitized[header_start - 1 : index]).split("{", 1)[0]
+                if _looks_like_function_header(header):
+                    active = ("function", header_start)
+                elif re.search(r"\b(?:struct|union|enum)\b", header):
+                    active = ("type", header_start)
+                else:
+                    active = None
+            elif ";" in line or "}" in line:
+                header_start = index + 1
+
+        depth += line.count("{") - line.count("}")
+        depth = max(0, depth)
+        if depth == 0 and active is not None:
+            kind, start = active
+            blocks.append(SemanticSourceBlock(kind=kind, start_line=start, end_line=index))
+            active = None
+            header_start = index + 1
+    return blocks
+
+
+def _sanitize_c_structure_lines(lines: Sequence[str]) -> list[str]:
+    sanitized: list[str] = []
+    in_block_comment = False
+    in_string: str | None = None
+    escaped = False
+    for line in lines:
+        output: list[str] = []
+        index = 0
+        while index < len(line):
+            char = line[index]
+            next_char = line[index + 1] if index + 1 < len(line) else ""
+            if in_block_comment:
+                if char == "*" and next_char == "/":
+                    in_block_comment = False
+                    output.extend((" ", " "))
+                    index += 2
+                else:
+                    output.append(" ")
+                    index += 1
+                continue
+            if in_string is not None:
+                output.append(" ")
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == in_string:
+                    in_string = None
+                index += 1
+                continue
+            if char == "/" and next_char == "*":
+                in_block_comment = True
+                output.extend((" ", " "))
+                index += 2
+                continue
+            if char == "/" and next_char == "/":
+                output.extend(" " * (len(line) - index))
+                break
+            if char in {'"', "'"}:
+                in_string = char
+                output.append(" ")
+                index += 1
+                continue
+            output.append(char)
+            index += 1
+        sanitized.append("".join(output))
+    return sanitized
 
 
 def _chunk_review_files(files: Sequence[ReviewFile], settings: Settings) -> list[ChunkedReviewFile]:

@@ -1363,6 +1363,57 @@ def test_chunk_file_preserves_original_line_numbers():
     assert chunks[-1].end_line == 7
 
 
+def test_chunk_file_moves_cut_before_function_and_overlaps_oversized_function():
+    source_text = "\n".join(
+        [
+            "int prefix_a = 1;",
+            "int prefix_b = 2;",
+            "int helper(void) { return prefix_a + prefix_b; }",
+            "",
+            "int very_long_function(int value) {",
+            *(f"    value += {index}; /* padding padding padding */" for index in range(20)),
+            "    return value;",
+            "}",
+            "int tail(void) { return 0; }",
+        ]
+    )
+    source = ReviewFile(relative_path="long_function.c", source_text=source_text, size_bytes=len(source_text))
+
+    chunks = _chunk_file(source, max_chars=260)
+
+    assert chunks[0].end_line < 5
+    assert chunks[1].start_line <= 5
+    assert any(right.start_line <= left.end_line for left, right in zip(chunks[1:], chunks[2:]))
+    assert all(len(chunk.source_text) <= 260 for chunk in chunks)
+    assert chunks[-1].end_line == len(source_text.splitlines())
+
+
+def test_chunk_file_preserves_struct_union_and_enum_boundaries():
+    source_text = "\n".join(
+        [
+            "int prefix_a = 1;",
+            "int prefix_b = 2;",
+            "int helper(void) { return 0; }",
+            "",
+            "typedef struct LargeRecord {",
+            *(f"    int field_{index};" for index in range(18)),
+            "} LargeRecord;",
+            "",
+            "enum ResultCode { RESULT_OK, RESULT_BAD, RESULT_RETRY };",
+            "union Payload { int number; void *pointer; };",
+        ]
+    )
+    source = ReviewFile(relative_path="types.h", source_text=source_text, size_bytes=len(source_text))
+
+    chunks = _chunk_file(source, max_chars=190)
+
+    assert chunks[0].end_line < 5
+    assert chunks[1].start_line <= 5
+    assert any(right.start_line <= left.end_line for left, right in zip(chunks[1:], chunks[2:]))
+    assert all(len(chunk.source_text) <= 190 for chunk in chunks)
+    assert chunks[-1].end_line == len(source_text.splitlines())
+
+
 def test_chunk_file_keeps_small_sources_whole_when_no_slice_threshold_is_set():
     source = ReviewFile(
         relative_path="small.c",
