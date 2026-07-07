@@ -190,6 +190,12 @@ Then run:
 sudo DEPLOY_ENV=/etc/c-check/c-check.env bash deploy/native/c-check-deploy.sh update
 ```
 
+Before changing the default model node, the deploy script verifies that
+`VLLM_MODEL_IDENTIFIER` is present in the configured service's `/v1/models`
+response. A stale model identifier now stops registration without replacing the
+working default node. Nodes left behind for the same VLLM base URL are disabled
+after a successful registration.
+
 ## What The Installer Writes
 
 - `${APP_DIR}/.env`

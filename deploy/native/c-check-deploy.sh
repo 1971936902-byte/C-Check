@@ -439,24 +439,63 @@ register_vllm_model() {
   cd "${APP_DIR}/backend"
   "${APP_DIR}/.venv/bin/python" - <<'PY'
 import os
-from sqlalchemy import select, update
+import httpx
+from sqlalchemy import or_, select, update
 from app.db.models import ModelNode, new_uuid
 from app.db.session import SessionLocal
 
 identifier = os.environ["VLLM_MODEL_IDENTIFIER"]
+base_url = os.environ["VLLM_BASE_URL"].rstrip("/")
+api_key = os.environ.get("VLLM_API_KEY") or None
+headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+timeout = min(int(os.environ.get("VLLM_TIMEOUT_SECONDS", "600")), 30)
+
+try:
+    response = httpx.get(f"{base_url}/v1/models", headers=headers, timeout=timeout)
+    response.raise_for_status()
+    served_identifiers = {
+        str(item.get("id"))
+        for item in response.json().get("data", [])
+        if item.get("id")
+    }
+except Exception as exc:
+    raise SystemExit(f"unable to verify configured VLLM model at {base_url}: {exc}") from exc
+
+if identifier not in served_identifiers:
+    served = ", ".join(sorted(served_identifiers)) or "<none>"
+    raise SystemExit(
+        f"configured VLLM_MODEL_IDENTIFIER={identifier!r} is not served by {base_url}; "
+        f"available model ids: {served}. Existing default model node was not changed."
+    )
+
 with SessionLocal() as db:
     db.execute(update(ModelNode).values(is_default=False))
-    node = db.scalar(select(ModelNode).where(ModelNode.model_identifier == identifier))
+    node = db.scalar(
+        select(ModelNode)
+        .where(
+            or_(
+                ModelNode.model_identifier == identifier,
+                ModelNode.base_url == base_url,
+            )
+        )
+        .order_by((ModelNode.model_identifier == identifier).desc())
+    )
     if node is None:
         node = ModelNode(id=new_uuid(), model_identifier=identifier)
         db.add(node)
     node.display_name = os.environ["VLLM_DISPLAY_NAME"]
-    node.base_url = os.environ["VLLM_BASE_URL"]
-    node.api_key = os.environ.get("VLLM_API_KEY") or None
+    node.model_identifier = identifier
+    node.base_url = base_url
+    node.api_key = api_key
     node.timeout_seconds = int(os.environ.get("VLLM_TIMEOUT_SECONDS", "600"))
     node.is_enabled = True
     node.is_default = True
     node.description = "由部署脚本自动登记，可直接用于代码审查。"
+    for stale in db.scalars(
+        select(ModelNode).where(ModelNode.base_url == base_url, ModelNode.id != node.id)
+    ):
+        stale.is_enabled = False
+        stale.is_default = False
     for mock in db.scalars(select(ModelNode).where(ModelNode.base_url.like("mock://%"))):
         mock.is_enabled = False
         mock.is_default = False
