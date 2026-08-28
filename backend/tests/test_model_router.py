@@ -25,6 +25,7 @@ from app.services.model_router import (
     _allowed_final_categories,
     _candidate_jsonl,
     _dedupe_candidate_findings,
+    _dedupe_root_findings,
     _partition_category_candidates,
     _resolve_unmatched_categories,
     _filter_candidate_findings,
@@ -2314,6 +2315,105 @@ def test_candidate_dedupe_keeps_repeated_defects_at_distinct_lines():
     )
 
     assert [finding.line for finding in deduped] == [3, 6]
+
+
+def test_candidate_filter_rejects_e5_proven_safe_buffer_patterns():
+    source = ReviewFile(
+        relative_path="e5_safe_patterns.c",
+        source_text="""#define BLOCK 8
+typedef unsigned char uint8;
+typedef struct Frame { uint8 Buffer[1024]; unsigned Head; } Frame;
+typedef struct Protocol { uint8 *DataP; unsigned uDataLen; } Protocol;
+typedef struct Access { char uSSID[33]; } Access;
+static Access G_AccessConfig;
+static Frame ComFrameCache;
+void ring(uint8 Byte) {
+    ComFrameCache.Buffer[ComFrameCache.Head++] = Byte;
+    ComFrameCache.Head %= 1024;
+}
+void fixed_protocol_copy(Protocol *com) {
+    com->uDataLen = 20;
+    memcpy(com->DataP, "11111111111111111111", com->uDataLen);
+}
+void guarded_ssid_copy(Protocol *com) {
+    if (com->uDataLen >= sizeof(G_AccessConfig.uSSID)) return;
+    memcpy(G_AccessConfig.uSSID, com->DataP, com->uDataLen);
+}
+void guid_end(void) {
+    char snandguid[11 + 36 + 1];
+    snandguid[47] = 0;
+}
+void crypt_tail(unsigned len) {
+    uint8 fillbuf[BLOCK*2];
+    memcpy(fillbuf, "1234567", 7);
+}
+""",
+        size_bytes=860,
+    )
+    candidates = [
+        ReviewFinding(severity="high", category="buffer_overflow", title="ring overflow", description="head may overflow", file_path="e5_safe_patterns.c", line=9),
+        ReviewFinding(severity="high", category="buffer_overflow", title="protocol copy overflow", description="copy may overflow DataP", file_path="e5_safe_patterns.c", line=14),
+        ReviewFinding(severity="high", category="buffer_overflow", title="ssid copy overflow", description="uDataLen may overflow uSSID", file_path="e5_safe_patterns.c", line=18),
+        ReviewFinding(severity="high", category="buffer_overflow", title="terminator overflow", description="snandguid[47] is out of bounds", file_path="e5_safe_patterns.c", line=22),
+        ReviewFinding(severity="high", category="buffer_overflow", title="fillbuf overflow", description="DES tail overflows fillbuf", file_path="e5_safe_patterns.c", line=26),
+    ]
+
+    kept, rejected = _filter_candidate_findings([source], candidates)
+
+    assert kept == []
+    assert rejected["proven_safe_buffer"] == 5
+
+
+def test_candidate_filter_reclassifies_sizeof_pointer_memset_without_dropping():
+    source = ReviewFile(
+        relative_path="memset_pointer.c",
+        source_text="""typedef unsigned char uint8;
+void recv(uint8 *uRevBuf) {
+    memset(uRevBuf, 0, sizeof(uRevBuf));
+}
+""",
+        size_bytes=96,
+    )
+    candidate = ReviewFinding(
+        severity="high",
+        category="buffer_overflow",
+        title="buffer_overflow",
+        description="memset may clear the wrong size",
+        file_path="memset_pointer.c",
+        line=3,
+    )
+
+    kept, rejected = _filter_candidate_findings([source], [candidate])
+
+    assert rejected["proven_safe_buffer"] == 0
+    assert len(kept) == 1
+    assert kept[0].category == FindingCategory.MEMORY_SAFETY
+    assert kept[0].severity.value == "medium"
+
+
+def test_root_dedupe_collapses_same_missing_capacity_check():
+    source = ReviewFile(
+        relative_path="dns.c",
+        source_text="""char DnsPacketByName(char *pPacketbuf, char *pName) {
+    int len = 0;
+    memcpy(pPacketbuf + len, pName, 4);
+    len += 4;
+    WTOB(pPacketbuf + len, 1);
+    return len;
+}
+""",
+        size_bytes=180,
+    )
+    findings = [
+        ReviewFinding(severity="high", category="buffer_overflow", title="copy overflow", description="pPacketbuf has no capacity check", file_path="dns.c", line=3),
+        ReviewFinding(severity="high", category="buffer_overflow", title="write overflow", description="pPacketbuf has no capacity check", file_path="dns.c", line=5),
+    ]
+
+    deduped, duplicates = _dedupe_root_findings([source], findings)
+
+    assert duplicates == 1
+    assert len(deduped) == 1
+    assert deduped[0].line == 3
 
 
 def test_candidate_rule_filter_drops_compilation_only_and_generic_null_advice():

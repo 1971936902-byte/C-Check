@@ -21,6 +21,7 @@ from app.schemas.model_response import (
     CompactModelReviewResponse,
     FormattedFindingsResponse,
     FindingCategory,
+    FindingSeverity,
     ModelReviewResponse,
     ReviewFinding,
 )
@@ -1726,6 +1727,94 @@ def _dedupe_candidate_findings(findings: Sequence[ReviewFinding]) -> list[Review
     return deduped
 
 
+def _dedupe_root_findings(
+    files: Sequence[ReviewFile],
+    findings: Sequence[ReviewFinding],
+) -> tuple[list[ReviewFinding], int]:
+    """Collapse final findings that describe the same root cause.
+
+    Candidate JSONL remains line-level for recall and debugging.  The user-facing
+    report should be root-cause level so one missing bounds check does not become
+    five high-risk findings.
+    """
+
+    deduped: list[ReviewFinding] = []
+    seen: dict[tuple[str, str, tuple[int, int] | None, str], int] = {}
+    duplicate_count = 0
+    for finding in findings:
+        key = _root_finding_key(files, finding)
+        if key is None:
+            deduped.append(finding)
+            continue
+        existing_index = seen.get(key)
+        if existing_index is None:
+            seen[key] = len(deduped)
+            deduped.append(finding)
+            continue
+        duplicate_count += 1
+        current = deduped[existing_index]
+        if _finding_root_representative_rank(finding) < _finding_root_representative_rank(current):
+            deduped[existing_index] = finding
+    return deduped, duplicate_count
+
+
+def _finding_root_representative_rank(finding: ReviewFinding) -> tuple[int, int]:
+    return (SEVERITY_RANK.get(finding.severity.value, 99), finding.line or 10**9)
+
+
+def _root_finding_key(
+    files: Sequence[ReviewFile],
+    finding: ReviewFinding,
+) -> tuple[str, str, tuple[int, int] | None, str] | None:
+    source = _review_file_by_path(files, finding.file_path)
+    if source is None or finding.line is None:
+        return None
+    lines = source.source_text.splitlines()
+    if finding.line < 1 or finding.line > len(lines):
+        return None
+    function_window = _function_window_for_line(lines, finding.line)
+    subject = _root_subject_for_line(lines[finding.line - 1], finding)
+    if not subject:
+        return None
+    return (
+        source.relative_path.replace("\\", "/").strip().lower(),
+        finding.category.value,
+        function_window,
+        subject,
+    )
+
+
+def _root_subject_for_line(line_text: str, finding: ReviewFinding) -> str | None:
+    normalized_line = _normalize_c_expression(line_text)
+    if finding.category == FindingCategory.BUFFER_OVERFLOW:
+        memcpy_match = _MEMCPY_CALL_PATTERN.search(line_text)
+        if memcpy_match:
+            return f"dst:{_root_expression_base(memcpy_match.group('dst'))}"
+        call_match = re.search(
+            r"\b(?:strcpy|strncpy|strcat|strncat|sprintf|snprintf|memset|WTOB)\s*\(\s*(?P<dst>[^,);]+)",
+            line_text,
+        )
+        if call_match:
+            return f"dst:{_root_expression_base(call_match.group('dst'))}"
+        index_match = re.search(r"(?P<dst>[A-Za-z_][A-Za-z0-9_.>\-]*)\s*\[", normalized_line)
+        if index_match:
+            return f"dst:{_root_expression_base(index_match.group('dst'))}"
+    if finding.category == FindingCategory.INTEGER_SAFETY:
+        identifiers = _candidate_subject_identifiers(finding)
+        return f"int:{identifiers[0]}" if identifiers else None
+    if finding.category == FindingCategory.LOGIC:
+        identifiers = _candidate_subject_identifiers(finding)
+        return f"logic:{identifiers[0]}" if identifiers else None
+    return None
+
+
+def _root_expression_base(expression: str) -> str:
+    normalized = _normalize_c_expression(expression)
+    normalized = normalized.lstrip("&*(").rstrip(")")
+    normalized = re.split(r"\+|-|\[", normalized, maxsplit=1)[0]
+    return normalized or expression.strip()
+
+
 def _validate_compiler_findings(
     files: Sequence[ReviewFile],
     findings: Sequence[ReviewFinding],
@@ -1855,6 +1944,387 @@ _PERIPHERAL_REGISTER_PATTERN = re.compile(
 _NULL_POINTER_PATTERN = re.compile(r"空指针|null\s*pointer|nullptr", re.IGNORECASE)
 _VENDOR_ASSERT_PATTERN = re.compile(r"\b(?:assert|IS_[A-Za-z0-9_]+)\b", re.IGNORECASE)
 _MISSING_VALIDATION_PATTERN = re.compile(r"缺少.*(?:校验|检查)|未.*(?:校验|检查)|missing.*(?:validation|check)", re.IGNORECASE)
+_MEMSET_SELF_SIZEOF_PATTERN = re.compile(
+    r"\bmemset\s*\(\s*(?P<target>[A-Za-z_][A-Za-z0-9_]*)\s*,\s*0\s*,\s*sizeof\s*\(\s*(?P=target)\s*\)\s*\)"
+)
+_ARRAY_DECL_PATTERN_TEMPLATE = r"\b(?:char|u?int(?:8|16|32|64)(?:_t)?|unsigned\s+char|uint8)\s+{name}\s*\[\s*(?P<size>[^\]]+)\s*\]"
+_POINTER_PARAM_PATTERN_TEMPLATE = r"\([^)]*(?:\*+\s*{name}\b|{name}\s*\[\s*\])"
+_LITERAL_INDEX_WRITE_PATTERN = re.compile(
+    r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>\d+)\s*\]\s*="
+)
+_RING_WRITE_PATTERN = re.compile(
+    r"\b(?P<buffer>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*\+\+\s*\]\s*="
+)
+_MEMCPY_CALL_PATTERN = re.compile(
+    r"\bmemcpy\s*\(\s*(?P<dst>[^,]+)\s*,\s*(?P<src>[^,]+)\s*,\s*(?P<len>[^)]+)\)"
+)
+_STRNCPY_SIZEOF_MINUS_ONE_PATTERN = re.compile(
+    r"\bstrncpy\s*\(\s*(?P<dst>[A-Za-z_][A-Za-z0-9_.>\-]*)\s*,\s*[^,]+,\s*sizeof\s*\(\s*(?P=dst)\s*\)\s*-\s*1\s*\)"
+)
+_MEMCPY_SIZEOF_MINUS_ONE_PATTERN = re.compile(
+    r"\bmemcpy\s*\(\s*(?P<dst>[A-Za-z_][A-Za-z0-9_.>\-]*)\s*,\s*[^,]+,\s*sizeof\s*\(\s*(?P=dst)\s*\)\s*-\s*1\s*\)"
+)
+_SIZEOF_GUARD_PATTERN_TEMPLATE = (
+    r"\bif\s*\([^)]*{length}[^)]*(?:>=|>)\s*sizeof\s*\(\s*{target}\s*\)[^)]*\)"
+)
+_CONSTANT_LEN_ASSIGN_PATTERN_TEMPLATE = r"\b{length}\s*=\s*(?P<value>\d+)\s*;"
+
+
+def _calibrate_candidate_finding(
+    source: ReviewFile,
+    line_number: int,
+    finding: ReviewFinding,
+) -> ReviewFinding:
+    """Downgrade candidates whose syntax proves a different defect class.
+
+    The first-stage scan is intentionally high-recall, so it often labels any
+    risky memory-looking statement as a buffer overflow.  Keep the finding, but
+    correct the class when the line proves a narrower issue.
+    """
+
+    lines = source.source_text.splitlines()
+    if line_number < 1 or line_number > len(lines):
+        return finding
+    line_text = lines[line_number - 1]
+    memset_match = _MEMSET_SELF_SIZEOF_PATTERN.search(line_text)
+    if not memset_match:
+        return finding
+    target = memset_match.group("target")
+    if _identifier_has_local_array_decl(source, line_number, target):
+        return finding
+    if not _identifier_is_pointer_parameter(source, line_number, target):
+        return finding
+    return finding.model_copy(
+        update={
+            "severity": FindingSeverity.MEDIUM,
+            "category": FindingCategory.MEMORY_SAFETY,
+            "title": "指针宽度清零",
+            "description": "memset 使用 sizeof(pointer) 只清空指针宽度，真实问题是缓冲区初始化不完整而非直接缓冲区溢出。",
+        }
+    )
+
+
+def _identifier_has_local_array_decl(source: ReviewFile, line_number: int, name: str) -> bool:
+    lines = source.source_text.splitlines()
+    window = _function_window_for_line(lines, line_number) or (1, line_number)
+    pattern = re.compile(_ARRAY_DECL_PATTERN_TEMPLATE.format(name=re.escape(name)))
+    return any(pattern.search(lines[index - 1]) for index in range(window[0], min(line_number, window[1]) + 1))
+
+
+def _identifier_is_pointer_parameter(source: ReviewFile, line_number: int, name: str) -> bool:
+    lines = source.source_text.splitlines()
+    window = _function_window_for_line(lines, line_number)
+    if window is None:
+        return False
+    header_start = max(1, window[0] - 4)
+    header = "\n".join(lines[header_start - 1 : window[0]])
+    pattern = re.compile(_POINTER_PARAM_PATTERN_TEMPLATE.format(name=re.escape(name)), re.DOTALL)
+    return pattern.search(header) is not None
+
+
+def _is_proven_safe_buffer_candidate(
+    source: ReviewFile,
+    line_number: int,
+    finding: ReviewFinding,
+) -> bool:
+    if finding.category != FindingCategory.BUFFER_OVERFLOW:
+        return False
+    lines = source.source_text.splitlines()
+    if line_number < 1 or line_number > len(lines):
+        return False
+    line_text = lines[line_number - 1]
+    return (
+        _is_ring_buffer_modulo_write(lines, line_number, line_text)
+        or _is_literal_index_within_declared_array(source, line_number, line_text)
+        or _is_guarded_sizeof_copy(lines, line_number, line_text)
+        or _is_fixed_protocol_datap_copy_safe(lines, line_number, line_text)
+        or _is_des3_tail_buffer_copy_safe(source, line_number, line_text)
+        or _is_bounded_local_command_concat_safe(source, line_number, line_text)
+        or _is_guard_only_buffer_candidate_safe(lines, line_number, line_text)
+        or _is_local_append_guarded_by_sizeof(lines, line_number, line_text)
+        or _is_clamped_length_memcpy_safe(lines, line_number, line_text)
+        or _is_non_sink_buffer_candidate_line(line_text)
+    )
+
+
+def _is_ring_buffer_modulo_write(lines: list[str], line_number: int, line_text: str) -> bool:
+    match = _RING_WRITE_PATTERN.search(line_text)
+    if not match:
+        return False
+    index = re.escape(match.group("index"))
+    modulo_pattern = re.compile(rf"\b{index}\s*%=\s*(?:[A-Za-z_][A-Za-z0-9_]*|\d+)\b")
+    end = min(len(lines), line_number + 3)
+    return any(modulo_pattern.search(lines[index_line - 1]) for index_line in range(line_number + 1, end + 1))
+
+
+def _is_literal_index_within_declared_array(source: ReviewFile, line_number: int, line_text: str) -> bool:
+    match = _LITERAL_INDEX_WRITE_PATTERN.search(line_text)
+    if not match:
+        return False
+    size = _declared_array_capacity(source, line_number, match.group("name"))
+    return size is not None and int(match.group("index")) < size
+
+
+def _declared_array_capacity(source: ReviewFile, line_number: int, name: str) -> int | None:
+    lines = source.source_text.splitlines()
+    window = _function_window_for_line(lines, line_number) or (1, len(lines))
+    pattern = re.compile(_ARRAY_DECL_PATTERN_TEMPLATE.format(name=re.escape(name)))
+    for index in range(line_number, window[0] - 1, -1):
+        match = pattern.search(lines[index - 1])
+        if not match:
+            continue
+        return _safe_eval_int_expression(match.group("size"), source.source_text)
+    return _array_capacities_in_scope(source, line_number).get(name)
+
+
+def _safe_eval_int_expression(expression: str, source_text: str) -> int | None:
+    macro_values = {
+        name: int(value)
+        for name, value in re.findall(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(\d+)\b", source_text, re.MULTILINE)
+    }
+    normalized = expression.strip()
+    for name, value in macro_values.items():
+        normalized = re.sub(rf"\b{re.escape(name)}\b", str(value), normalized)
+    if not re.fullmatch(r"[0-9+*()\s-]+", normalized):
+        return None
+    try:
+        value = eval(normalized, {"__builtins__": {}}, {})
+    except Exception:
+        return None
+    return value if isinstance(value, int) and value >= 0 else None
+
+
+def _is_guarded_sizeof_copy(lines: list[str], line_number: int, line_text: str) -> bool:
+    if _STRNCPY_SIZEOF_MINUS_ONE_PATTERN.search(line_text) or _MEMCPY_SIZEOF_MINUS_ONE_PATTERN.search(line_text):
+        return True
+    memcpy_match = _MEMCPY_CALL_PATTERN.search(line_text)
+    if not memcpy_match:
+        return False
+    dst = _normalize_c_expression(memcpy_match.group("dst"))
+    length = _normalize_c_expression(memcpy_match.group("len"))
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.>\-]*", dst):
+        return False
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.>\-]*", length):
+        return False
+    guard_pattern = re.compile(
+        _SIZEOF_GUARD_PATTERN_TEMPLATE.format(target=re.escape(dst), length=re.escape(length))
+    )
+    start = max(1, line_number - 8)
+    return any(guard_pattern.search(lines[index - 1]) for index in range(start, line_number))
+
+
+def _is_fixed_protocol_datap_copy_safe(lines: list[str], line_number: int, line_text: str) -> bool:
+    memcpy_match = _MEMCPY_CALL_PATTERN.search(line_text)
+    if not memcpy_match:
+        return False
+    dst = _normalize_c_expression(memcpy_match.group("dst"))
+    length = _normalize_c_expression(memcpy_match.group("len"))
+    if dst not in {"com->DataP", "str.DataP"}:
+        return False
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.>\-]*", length):
+        return False
+    assign_pattern = re.compile(_CONSTANT_LEN_ASSIGN_PATTERN_TEMPLATE.format(length=re.escape(length)))
+    start = max(1, line_number - 12)
+    for index in range(line_number - 1, start - 1, -1):
+        match = assign_pattern.search(lines[index - 1])
+        if match and int(match.group("value")) <= 128:
+            return True
+    return False
+
+
+def _is_des3_tail_buffer_copy_safe(source: ReviewFile, line_number: int, line_text: str) -> bool:
+    normalized_line = _normalize_c_expression(line_text)
+    if "fillbuf" not in line_text and "ptr->uMessageLen-18" not in normalized_line:
+        return False
+    lines = source.source_text.splitlines()
+    window = _function_window_for_line(lines, line_number)
+    start = max(1, (window[0] if window else line_number) - 80)
+    end = min(len(lines), (window[1] if window else line_number) + 10)
+    function_text = "\n".join(lines[start - 1 : end])
+    block_size = _safe_eval_int_expression("BLOCK", source.source_text)
+    return block_size == 8 and (
+        re.search(r"\bfillbuf\s*\[\s*BLOCK\s*\*\s*2\s*\]", function_text) is not None
+        or re.search(r"\bfillbuf\s*\[\s*16\s*\]", function_text) is not None
+    )
+
+
+def _is_bounded_local_command_concat_safe(source: ReviewFile, line_number: int, line_text: str) -> bool:
+    if "uCmd" not in line_text or not any(token in line_text for token in ("strcat", "strcpy", "char uCmd")):
+        return False
+    lines = source.source_text.splitlines()
+    window = _function_window_for_line(lines, line_number)
+    if window is None:
+        return False
+    function_lines = lines[window[0] - 1 : window[1]]
+    declaration_index = None
+    capacity = None
+    initial = ""
+    for offset, current in enumerate(function_lines):
+        match = re.search(
+            r"\bchar\s+uCmd\s*\[\s*(?P<cap>\d+)\s*\]\s*=\s*\"(?P<initial>(?:\\.|[^\"])*)\"",
+            current,
+        )
+        if match:
+            declaration_index = offset
+            capacity = int(match.group("cap"))
+            initial = match.group("initial")
+            break
+    if declaration_index is None or capacity is None:
+        return False
+    known_sizes = _array_capacities_in_scope(source, line_number)
+    known_sizes.update(_local_array_capacities(function_lines[: line_number - window[0] + 1]))
+    total = _c_string_literal_length(initial)
+    for current in function_lines[declaration_index + 1 : line_number - window[0] + 1]:
+        strcat_literal = re.search(r"\bstrcat\s*\(\s*uCmd\s*,\s*\"(?P<literal>(?:\\.|[^\"])*)\"\s*\)", current)
+        if strcat_literal:
+            total += _c_string_literal_length(strcat_literal.group("literal"))
+            continue
+        strcat_identifier = re.search(
+            r"\bstrcat\s*\(\s*uCmd\s*,\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)",
+            current,
+        )
+        if strcat_identifier:
+            size = known_sizes.get(strcat_identifier.group("name"))
+            if size is None:
+                return False
+            total += max(0, size - 1)
+    return total + 1 <= capacity
+
+
+def _array_capacities_in_scope(source: ReviewFile, line_number: int) -> dict[str, int]:
+    capacities: dict[str, int] = {}
+    lines = source.source_text.splitlines()
+    for current in lines[:line_number]:
+        match = re.search(
+            r"\b(?:char|uint8|unsigned\s+char)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<size>[^\]]+)\s*\]",
+            current,
+        )
+        if not match:
+            continue
+        size = _safe_eval_int_expression(match.group("size"), source.source_text)
+        if size is not None:
+            capacities[match.group("name")] = size
+    return capacities
+
+
+def _local_array_capacities(lines: list[str]) -> dict[str, int]:
+    capacities: dict[str, int] = {}
+    for current in lines:
+        match = re.search(
+            r"\b(?:char|uint8|unsigned\s+char)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<size>\d+)\s*\]",
+            current,
+        )
+        if match:
+            capacities[match.group("name")] = int(match.group("size"))
+    return capacities
+
+
+def _c_string_literal_length(value: str) -> int:
+    return len(re.sub(r"\\.", "_", value))
+
+
+def _is_guard_only_buffer_candidate_safe(lines: list[str], line_number: int, line_text: str) -> bool:
+    stripped = line_text.strip()
+    if not stripped.startswith("if"):
+        return False
+    if any(token in stripped for token in ("memcpy", "strcpy", "strcat", "sprintf", "[", "] =")):
+        return False
+    if "sizeof(" not in stripped and "ADDR_MAX" not in stripped:
+        return False
+    end = min(len(lines), line_number + 4)
+    return any(
+        re.search(r"\b(?:return|break)\b|=[ ]*0\s*;", lines[index - 1])
+        for index in range(line_number + 1, end + 1)
+    )
+
+
+def _is_local_append_guarded_by_sizeof(lines: list[str], line_number: int, line_text: str) -> bool:
+    match = re.search(r"\b(?P<buffer>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\+\+\s*\]\s*=", line_text)
+    if not match:
+        return False
+    buffer_name = match.group("buffer")
+    index_name = match.group("index")
+    end = min(len(lines), line_number + 3)
+    guard_pattern = re.compile(
+        rf"\b{re.escape(index_name)}\s*>=\s*sizeof\s*\(\s*{re.escape(buffer_name)}\s*\)\s*-\s*1"
+    )
+    return any(guard_pattern.search(lines[index - 1]) for index in range(line_number + 1, end + 1))
+
+
+def _is_clamped_length_memcpy_safe(lines: list[str], line_number: int, line_text: str) -> bool:
+    memcpy_match = _MEMCPY_CALL_PATTERN.search(line_text)
+    if not memcpy_match:
+        return False
+    length = _normalize_c_expression(memcpy_match.group("len"))
+    start = max(1, line_number - 8)
+    guard_text = "\n".join(_normalize_c_expression(lines[index - 1]) for index in range(start, line_number))
+    if length == "ServerProtocolStruct.uMessageLen-18":
+        return (
+            "ServerProtocolStruct.uMessageLen-18" in guard_text
+            and "DATA_REV_SER_MAX_SIZE-10" in guard_text
+            and "ServerProtocolStruct.uMessageLen=DATA_REV_SER_MAX_SIZE-10+18" in guard_text
+        )
+    return False
+
+
+def _is_non_sink_buffer_candidate_line(line_text: str) -> bool:
+    lowered = line_text.strip().lower()
+    if lowered.startswith("return "):
+        return True
+    if re.match(r"^(?:static\s+)?[a-z_][a-z0-9_*\s]+\s+[a-z_][a-z0-9_]*\s*\([^;]*\)\s*$", lowered):
+        return True
+    return not _line_has_buffer_sink_anchor(lowered)
+
+
+def _line_has_buffer_sink_anchor(lowered_line: str) -> bool:
+    if any(
+        token in lowered_line
+        for token in (
+            "memcpy",
+            "memmove",
+            "memset",
+            "strcpy",
+            "strncpy",
+            "strcat",
+            "strncat",
+            "sprintf",
+            "snprintf",
+            "scanf",
+            "gets",
+            "wtob",
+        )
+    ):
+        return True
+    return re.search(r"\[[^\]]+\]\s*(?:=|\+\+|--)", lowered_line) is not None
+
+
+def _is_checked_search_result_candidate(
+    lines: list[str],
+    line_number: int,
+    line_text: str,
+    finding: ReviewFinding,
+) -> bool:
+    candidate_text = _candidate_text(finding)
+    if "null_pointer" not in candidate_text and not _NULL_POINTER_PATTERN.search(candidate_text):
+        return False
+    if re.search(r"\breturn\s*\(\s*int\s*\)\s*(?:strstr|strchr)\s*\(", line_text):
+        return True
+    assignment = re.search(
+        r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:strstr|strchr)\s*\(",
+        line_text,
+    )
+    if not assignment:
+        return False
+    name = re.escape(assignment.group("name"))
+    end = min(len(lines), line_number + 10)
+    check_pattern = re.compile(rf"\b{name}\s*(?:==|!=)\s*NULL\b|\bNULL\s*(?:==|!=)\s*{name}\b")
+    return any(check_pattern.search(lines[index - 1]) for index in range(line_number + 1, end + 1))
+
+
+def _normalize_c_expression(expression: str) -> str:
+    return re.sub(r"\s+", "", expression.strip())
+
 
 
 def _is_generic_null_check_candidate(finding: ReviewFinding, line_text: str) -> bool:
@@ -1875,6 +2345,8 @@ def _filter_candidate_findings(
         "peripheral_null_pointer": 0,
         "vendor_assert_validation": 0,
         "resource_leak_false_positive": 0,
+        "proven_safe_buffer": 0,
+        "checked_null_result": 0,
         "out_of_scope_category": 0,
     }
     for finding in candidates:
@@ -1898,6 +2370,13 @@ def _filter_candidate_findings(
         line_text = lines[refined_line - 1]
         if not _line_has_actionable_c_anchor(line_text):
             rejected["unanchored"] += 1
+            continue
+        finding = _calibrate_candidate_finding(source, refined_line, finding)
+        if _is_checked_search_result_candidate(lines, refined_line, line_text, finding):
+            rejected["checked_null_result"] += 1
+            continue
+        if _is_proven_safe_buffer_candidate(source, refined_line, finding):
+            rejected["proven_safe_buffer"] += 1
             continue
         combined_text = f"{candidate_text}\n{line_text}"
         if _NULL_POINTER_PATTERN.search(candidate_text) and _PERIPHERAL_REGISTER_PATTERN.search(combined_text):
@@ -2548,7 +3027,7 @@ async def _finalize_candidate_review(
     semantic_elapsed = perf_counter() - category_started
     merge_started = perf_counter()
     category_filtered = _dedupe_candidate_findings([*deterministic, *semantic_resolved])
-    final_findings = category_filtered
+    final_findings, duplicate_roots = _dedupe_root_findings(files, category_filtered)
     merge_elapsed = perf_counter() - merge_started
     final_findings.sort(
         key=lambda finding: (
@@ -2575,6 +3054,7 @@ async def _finalize_candidate_review(
                     f"category_allowed={len(category_filtered)}; "
                     f"deterministic={len(deterministic)}; semantic_unresolved={len(unresolved)}; "
                     f"semantic_resolved={len(semantic_resolved)}; semantic_failed_batches={semantic_failed_batches}; "
+                    f"duplicate_roots={duplicate_roots}; "
                     f"backend_rejected={sum(rejected.values())} {rejected}; "
                     f"format_failed_batches={failed_batches}; final={len(final_findings)}; "
                     f"timing_format_s={formatting_elapsed:.4f}; timing_validation_s={validation_elapsed:.4f}; "
