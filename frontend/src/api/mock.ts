@@ -28,17 +28,9 @@ const checkTypeLabels: Record<string, string> = {
   buffer_overflow: '缓冲区溢出',
   pointer_safety: '指针安全',
   resource_leak: '资源泄漏',
-  concurrency: '并发与线程安全',
-  logic: '逻辑错误',
-  input_validation: '输入校验',
   integer_safety: '整数安全',
-  compatibility: '编译兼容性',
-  portability: '跨平台可移植性',
-  performance: '性能隐患',
-  maintainability: '代码规范与可维护性',
+  logic: '逻辑错误',
 }
-
-checkTypeLabels.other = 'Other'
 
 const allCheckTypes = Object.keys(checkTypeLabels)
 
@@ -112,9 +104,9 @@ const findingTemplates: Finding[] = [
   },
   {
     severity: 'low',
-    category: 'input_validation',
-    title: '索引缺少上界校验',
-    description: '外部传入的数组索引只判断了非负，没有校验是否小于数组长度。',
+    category: 'pointer_safety',
+    title: '返回指针未判空',
+    description: '外部接口返回的指针在使用前没有判空，异常场景下可能触发空指针解引用。',
     file_path: 'src/scheduler.c',
     line: 74,
   },
@@ -128,7 +120,7 @@ const findingTemplates: Finding[] = [
   },
   {
     severity: 'suggestion',
-    category: 'other',
+    category: 'logic',
     title: '错误处理路径不完整',
     description: '初始化失败后继续执行后续步骤，可能让调用方看到部分初始化的对象。',
     file_path: 'src/main.c',
@@ -258,7 +250,7 @@ const seedTasks = (created: string): ReviewTask[] => [
     finding_count: 21,
     report_id: 'report-demo-completed',
     files: demoFiles(14, 'demo-completed'),
-    check_types: ['memory_safety', 'resource_leak', 'logic', 'performance'],
+    check_types: ['memory_safety', 'resource_leak', 'logic'],
     created_at: minutesAgo(76),
     updated_at: minutesAgo(62),
     completed_at: minutesAgo(62),
@@ -291,7 +283,7 @@ const seedTasks = (created: string): ReviewTask[] => [
     file_count: 1,
     finding_count: 3,
     files: [{ id: 'file-running-demo', relative_path: 'network_driver.c', size_bytes: 4096 }],
-    check_types: ['memory_safety', 'input_validation', 'concurrency'],
+    check_types: ['memory_safety', 'pointer_safety', 'logic'],
     started_at: minutesAgo(4),
     created_at: minutesAgo(5),
     updated_at: minutesAgo(1),
@@ -310,7 +302,7 @@ const seedTasks = (created: string): ReviewTask[] => [
     file_count: 18,
     finding_count: 0,
     files: demoFiles(12, 'queue-1'),
-    check_types: ['integer_safety', 'logic', 'compatibility'],
+    check_types: ['integer_safety', 'logic'],
     created_at: minutesAgo(3),
     updated_at: minutesAgo(3),
   },
@@ -326,7 +318,7 @@ const seedTasks = (created: string): ReviewTask[] => [
     file_count: 22,
     finding_count: 0,
     files: demoFiles(12, 'queue-2'),
-    check_types: ['portability', 'maintainability', 'performance'],
+    check_types: ['memory_safety', 'buffer_overflow', 'integer_safety'],
     created_at: minutesAgo(2),
     updated_at: minutesAgo(2),
   },

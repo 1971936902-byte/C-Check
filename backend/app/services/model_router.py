@@ -107,8 +107,8 @@ Each finding uses exactly: severity, category, title, description, file_path, li
 Keep title under 24 Chinese chars.
 Keep description under 140 Chinese chars and state the exact unsafe trigger or visible consequence.
 The line value must point to the best executable statement or declaration in PRIMARY SOURCE.
-Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
-If category is uncertain but the defect is real, use other instead of forcing logic.
+Allowed category values only: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, logic.
+If category is uncertain or outside these focused categories, omit the finding instead of forcing logic.
 PRIMARY SOURCE remains the proof standard; Definition Context is semantic compensation only.
 """
 
@@ -126,7 +126,7 @@ For retained records, only map the free-form type to one allowed category and fo
 Preserve the original file path, line, severity, and factual description exactly. Do not expand or reinterpret the vulnerability.
 If a type cannot be mapped to an allowed category, delete the record instead of forcing it into logic or other.
 Each finding uses exactly: severity, category, title, description, file_path, line.
-Allowed schema categories: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, input_validation, concurrency, logic, other.
+Allowed schema categories: buffer_overflow, pointer_safety, memory_safety, resource_leak, integer_safety, logic.
 Do not output remediation, snippets, evidence, confidence, call chains, or extra fields.
 JSON shape example with one retained record:
 {"findings":[{"severity":"medium","category":"memory_safety","title":"问题标题","description":"问题描述","file_path":"src/example.c","line":42}]}

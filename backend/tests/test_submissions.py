@@ -488,7 +488,7 @@ def test_file_and_archive_endpoints_accept_valid_uploads(db_session_factory):
         file_response = client.post(
             "/api/reviews/file",
             headers=auth_headers(user_id),
-            data={"model_node_id": node_id, "check_types": '["maintainability"]', "display_name": "header task"},
+            data={"model_node_id": node_id, "check_types": '["logic"]', "display_name": "header task"},
             files={"file": ("main.h", b"#pragma once", "text/plain")},
         )
         archive_response = client.post(

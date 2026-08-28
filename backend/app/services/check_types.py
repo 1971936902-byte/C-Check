@@ -6,28 +6,11 @@ CHECK_TYPE_LABELS = {
     "buffer_overflow": "缓冲区溢出",
     "pointer_safety": "空指针与野指针",
     "resource_leak": "资源泄漏",
-    "concurrency": "并发与线程安全",
-    "logic": "逻辑错误",
-    "input_validation": "输入校验",
     "integer_safety": "整数溢出与类型转换",
-    "compatibility": "编译兼容性",
-    "portability": "跨平台可移植性",
-    "performance": "性能隐患",
-    "maintainability": "代码规范与可维护性",
-    "other": "Other",
+    "logic": "逻辑错误",
 }
 ALL_CHECK_TYPES = list(CHECK_TYPE_LABELS)
-DEFAULT_FAST_CHECK_TYPES = {
-    "memory_safety",
-    "buffer_overflow",
-    "pointer_safety",
-    "resource_leak",
-    "concurrency",
-    "logic",
-    "input_validation",
-    "integer_safety",
-    "other",
-}
+DEFAULT_FAST_CHECK_TYPES = set(ALL_CHECK_TYPES)
 
 
 def validate_check_types(check_types: list[str] | None) -> list[str]:

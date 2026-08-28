@@ -58,8 +58,14 @@ describe('deriveReviewProgressSummary', () => {
     })
   })
 
-  it('provides at least ten selectable C review dimensions', () => {
-    expect(ALL_CHECK_TYPES.length).toBeGreaterThanOrEqual(12)
-    expect(ALL_CHECK_TYPES.some((item) => item.value === 'other')).toBe(true)
+  it('exposes only the focused core C review dimensions', () => {
+    expect(ALL_CHECK_TYPES.map((item) => item.value)).toEqual([
+      'memory_safety',
+      'buffer_overflow',
+      'pointer_safety',
+      'resource_leak',
+      'integer_safety',
+      'logic',
+    ])
   })
 })

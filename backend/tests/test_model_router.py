@@ -837,7 +837,9 @@ def test_default_prompt_keeps_discovery_rules_out_of_output_contract():
     prompt = (Path(__file__).parents[1] / "app" / "prompts" / "default_c_review.md").read_text(encoding="utf-8")
 
     assert "high-recall first-stage" in prompt
-    assert "buffer_overflow`, `memory_safety`, `resource_leak`, `integer_safety`, and" in prompt
+    assert "`buffer_overflow`, `memory_safety`" in prompt
+    assert "`pointer_safety`, `resource_leak`, `integer_safety`, and `logic`" in prompt
+    assert "Do not report style, readability, portability" in prompt
     assert "Assume only that the symbol exists" in prompt
     assert "Do not collapse distinct vulnerable trigger locations into one candidate" in prompt
     assert "Evaluate each executable statement or expression independently" in prompt
@@ -2538,7 +2540,14 @@ def test_candidate_jsonl_is_lightweight_and_allowed_categories_follow_task_selec
     assert reparsed.findings[0].category == FindingCategory.LOGIC
     assert reparsed.findings[0].title == candidates[0].title
     assert _allowed_final_categories(["logic", "buffer_overflow"]) == ("logic", "buffer_overflow")
-    assert _allowed_final_categories(["performance"]) == ("performance",)
+    assert _allowed_final_categories(["performance"]) == (
+        "memory_safety",
+        "buffer_overflow",
+        "pointer_safety",
+        "resource_leak",
+        "integer_safety",
+        "logic",
+    )
 
 
 def test_category_partition_keeps_exact_matches_and_routes_other_for_semantic_review():

@@ -71,8 +71,8 @@ describe('mockApi', () => {
 
     const textTask = await reviewApi.submitText('model-qwen', 'int snippet(void) { return 0; }', ['logic'], 'snippet-input.c')
     const fileTask = await reviewApi.submitFile('file', 'model-qwen', cFile, ['memory_safety'], 'single-file.c')
-    const zipTask = await reviewApi.submitFile('archive', 'model-qwen', zipFile, ['compatibility'], 'firmware.zip')
-    const folderTask = await reviewApi.submitFolder('model-qwen', folderFiles, ['logic', 'maintainability'], 'firmware-folder')
+    const zipTask = await reviewApi.submitFile('archive', 'model-qwen', zipFile, ['integer_safety'], 'firmware.zip')
+    const folderTask = await reviewApi.submitFolder('model-qwen', folderFiles, ['logic', 'buffer_overflow'], 'firmware-folder')
 
     expect(textTask.data).toMatchObject({ input_mode: 'text', file_count: 1, display_name: 'snippet-input.c' })
     expect(fileTask.data).toMatchObject({ input_mode: 'file', file_count: 1, display_name: 'single-file.c' })
@@ -85,12 +85,12 @@ describe('mockApi', () => {
     const submissions = await Promise.all([
       ...Array.from({ length: 8 }, (_, index) => reviewApi.submitText('model-mock', `int t${index}(void){return ${index};}`, ['logic'], `stress-text-${index}.c`)),
       ...Array.from({ length: 4 }, (_, index) => reviewApi.submitFile('file', 'model-mock', new File([`int f${index};`], `stress-${index}.c`), ['memory_safety'])),
-      ...Array.from({ length: 4 }, (_, index) => reviewApi.submitFile('archive', 'model-mock', new File(['PK'], `stress-${index}.zip`), ['compatibility'])),
+      ...Array.from({ length: 4 }, (_, index) => reviewApi.submitFile('archive', 'model-mock', new File(['PK'], `stress-${index}.zip`), ['integer_safety'])),
       ...Array.from({ length: 4 }, (_, index) => reviewApi.submitFolder('model-mock', [
         new File([`int a${index};`], `folder-${index}/a.c`),
         new File([`int b${index};`], `folder-${index}/b.c`),
         new File([`int h${index};`], `folder-${index}/b.h`),
-      ], ['maintainability'], `stress-folder-${index}`)),
+      ], ['buffer_overflow'], `stress-folder-${index}`)),
     ])
 
     expect(submissions).toHaveLength(20)
@@ -138,7 +138,14 @@ describe('mockApi', () => {
     expect(finding.fixed_snippet).toBeUndefined()
     expect(finding.remediation).toBeUndefined()
     expect(allFindings.every((item) => item.description && item.file_path && item.line)).toBe(true)
-    expect(allFindings.some((item) => item.category === 'other')).toBe(true)
+    expect(allFindings.every((item) => [
+      'memory_safety',
+      'buffer_overflow',
+      'pointer_safety',
+      'resource_leak',
+      'integer_safety',
+      'logic',
+    ].includes(item.category))).toBe(true)
   })
 
   it('filters review history by severity and creation time', async () => {
