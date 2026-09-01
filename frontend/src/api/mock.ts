@@ -24,12 +24,12 @@ const response = async <T>(data: T): MockResponse<T> => ({ data })
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
 
 const checkTypeLabels: Record<string, string> = {
-  memory_safety: '内存安全',
-  buffer_overflow: '缓冲区溢出',
-  pointer_safety: '指针安全',
+  memory_safety: '释放后使用/内存破坏',
+  buffer_overflow: '缓冲区/数组越界',
+  pointer_safety: '野指针/悬空指针',
   resource_leak: '资源泄漏',
-  integer_safety: '整数安全',
-  logic: '逻辑错误',
+  integer_safety: '长度/索引整数风险',
+  logic: '严重状态机/协议逻辑',
 }
 
 const allCheckTypes = Object.keys(checkTypeLabels)

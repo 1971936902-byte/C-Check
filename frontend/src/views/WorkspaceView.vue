@@ -419,7 +419,10 @@ async function pinTask(target: ReviewTask) {
               <small>按审查目标选择重点维度</small>
             </div>
             <el-select v-model="checkTypes" multiple collapse-tags collapse-tags-tooltip placeholder="请至少选择一种检查类型" class="check-type-select">
-              <el-option v-for="item in ALL_CHECK_TYPES" :key="item.value" :label="item.label" :value="item.value" />
+              <el-option v-for="item in ALL_CHECK_TYPES" :key="item.value" :label="item.label" :value="item.value">
+                <span class="check-option-label">{{ item.label }}</span>
+                <small class="check-option-description">{{ item.description }}</small>
+              </el-option>
             </el-select>
             <el-checkbox class="check-all-checkbox" :model-value="allChecksSelected" @change="toggleAllChecks">全选</el-checkbox>
           </div>

@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     rag_on_demand_enabled: bool = True
     rag_review_units_enabled: bool = False
     rag_candidate_scan_enabled: bool = True
+    rag_supplemental_persist_enabled: bool = True
     candidate_format_batch_size: int = Field(default=10, ge=1, le=100)
     candidate_format_model_enabled: bool = True
     candidate_semantic_fallback_enabled: bool = True

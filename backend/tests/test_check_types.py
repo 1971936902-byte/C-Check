@@ -17,9 +17,10 @@ def test_validate_check_types_rejects_empty_or_unknown_dimensions():
 
 def test_check_types_prompt_lists_selected_dimensions():
     prompt = check_types_prompt(["memory_safety", "logic", "integer_safety"])
-    assert "内存安全" in prompt
-    assert "逻辑错误" in prompt
-    assert "整数溢出与类型转换" in prompt
+    assert "释放后使用/内存破坏" in prompt
+    assert "严重状态机/协议逻辑" in prompt
+    assert "长度/索引整数风险" in prompt
+    assert "普通空指针未校验" in prompt
     assert ALL_CHECK_TYPES == [
         "memory_safety",
         "buffer_overflow",

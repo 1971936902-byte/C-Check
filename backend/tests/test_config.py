@@ -115,6 +115,15 @@ def test_settings_preserve_absolute_storage_path(monkeypatch, tmp_path):
     assert Settings(_env_file=None).storage_path == storage_path
 
 
+def test_settings_toggle_rag_supplemental_persistence(monkeypatch):
+    monkeypatch.setenv("ALLOW_INSECURE_DEFAULTS", "true")
+    monkeypatch.delenv("RAG_SUPPLEMENTAL_PERSIST_ENABLED", raising=False)
+    assert Settings(_env_file=None).rag_supplemental_persist_enabled is True
+
+    monkeypatch.setenv("RAG_SUPPLEMENTAL_PERSIST_ENABLED", "false")
+    assert Settings(_env_file=None).rag_supplemental_persist_enabled is False
+
+
 def test_settings_locate_dotenv_from_repository_root():
     assert Settings.model_config["env_file"] == (REPOSITORY_ROOT / ".env",)
     assert Path(Settings.model_config["env_file"][0]).is_absolute()

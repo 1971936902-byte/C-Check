@@ -142,9 +142,85 @@ def test_postprocess_downgrades_null_pointer_findings_to_suggestions(db_session_
         processed = _postprocess_review_result(task, result)
 
     finding = processed.findings[0]
-    assert finding.severity == FindingSeverity.SUGGESTION
+    assert finding.severity == FindingSeverity.LOW
     assert finding.category == FindingCategory.MAINTAINABILITY
     assert "固定映射地址" in finding.description
+
+
+def test_postprocess_downgrades_uninitialized_pointer_guess_to_low(db_session_factory):
+    from app.tasks.reviews import _postprocess_review_result
+
+    source = "\n".join(
+        [
+            "void f(void) {",
+            "  if(Err_Type == errType)",
+            "    Err_Type = ERR_NULL;",
+            "}",
+        ]
+    )
+    task_id = _create_task(db_session_factory, source_text=source)
+    result = ModelReviewResponse.model_validate(
+        {
+            "summary": "发现问题",
+            "score": 30,
+            "findings": [
+                {
+                    "severity": "high",
+                    "category": "pointer_safety",
+                    "title": "指针未初始化",
+                    "description": "使用未初始化的指针 Err_Type。",
+                    "file_path": "snippet.c",
+                    "line": 3,
+                }
+            ],
+        }
+    )
+
+    with db_session_factory() as db:
+        task = db.get(ReviewTask, task_id)
+        processed = _postprocess_review_result(task, result)
+
+    finding = processed.findings[0]
+    assert finding.severity == FindingSeverity.LOW
+    assert finding.category == FindingCategory.POINTER_SAFETY
+
+
+def test_postprocess_keeps_use_after_free_high(db_session_factory):
+    from app.tasks.reviews import _postprocess_review_result
+
+    source = "\n".join(
+        [
+            "void f(char *p) {",
+            "  free(p);",
+            "  p[0] = 1;",
+            "}",
+        ]
+    )
+    task_id = _create_task(db_session_factory, source_text=source)
+    result = ModelReviewResponse.model_validate(
+        {
+            "summary": "发现问题",
+            "score": 30,
+            "findings": [
+                {
+                    "severity": "high",
+                    "category": "memory_safety",
+                    "title": "use-after-free",
+                    "description": "释放后继续写入 p[0]。",
+                    "file_path": "snippet.c",
+                    "line": 3,
+                }
+            ],
+        }
+    )
+
+    with db_session_factory() as db:
+        task = db.get(ReviewTask, task_id)
+        processed = _postprocess_review_result(task, result)
+
+    finding = processed.findings[0]
+    assert finding.severity == FindingSeverity.HIGH
+    assert finding.category == FindingCategory.MEMORY_SAFETY
 
 
 def test_run_review_task_reports_audit_failure_after_max_attempts(db_session_factory, monkeypatch):

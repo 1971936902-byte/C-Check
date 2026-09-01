@@ -161,7 +161,30 @@ def _filter_unanchored_findings(task: ReviewTask, result: ModelReviewResponse) -
     return result.model_copy(update={"summary": summary, "findings": kept})
 
 
-NULL_POINTER_TEXT_PATTERN = re.compile(r"(空指针|null\s*pointer|null|nil)", re.IGNORECASE)
+NULL_POINTER_TEXT_PATTERN = re.compile(r"(空指针|null\s*pointer|null|nil|未校验.*指针|未验证.*指针)", re.IGNORECASE)
+LOW_VALUE_POINTER_TEXT_PATTERN = re.compile(
+    r"("
+    r"空指针|NULL\s*pointer|null|nil|"
+    r"未校验.*指针|未验证.*指针|指针.*未校验|指针.*未验证|"
+    r"未初始化|未赋值|未检查(?:返回值|结果)|返回值.*未检查|"
+    r"missing\s+null\s+check|unchecked\s+return|uninitialized"
+    r")",
+    re.IGNORECASE,
+)
+HIGH_VALUE_POINTER_TEXT_PATTERN = re.compile(
+    r"("
+    r"use[ _-]?after[ _-]?free|double[ _-]?free|dangling|wild\s*pointer|"
+    r"释放后|二次释放|重复释放|悬空指针|野指针|越界|溢出"
+    r")",
+    re.IGNORECASE,
+)
+COMPILATION_ONLY_TEXT_PATTERN = re.compile(
+    r"("
+    r"未定义|未声明|隐式声明|unknown\s+(?:type|symbol|identifier)|"
+    r"undefined|undeclared|implicit\s+declaration|编译"
+    r")",
+    re.IGNORECASE,
+)
 PERIPHERAL_REGISTER_ACCESS_PATTERN = re.compile(
     r"\b(?:CAN|DAC|DMA\d?|CRC|DBGMCU|RCC|GPIO[A-Z]?|USART\d?|UART\d?|SPI\d?|I2C\d?|TIM\d?|ADC\d?)\s*->"
 )
@@ -191,29 +214,51 @@ def _is_peripheral_register_null_pointer_false_positive(task: ReviewTask, findin
     return bool(PERIPHERAL_REGISTER_ACCESS_PATTERN.search(combined)) and _is_null_pointer_finding(finding)
 
 
-def _downgrade_null_pointer_findings(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
+def _is_low_value_pointer_or_init_finding(finding: ReviewFinding) -> bool:
+    text = _finding_text(finding)
+    if not LOW_VALUE_POINTER_TEXT_PATTERN.search(text):
+        return False
+    return HIGH_VALUE_POINTER_TEXT_PATTERN.search(text) is None
+
+
+def _downgrade_low_value_findings(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
     changed = False
     findings: list[ReviewFinding] = []
     for finding in result.findings:
-        if not _is_null_pointer_finding(finding):
+        if COMPILATION_ONLY_TEXT_PATTERN.search(_finding_text(finding)):
+            findings.append(
+                finding.model_copy(
+                    update={
+                        "severity": FindingSeverity.SUGGESTION,
+                        "category": FindingCategory.MAINTAINABILITY,
+                        "description": "编译、未定义或声明完整性问题不属于高价值安全审查结果；建议在构建阶段处理。",
+                    }
+                )
+            )
+            changed = True
+            continue
+        if not _is_low_value_pointer_or_init_finding(finding):
             findings.append(finding)
             continue
-        if finding.severity == FindingSeverity.SUGGESTION:
+        if finding.severity in {FindingSeverity.LOW, FindingSeverity.SUGGESTION}:
             findings.append(finding)
             continue
         if finding.category in {
             FindingCategory.POINTER_SAFETY,
             FindingCategory.MEMORY_SAFETY,
             FindingCategory.INPUT_VALIDATION,
+            FindingCategory.LOGIC,
         }:
             description = finding.description
+            category = finding.category
             if _is_peripheral_register_null_pointer_false_positive(task, finding):
                 description = "嵌入式外设寄存器通常是固定映射地址，空指针风险需结合平台头文件确认。"
+                category = FindingCategory.MAINTAINABILITY
             findings.append(
                 finding.model_copy(
                     update={
-                        "severity": FindingSeverity.SUGGESTION,
-                        "category": FindingCategory.MAINTAINABILITY,
+                        "severity": FindingSeverity.LOW,
+                        "category": FindingCategory.MAINTAINABILITY if category == FindingCategory.LOGIC else category,
                         "description": description,
                     }
                 )
@@ -225,7 +270,7 @@ def _downgrade_null_pointer_findings(task: ReviewTask, result: ModelReviewRespon
 
 
 def _postprocess_review_result(task: ReviewTask, result: ModelReviewResponse) -> ModelReviewResponse:
-    return _downgrade_null_pointer_findings(
+    return _downgrade_low_value_findings(
         task,
         _filter_unanchored_findings(task, _normalize_finding_anchors(task, result)),
     )
@@ -334,12 +379,13 @@ def run_review_task(task_id: str) -> None:
                         task,
                         list(task.files),
                         settings=supplemental_settings,
-                        persist=True,
+                        persist=settings.rag_supplemental_persist_enabled,
                         purpose="default",
                     )
+                    persist_label = "persisted" if settings.rag_supplemental_persist_enabled else "built without persistence"
                     task.model_log = _append_model_log(
                         task.model_log,
-                        f"RAG supplemental context persisted; chars={len(supplemental)}; "
+                        f"RAG supplemental context {persist_label}; chars={len(supplemental)}; "
                         f"elapsed_s={monotonic() - supplemental_started:.4f}.",
                     )
                 except Exception as exc:
