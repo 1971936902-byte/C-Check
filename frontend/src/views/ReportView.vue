@@ -5,7 +5,7 @@ import { Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { codeIndexApi, errorMessage, reportApi } from '../api/client'
 import ReportChart from '../components/ReportChart.vue'
-import type { Finding, Report, ReviewEvidence, Severity } from '../types'
+import type { CodeLine, FindingGroup, Report, ReviewEvidence, Severity } from '../types'
 import { scoreTone } from './report-metrics'
 
 const severityTabs: Array<{ key: Severity; label: string; empty: string }> = [
@@ -35,6 +35,11 @@ const pages = reactive<Record<Severity, number>>({
 })
 
 const allFindings = computed(() => report.value?.result_json.findings ?? [])
+const allFindingGroups = computed<FindingGroup[]>(() =>
+  report.value?.result_json.finding_groups?.length
+    ? report.value.result_json.finding_groups
+    : allFindings.value.map((finding, index) => ({ ...finding, id: `finding-${index}` })),
+)
 const severityCounts = computed<Record<string, number>>(() =>
   report.value
     ? {
@@ -45,11 +50,11 @@ const severityCounts = computed<Record<string, number>>(() =>
       }
     : { high: 0, medium: 0, low: 0, suggestion: 0 },
 )
-const findingsBySeverity = computed<Record<Severity, Finding[]>>(() => ({
-  high: allFindings.value.filter((finding) => finding.severity === 'high'),
-  medium: allFindings.value.filter((finding) => finding.severity === 'medium'),
-  low: allFindings.value.filter((finding) => finding.severity === 'low'),
-  suggestion: allFindings.value.filter((finding) => finding.severity === 'suggestion'),
+const findingsBySeverity = computed<Record<Severity, FindingGroup[]>>(() => ({
+  high: allFindingGroups.value.filter((finding) => finding.severity === 'high'),
+  medium: allFindingGroups.value.filter((finding) => finding.severity === 'medium'),
+  low: allFindingGroups.value.filter((finding) => finding.severity === 'low'),
+  suggestion: allFindingGroups.value.filter((finding) => finding.severity === 'suggestion'),
 }))
 const visibleFindings = computed(() => {
   const current = pages[activeSeverity.value]
@@ -84,8 +89,20 @@ async function download(format: 'markdown' | 'pdf' | 'text') {
   }
 }
 
-function locationText(finding: Finding) {
+function locationText(finding: FindingGroup) {
+  if (finding.line_numbers?.length) {
+    const lines = finding.line_numbers.length === 1 ? String(finding.line_numbers[0]) : `[${finding.line_numbers.join(', ')}] 行`
+    return `${finding.file_path}:${lines}`
+  }
   return `${finding.file_path}${finding.line ? `:${finding.line}` : ''}`
+}
+
+function relatedLineText(finding: FindingGroup) {
+  return finding.related_line_numbers?.length ? finding.related_line_numbers.join(', ') : '无'
+}
+
+function lineTooltip(line: CodeLine) {
+  return line.issue_description || (line.kind === 'removed' ? '问题相关代码行' : '')
 }
 </script>
 
@@ -175,7 +192,7 @@ function locationText(finding: Finding) {
                 <el-collapse v-if="findingsBySeverity[tab.key].length">
                   <el-collapse-item
                     v-for="(finding, index) in visibleFindings"
-                    :key="`${finding.severity}-${finding.file_path}-${finding.line ?? 'unknown'}-${index}`"
+                    :key="finding.id || `${finding.severity}-${finding.file_path}-${finding.line ?? 'unknown'}-${index}`"
                   >
                     <template #title>
                       <div class="finding-title">
@@ -192,6 +209,21 @@ function locationText(finding: Finding) {
 
                     <div class="finding-body">
                       <p class="finding-description">{{ finding.description }}</p>
+                      <div v-if="finding.findings && finding.findings.length > 1" class="finding-related">
+                        <small v-if="finding.function_name">
+                          函数：{{ finding.function_name }} · {{ finding.function_start_line }}-{{ finding.function_end_line }}
+                        </small>
+                        <div class="finding-line-role">
+                          <span>主问题行：<code>{{ finding.primary_line || finding.line }}</code></span>
+                          <span>关联行：<code>{{ relatedLineText(finding) }}</code></span>
+                        </div>
+                        <ul>
+                          <li v-for="item in finding.findings" :key="`${item.file_path}-${item.line}-${item.title}`">
+                            <code>{{ item.line }}</code>
+                            <span>{{ item.title }}</span>
+                          </li>
+                        </ul>
+                      </div>
                       <div v-if="finding.code_snippet?.length || finding.fixed_snippet?.length" class="diff-grid">
                         <section v-if="finding.code_snippet?.length" class="code-panel">
                           <header>
@@ -202,6 +234,7 @@ function locationText(finding: Finding) {
                             v-for="line in finding.code_snippet"
                             :key="`source-${line.line}-${line.content}`"
                             :class="['code-line', `line-${line.kind}`]"
+                            :title="lineTooltip(line)"
                           >
                             <span>{{ line.line }}</span>
                             <i>{{ line.kind === 'removed' ? '-' : ' ' }}</i>
@@ -355,6 +388,7 @@ function locationText(finding: Finding) {
   margin: 0 0 12px;
   color: #3b5368;
   line-height: 1.7;
+  white-space: pre-line;
 }
 
 .finding-meta {
@@ -366,6 +400,52 @@ function locationText(finding: Finding) {
 
 .finding-title {
   padding-left: 8px;
+}
+
+.finding-related {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(238, 245, 250, 0.72);
+}
+
+.finding-related ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finding-related li {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  color: #48647d;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.finding-related code {
+  color: #8190a2;
+  text-align: right;
+}
+
+.finding-line-role {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  color: #526b80;
+  font-size: 12px;
+}
+
+.finding-line-role code {
+  color: #335c7f;
+  font-weight: 700;
 }
 
 .severity-marker {

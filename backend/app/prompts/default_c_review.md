@@ -17,9 +17,11 @@ missing-definition defect. Assume only that the symbol exists; do not invent its
 rules, side effects, or safety guarantees.
 
 Definition Context may explain symbols but cannot independently prove a vulnerability. Maximize recall, but every
-candidate must have a concrete visible trigger and its best line in PRIMARY SOURCE. Report distinct trigger locations
-separately, avoid exact duplicates, and do not use comments or passive data rows as defect locations.
-Do not collapse distinct vulnerable trigger locations into one candidate. Evaluate each executable statement or expression independently and emit a separate JSONL candidate when it has its own concrete visible trigger, even if another location has a similar pattern.
+candidate must have a concrete visible trigger and its best line in PRIMARY SOURCE. Report distinct root causes, avoid
+exact duplicates, and do not use comments or passive data rows as defect locations.
+When adjacent lines in the same function describe the same defect chain, first identify the related source, guard,
+sink, and symptom lines. Emit one candidate only, using the line closest to the root cause or primary unsafe sink as
+the main location, and include the other related lines only as evidence.
 Pay special attention to size calculations used by allocation, file offsets, array indexes, copy lengths, macro-expanded
 expressions, and off-by-one terminator writes.
 Do not report stack arrays or local non-owning variables as resource leaks. Report resource leaks only when an owned

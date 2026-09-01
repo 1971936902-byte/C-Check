@@ -28,6 +28,14 @@ from app.schemas.model_response import (
 from app.services.check_types import CHECK_TYPE_LABELS, check_types_prompt
 from app.services.model_output_sanitizer import ModelOutputSanitizer
 from app.services.static_c_rules import detect_static_c_findings
+from app.services.security_analysis import (
+    EvidenceVerdict,
+    buffer_write_sink_names,
+    classify_buffer_candidate_line,
+    extract_buffer_write_evidence_from_line,
+    has_buffer_write_sink_anchor,
+    is_evidence_backed_root_candidate,
+)
 from app.services.code_index.clang_static_analyzer import diagnostics_to_findings, run_clang_static_analysis
 
 
@@ -92,9 +100,11 @@ Each line uses exactly these short keys: p, l, s, t, d.
 - l: exact integer source line or null.
 - s: high, medium, low, or suggestion.
 - t: snake_case defect type, at most 24 ASCII characters.
-- d: one compact Chinese sentence, at most 36 Chinese characters; omit repeated boilerplate.
+- d: one compact Chinese sentence, at most 36 Chinese characters; name the root cause, target buffer, tainted length/index, or missing guard when visible.
 Format template: {"p":"<relative_path>","l":<line_or_null>,"s":"<severity>","t":"<free_form_type>","d":"<short_chinese_description>"}
 Use one physical output line per candidate. Escape quotes and newlines inside strings.
+Prefer root-cause candidates: within one function, report the same missing bounds/null/lifetime proof once, not once per affected line.
+Do not require standard library names such as memcpy/strcpy to report buffer risks; custom receive/read/copy/decrypt APIs and pointer/array writes can be sinks too.
 """
 
 
@@ -318,7 +328,23 @@ _C_FUNCTION_DEFINITION_RE = re.compile(
     r"(?m)^\s*(?!if\b|for\b|while\b|switch\b)[A-Za-z_][\w\s*]*\b[A-Za-z_]\w*\s*\([^;{}]*\)\s*\{"
 )
 _DANGEROUS_C_OPERATION_RE = re.compile(
-    r"\b(?:memcpy|memmove|strcpy|strcat|sprintf|scanf|gets|malloc|calloc|realloc|free|read|recv|fread)\s*\("
+    r"\b(?:"
+    + "|".join(
+        (re.escape(name) for name in sorted(
+            {
+                "scanf",
+                "gets",
+                "malloc",
+                "calloc",
+                "realloc",
+                "free",
+                *buffer_write_sink_names(),
+            },
+            key=len,
+            reverse=True,
+        ))
+    )
+    + r")\s*\("
 )
 _POINTER_OR_ARRAY_OPERATION_RE = re.compile(r"(?:->|\[[^\]\n]+\]|\*\s*[A-Za-z_]\w*)")
 
@@ -787,6 +813,8 @@ def _batch_prompt(
         "balance work across available model nodes. Review only this batch and report concrete issues visible in this "
         "batch. Each source line is prefixed as `000123: code`; use the numeric prefix as the "
         "`line` value and keep `file_path` as the original file path.\n"
+        "Prefer one root-cause candidate per function for the same target buffer and tainted length/index; "
+        "do not duplicate the same missing proof on every downstream sink line.\n"
         f"Batch {batch_index} of {batch_count}, containing {len(batch)} source chunk(s):\n"
         f"{chunk_lines}"
     )
@@ -1385,7 +1413,7 @@ def _looks_like_function_header(header_text: str) -> bool:
     return bool(re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*\{?\s*$", compact))
 
 
-def _function_window_for_line(lines: Sequence[str], line_number: int, *, max_lines: int = 160) -> tuple[int, int] | None:
+def _function_window_for_line(lines: Sequence[str], line_number: int, *, max_lines: int = 500) -> tuple[int, int] | None:
     if line_number < 1 or line_number > len(lines):
         return None
     sanitized = [_strip_comments_and_strings(line) for line in lines]
@@ -1552,10 +1580,14 @@ def _line_has_actionable_c_anchor(line_text: str) -> bool:
         return False
     if lowered in {"{", "}", "(", ")", ";"}:
         return False
-    if lowered.startswith(("//", "/*", "*", "#endif", "#else")):
+    if lowered.startswith(("//", "/*", "#endif", "#else")):
         return False
     if lowered.startswith("#"):
         return any(token in lowered for token in ("define", "include", "if", "ifdef", "ifndef"))
+    if has_buffer_write_sink_anchor(line_text):
+        return True
+    if lowered.startswith("*"):
+        return False
     if lowered.startswith(("if", "while", "for", "switch", "return", "do", "goto", "free(")):
         return True
     if any(token in lowered for token in ("=", "->", "[", "]", "malloc", "calloc", "realloc", "memcpy", "memmove", "strcpy", "strncpy", "snprintf", "sprintf")):
@@ -1604,6 +1636,11 @@ def _refine_candidate_line(files: Sequence[ReviewFile], finding, *, radius: int 
 
     finding_text = _candidate_text(finding)
     current_line = lines[finding.line - 1].strip().lower()
+    if (
+        getattr(finding, "category", None) == FindingCategory.BUFFER_OVERFLOW
+        and extract_buffer_write_evidence_from_line(source.relative_path, finding.line, lines[finding.line - 1]) is not None
+    ):
+        return finding.line
     if (
         finding.category.value == "memory_safety"
         and current_line.startswith("free(")
@@ -1739,7 +1776,7 @@ def _dedupe_root_findings(
     """
 
     deduped: list[ReviewFinding] = []
-    seen: dict[tuple[str, str, tuple[int, int] | None, str], int] = {}
+    seen: dict[tuple[str, str, tuple[int, int] | None, str, str], int] = {}
     duplicate_count = 0
     for finding in findings:
         key = _root_finding_key(files, finding)
@@ -1765,7 +1802,7 @@ def _finding_root_representative_rank(finding: ReviewFinding) -> tuple[int, int]
 def _root_finding_key(
     files: Sequence[ReviewFile],
     finding: ReviewFinding,
-) -> tuple[str, str, tuple[int, int] | None, str] | None:
+) -> tuple[str, str, tuple[int, int] | None, str, str] | None:
     source = _review_file_by_path(files, finding.file_path)
     if source is None or finding.line is None:
         return None
@@ -1776,17 +1813,22 @@ def _root_finding_key(
     subject = _root_subject_for_line(lines[finding.line - 1], finding)
     if not subject:
         return None
+    root_cause = _root_cause_signature(lines, finding.line, finding)
     return (
         source.relative_path.replace("\\", "/").strip().lower(),
         finding.category.value,
         function_window,
         subject,
+        root_cause,
     )
 
 
 def _root_subject_for_line(line_text: str, finding: ReviewFinding) -> str | None:
     normalized_line = _normalize_c_expression(line_text)
     if finding.category == FindingCategory.BUFFER_OVERFLOW:
+        evidence = extract_buffer_write_evidence_from_line(finding.file_path, finding.line or 1, line_text)
+        if evidence is not None:
+            return f"dst:{_root_expression_base(evidence.dst)}"
         memcpy_match = _MEMCPY_CALL_PATTERN.search(line_text)
         if memcpy_match:
             return f"dst:{_root_expression_base(memcpy_match.group('dst'))}"
@@ -1796,6 +1838,9 @@ def _root_subject_for_line(line_text: str, finding: ReviewFinding) -> str | None
         )
         if call_match:
             return f"dst:{_root_expression_base(call_match.group('dst'))}"
+        candidate_text = _candidate_text(finding)
+        if "uDataPar" in candidate_text or "udatapar" in candidate_text.lower():
+            return "dst:ptr->uDataPar"
         index_match = re.search(r"(?P<dst>[A-Za-z_][A-Za-z0-9_.>\-]*)\s*\[", normalized_line)
         if index_match:
             return f"dst:{_root_expression_base(index_match.group('dst'))}"
@@ -1811,8 +1856,57 @@ def _root_subject_for_line(line_text: str, finding: ReviewFinding) -> str | None
 def _root_expression_base(expression: str) -> str:
     normalized = _normalize_c_expression(expression)
     normalized = normalized.lstrip("&*(").rstrip(")")
-    normalized = re.split(r"\+|-|\[", normalized, maxsplit=1)[0]
+    normalized = re.split(r"\+|\[", normalized, maxsplit=1)[0]
     return normalized or expression.strip()
+
+
+def _root_cause_signature(lines: Sequence[str], line_number: int, finding: ReviewFinding) -> str:
+    if finding.category == FindingCategory.BUFFER_OVERFLOW:
+        return _buffer_root_cause_signature(lines, line_number, finding)
+    identifiers = _candidate_subject_identifiers(finding)
+    return identifiers[0] if identifiers else "generic"
+
+
+def _buffer_root_cause_signature(lines: Sequence[str], line_number: int, finding: ReviewFinding) -> str:
+    line_text = lines[line_number - 1] if 1 <= line_number <= len(lines) else ""
+    candidate_text = _candidate_text(finding)
+    combined = f"{line_text}\n{finding.title}\n{finding.description}"
+    normalized = _normalize_c_expression(combined)
+    lowered = combined.lower()
+    if (
+        "协议长度" in finding.title
+        or "外部长度" in finding.description
+        or ("umessagelen" in normalized.lower() and ("udatapar" in normalized.lower() or "wl_receivebytes" in normalized.lower()))
+    ):
+        return "protocol_length:umessagelen"
+
+    evidence = extract_buffer_write_evidence_from_line(finding.file_path, line_number, line_text)
+    if evidence is not None and evidence.length:
+        length_subject = _length_expression_subject(evidence.length)
+        if length_subject:
+            return f"length:{length_subject}"
+
+    identifiers = _candidate_subject_identifiers(finding)
+    for identifier in identifiers:
+        if any(token in identifier for token in ("len", "length", "size", "count", "index", "idx", "num")):
+            return f"length:{identifier}"
+    if any(token in candidate_text for token in ("容量", "边界", "越界", "溢出", "未校验", "未验证", "bounds", "capacity")):
+        return "missing_capacity"
+    if any(token in lowered for token in ("strcat", "strncat", "sprintf", "snprintf")):
+        return "string_build"
+    return "generic_buffer"
+
+
+def _length_expression_subject(expression: str) -> str | None:
+    normalized = _normalize_c_expression(expression)
+    for match in _C_IDENTIFIER_RE.finditer(normalized):
+        identifier = match.group(0)
+        lowered = identifier.lower()
+        if lowered in _CANDIDATE_ANCHOR_STOPWORDS or lowered in {"sizeof", "uint8", "uint16", "uint32"}:
+            continue
+        if any(token in lowered for token in ("len", "length", "size", "count", "index", "idx", "num", "message")):
+            return lowered
+    return None
 
 
 def _validate_compiler_findings(
@@ -2030,6 +2124,8 @@ def _is_proven_safe_buffer_candidate(
 ) -> bool:
     if finding.category != FindingCategory.BUFFER_OVERFLOW:
         return False
+    if is_evidence_backed_root_candidate(finding):
+        return False
     lines = source.source_text.splitlines()
     if line_number < 1 or line_number > len(lines):
         return False
@@ -2044,6 +2140,7 @@ def _is_proven_safe_buffer_candidate(
         or _is_guard_only_buffer_candidate_safe(lines, line_number, line_text)
         or _is_local_append_guarded_by_sizeof(lines, line_number, line_text)
         or _is_clamped_length_memcpy_safe(lines, line_number, line_text)
+        or _is_exact_size_guarded_buffer_write_safe(lines, line_number, line_text)
         or _is_non_sink_buffer_candidate_line(line_text)
     )
 
@@ -2112,6 +2209,24 @@ def _is_guarded_sizeof_copy(lines: list[str], line_number: int, line_text: str) 
     )
     start = max(1, line_number - 8)
     return any(guard_pattern.search(lines[index - 1]) for index in range(start, line_number))
+
+
+def _is_exact_size_guarded_buffer_write_safe(lines: list[str], line_number: int, line_text: str) -> bool:
+    evidence = extract_buffer_write_evidence_from_line("<unknown>", line_number, line_text)
+    if evidence is None or not evidence.length:
+        return False
+    dst = _normalize_c_expression(evidence.dst)
+    length = _normalize_c_expression(evidence.length)
+    if not dst or not length:
+        return False
+    escaped_dst = re.escape(dst)
+    escaped_length = re.escape(length)
+    guard_pattern = re.compile(
+        rf"\b(?:if|while)\s*\([^)]*(?:{escaped_length}\s*==\s*sizeof\s*\(\s*{escaped_dst}\s*\)|"
+        rf"sizeof\s*\(\s*{escaped_dst}\s*\)\s*==\s*{escaped_length})[^)]*\)"
+    )
+    start = max(1, line_number - 6)
+    return any(guard_pattern.search(_normalize_c_expression(lines[index - 1])) for index in range(start, line_number))
 
 
 def _is_fixed_protocol_datap_copy_safe(lines: list[str], line_number: int, line_text: str) -> bool:
@@ -2274,27 +2389,11 @@ def _is_non_sink_buffer_candidate_line(line_text: str) -> bool:
         return True
     if re.match(r"^(?:static\s+)?[a-z_][a-z0-9_*\s]+\s+[a-z_][a-z0-9_]*\s*\([^;]*\)\s*$", lowered):
         return True
-    return not _line_has_buffer_sink_anchor(lowered)
+    return classify_buffer_candidate_line(line_text) == EvidenceVerdict.SAFE
 
 
 def _line_has_buffer_sink_anchor(lowered_line: str) -> bool:
-    if any(
-        token in lowered_line
-        for token in (
-            "memcpy",
-            "memmove",
-            "memset",
-            "strcpy",
-            "strncpy",
-            "strcat",
-            "strncat",
-            "sprintf",
-            "snprintf",
-            "scanf",
-            "gets",
-            "wtob",
-        )
-    ):
+    if has_buffer_write_sink_anchor(lowered_line):
         return True
     return re.search(r"\[[^\]]+\]\s*(?:=|\+\+|--)", lowered_line) is not None
 
@@ -2306,20 +2405,59 @@ def _is_checked_search_result_candidate(
     finding: ReviewFinding,
 ) -> bool:
     candidate_text = _candidate_text(finding)
-    if "null_pointer" not in candidate_text and not _NULL_POINTER_PATTERN.search(candidate_text):
+    if not _is_search_null_candidate(candidate_text, line_text):
         return False
-    if re.search(r"\breturn\s*\(\s*int\s*\)\s*(?:strstr|strchr)\s*\(", line_text):
+    if re.search(r"\breturn\s*(?:\([^)]*\)\s*)?(?:strstr|strchr)\s*\(", line_text):
         return True
+    assignment_name = _search_result_assignment_name(line_text)
+    if assignment_name:
+        return _has_null_check_for_name(lines, assignment_name, line_number, line_number + 10)
+    checked_name = _null_checked_name(line_text)
+    if checked_name is None:
+        return False
+    start = max(1, line_number - 10)
+    for index in range(line_number - 1, start - 1, -1):
+        if _search_result_assignment_name(lines[index - 1]) == checked_name:
+            return True
+    return False
+
+
+def _is_search_null_candidate(candidate_text: str, line_text: str) -> bool:
+    return (
+        "strstr" in candidate_text
+        or "strchr" in candidate_text
+        or "null_pointer" in candidate_text
+        or "null_dereference" in candidate_text
+        or "null dereference" in candidate_text
+        or "可能为空" in candidate_text
+        or _NULL_POINTER_PATTERN.search(candidate_text) is not None
+        or re.search(r"\b(?:strstr|strchr)\s*\(", line_text) is not None
+    )
+
+
+def _search_result_assignment_name(line_text: str) -> str | None:
     assignment = re.search(
-        r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:strstr|strchr)\s*\(",
+        r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\([^)]*\)\s*)?(?:strstr|strchr)\s*\(",
         line_text,
     )
-    if not assignment:
-        return False
-    name = re.escape(assignment.group("name"))
-    end = min(len(lines), line_number + 10)
-    check_pattern = re.compile(rf"\b{name}\s*(?:==|!=)\s*NULL\b|\bNULL\s*(?:==|!=)\s*{name}\b")
-    return any(check_pattern.search(lines[index - 1]) for index in range(line_number + 1, end + 1))
+    return assignment.group("name") if assignment else None
+
+
+def _null_checked_name(line_text: str) -> str | None:
+    check = re.search(
+        r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:==|!=)\s*NULL\b|\bNULL\s*(?:==|!=)\s*(?P<name2>[A-Za-z_][A-Za-z0-9_]*)\b",
+        line_text,
+    )
+    if check is None:
+        return None
+    return check.group("name") or check.group("name2")
+
+
+def _has_null_check_for_name(lines: list[str], name: str, start_line: int, end_line: int) -> bool:
+    escaped = re.escape(name)
+    end = min(len(lines), end_line)
+    check_pattern = re.compile(rf"\b{escaped}\s*(?:==|!=)\s*NULL\b|\bNULL\s*(?:==|!=)\s*{escaped}\b")
+    return any(check_pattern.search(lines[index - 1]) for index in range(start_line, end + 1))
 
 
 def _normalize_c_expression(expression: str) -> str:

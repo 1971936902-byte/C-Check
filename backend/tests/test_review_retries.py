@@ -236,6 +236,86 @@ def test_run_review_task_persists_strict_finding_fields(db_session_factory, monk
     get_settings.cache_clear()
 
 
+def test_run_review_task_groups_adjacent_findings_for_display(db_session_factory, monkeypatch):
+    from app.core.config import get_settings
+    import app.tasks.reviews as review_tasks
+    from app.tasks.reviews import run_review_task
+
+    monkeypatch.setattr(review_tasks, "SessionLocal", db_session_factory)
+    get_settings.cache_clear()
+
+    async def fake_invoke(_db, _task_id, retry_instruction=None):
+        return ModelReviewResponse(
+            summary="发现问题。",
+            score=70,
+            findings=[
+                {
+                    "severity": "high",
+                    "category": "buffer_overflow",
+                    "title": "长度未校验",
+                    "description": "外部长度参与拷贝前未校验。",
+                    "file_path": "src/proto.c",
+                    "line": 3,
+                },
+                {
+                    "severity": "high",
+                    "category": "memory_safety",
+                    "title": "写入边界不明确",
+                    "description": "相邻写入语句共享同一长度来源。",
+                    "file_path": "src/proto.c",
+                    "line": 6,
+                },
+                {
+                    "severity": "high",
+                    "category": "logic",
+                    "title": "状态未复位",
+                    "description": "另一个函数中的问题不应合并。",
+                    "file_path": "src/proto.c",
+                    "line": 11,
+                },
+            ],
+        )
+
+    monkeypatch.setattr("app.tasks.reviews.invoke_selected_model", fake_invoke)
+    task_id = _create_task(
+        db_session_factory,
+        relative_path="src/proto.c",
+        source_text="\n".join(
+            [
+                "int recv_packet(int len) {",
+                "    char buf[8];",
+                "    int n = len;",
+                "    if (n < 0) return -1;",
+                "    buf[0] = 0;",
+                "    memcpy(buf, src, n);",
+                "}",
+                "int update_state(void) {",
+                "    int state = 1;",
+                "    state++;",
+                "    return state;",
+                "}",
+            ]
+        ),
+    )
+
+    run_review_task(task_id)
+
+    with db_session_factory() as db:
+        task = db.get(ReviewTask, task_id)
+        groups = task.report.result_json["finding_groups"]
+        assert len(groups) == 2
+        assert groups[0]["line_numbers"] == [3, 6]
+        assert groups[0]["function_name"] == "recv_packet"
+        assert [item["line"] for item in groups[0]["code_snippet"]] == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert [item["kind"] for item in groups[0]["code_snippet"] if item["line"] in {3, 6}] == [
+            "removed",
+            "removed",
+        ]
+        assert groups[1]["line_numbers"] == [11]
+
+    get_settings.cache_clear()
+
+
 def test_run_review_task_filters_findings_anchored_to_static_data_rows(db_session_factory, monkeypatch):
     from app.core.config import get_settings
     import app.tasks.reviews as review_tasks

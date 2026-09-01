@@ -4,7 +4,9 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -20,6 +22,20 @@ from app.schemas.admin import (
     ResourceSnapshotResponse,
     SystemResourceResponse,
 )
+
+_METRIC_NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+_TOKEN_COUNTER_MAX_AGE_SECONDS = 300.0
+
+
+@dataclass
+class _TokenCounterSample:
+    captured_at: float
+    prompt_total: float | None
+    generation_total: float | None
+
+
+_token_counter_samples: dict[str, _TokenCounterSample] = {}
+_token_counter_lock = threading.Lock()
 
 
 def _read_cpu_times() -> tuple[int, int] | None:
@@ -140,7 +156,7 @@ def _gpu_devices() -> list[GpuDeviceResponse]:
 
 def _metric_value(metrics: str, names: tuple[str, ...]) -> float | None:
     for name in names:
-        pattern = re.compile(rf"^{re.escape(name)}(?:\{{[^}}]*\}})?\s+([-+]?\d+(?:\.\d+)?)$", re.MULTILINE)
+        pattern = re.compile(rf"^{re.escape(name)}(?:\{{[^}}]*\}})?\s+({_METRIC_NUMBER_PATTERN})$", re.MULTILINE)
         match = pattern.search(metrics)
         if match:
             return float(match.group(1))
@@ -159,6 +175,40 @@ def _fetch_metrics(node: ModelNode) -> str:
         response = client.get(f"{node.base_url.rstrip('/')}/metrics", headers=headers)
         response.raise_for_status()
         return response.text
+
+
+def _counter_rate(current: float | None, previous: float | None, elapsed: float) -> float | None:
+    if current is None or previous is None or elapsed <= 0:
+        return None
+    if current < previous:
+        return None
+    return max(0.0, round((current - previous) / elapsed, 2))
+
+
+def _counter_throughput(
+    node: ModelNode,
+    prompt_total: float | None,
+    generation_total: float | None,
+) -> tuple[float | None, float | None]:
+    now = time.monotonic()
+    sample = _TokenCounterSample(
+        captured_at=now,
+        prompt_total=prompt_total,
+        generation_total=generation_total,
+    )
+    sample_key = node.id or node.base_url
+    with _token_counter_lock:
+        previous = _token_counter_samples.get(sample_key)
+        _token_counter_samples[sample_key] = sample
+    if previous is None:
+        return None, None
+    elapsed = now - previous.captured_at
+    if elapsed <= 0 or elapsed > _TOKEN_COUNTER_MAX_AGE_SECONDS:
+        return None, None
+    return (
+        _counter_rate(prompt_total, previous.prompt_total, elapsed),
+        _counter_rate(generation_total, previous.generation_total, elapsed),
+    )
 
 
 def _model_metrics(node: ModelNode) -> ModelRuntimeMetricResponse:
@@ -183,24 +233,34 @@ def _model_metrics(node: ModelNode) -> ModelRuntimeMetricResponse:
         metrics,
         ("vllm:avg_generation_throughput_toks_per_s", "vllm_avg_generation_throughput_toks_per_s"),
     )
-    if prompt_throughput is None or generation_throughput is None:
-        prompt_total = _metric_value(metrics, ("vllm:prompt_tokens_total", "vllm_prompt_tokens_total"))
-        generation_total = _metric_value(metrics, ("vllm:generation_tokens_total", "vllm_generation_tokens_total"))
-        try:
-            started = time.monotonic()
-            time.sleep(0.35)
-            next_metrics = _fetch_metrics(node)
-            elapsed = max(time.monotonic() - started, 0.001)
-            next_prompt_total = _metric_value(next_metrics, ("vllm:prompt_tokens_total", "vllm_prompt_tokens_total"))
-            next_generation_total = _metric_value(next_metrics, ("vllm:generation_tokens_total", "vllm_generation_tokens_total"))
-        except httpx.HTTPError:
-            next_prompt_total = None
-            next_generation_total = None
-            elapsed = 1
-        if prompt_throughput is None and prompt_total is not None and next_prompt_total is not None:
-            prompt_throughput = max(0.0, round((next_prompt_total - prompt_total) / elapsed, 2))
-        if generation_throughput is None and generation_total is not None and next_generation_total is not None:
-            generation_throughput = max(0.0, round((next_generation_total - generation_total) / elapsed, 2))
+    prompt_total = _metric_value(
+        metrics,
+        (
+            "vllm:prompt_tokens_total",
+            "vllm:num_prompt_tokens_total",
+            "vllm_prompt_tokens_total",
+            "vllm_num_prompt_tokens_total",
+        ),
+    )
+    generation_total = _metric_value(
+        metrics,
+        (
+            "vllm:generation_tokens_total",
+            "vllm:num_generation_tokens_total",
+            "vllm_generation_tokens_total",
+            "vllm_num_generation_tokens_total",
+        ),
+    )
+    if prompt_total is not None or generation_total is not None:
+        counter_prompt_throughput, counter_generation_throughput = _counter_throughput(
+            node,
+            prompt_total,
+            generation_total,
+        )
+        if prompt_throughput is None or (prompt_throughput <= 0 and counter_prompt_throughput is not None):
+            prompt_throughput = counter_prompt_throughput
+        if generation_throughput is None or (generation_throughput <= 0 and counter_generation_throughput is not None):
+            generation_throughput = counter_generation_throughput
 
     running = _metric_value(metrics, ("vllm:num_requests_running", "vllm_num_requests_running"))
     pending = _metric_value(metrics, ("vllm:num_requests_waiting", "vllm_num_requests_waiting"))

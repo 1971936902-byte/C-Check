@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.models import Report, User
 from app.db.session import get_db
-from app.services.reports import ReportRenderError, render_markdown, render_pdf, render_text
+from app.services.reports import ReportRenderError, ensure_report_display_groups, render_markdown, render_pdf, render_text
 
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -43,7 +43,7 @@ def get_report(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> Report:
-    return _owned_report(db, report_id, current_user)
+    return ensure_report_display_groups(_owned_report(db, report_id, current_user))
 
 
 @router.get("/{report_id}/markdown")

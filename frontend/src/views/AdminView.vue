@@ -44,6 +44,46 @@ const promptBody = ref('')
 let resourceTimer: number | undefined
 let deploymentTimer: number | undefined
 
+const RAG_GRAPH_SYMBOL_LIMIT = 360
+const RAG_GRAPH_FILE_LIMIT = 96
+const RAG_GRAPH_EDGE_LIMIT = 900
+const RAG_GRAPH_EXTERNAL_LIMIT = 120
+const graphMode = ref<'semantic' | 'ownership' | 'all'>('semantic')
+const SEMANTIC_EDGE_TYPES = new Set([
+  'FUNCTION_CALLS_FUNCTION',
+  'CALLBACK_BINDING_TARGETS_FUNCTION',
+  'FUNCTION_USES_GLOBAL',
+  'FUNCTION_USES_MACRO',
+  'FUNCTION_USES_TYPE',
+  'FUNCTION_USES_CALLBACK',
+  'FUNCTION_DEPENDS_ON_CONDITION',
+])
+const OWNERSHIP_EDGE_TYPES = new Set([
+  'FILE_CONTAINS_SYMBOL',
+  'SYMBOL_DEFINED_IN',
+  'SYMBOL_DECLARED_IN',
+  'FILE_INCLUDES_FILE',
+])
+
+type GraphNode = {
+  id: string
+  label: string
+  kind: string
+  file_path?: string
+  line?: number | null
+  source_tool?: string
+  x: number
+  y: number
+}
+
+type GraphLink = {
+  id: string
+  source: string
+  target: string
+  edge_type: string
+  line?: number | null
+}
+
 const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const percent = (value?: number | null) => Math.max(0, Math.min(100, Number(value ?? 0)))
 const metric = (value?: number | null, digits = 1) => value == null ? '--' : value.toFixed(digits)
@@ -132,9 +172,11 @@ const ragStats = computed(() => {
 })
 const graphSymbolCounts = computed(() => countBy(ragSymbols.value.map((symbol) => symbol.kind)))
 const graphEdgeCounts = computed(() => countBy(ragEdges.value.map((edge) => edge.edge_type)))
+const graphSemanticEdgeCounts = computed(() => countBy(ragEdges.value.filter(isSemanticEdge).map((edge) => edge.edge_type)))
 const graphToolCounts = computed(() => countBy(ragSymbols.value.map((symbol) => symbol.source_tool)))
 const graphSymbolCountEntries = computed(() => Object.entries(graphSymbolCounts.value).sort((a, b) => b[1] - a[1]))
 const graphEdgeCountEntries = computed(() => Object.entries(graphEdgeCounts.value).sort((a, b) => b[1] - a[1]))
+const graphSemanticEdgeCountEntries = computed(() => Object.entries(graphSemanticEdgeCounts.value).sort((a, b) => b[1] - a[1]))
 const graphToolCountEntries = computed(() => Object.entries(graphToolCounts.value).sort((a, b) => b[1] - a[1]))
 const graphBucketEntries = computed(() => Object.entries(ragObservability.value?.bucket_counts || {}).sort((a, b) => b[1] - a[1]))
 const symbolById = computed(() => new Map(ragSymbols.value.map((symbol) => [symbol.id, symbol])))
@@ -142,42 +184,96 @@ const visibleSymbols = computed(() => {
   const rank: Record<string, number> = { function: 0, declaration: 1, macro: 2, typedef: 3, struct: 4, enum: 5, global_variable: 6 }
   return [...ragSymbols.value]
     .sort((a, b) => (rank[a.kind] ?? 20) - (rank[b.kind] ?? 20) || a.file_path.localeCompare(b.file_path) || a.start_line - b.start_line)
-    .slice(0, 80)
+    .slice(0, RAG_GRAPH_SYMBOL_LIMIT)
+})
+const visibleSymbolIds = computed(() => new Set(visibleSymbols.value.map((symbol) => symbol.id)))
+const visibleFiles = computed(() => [...new Set(visibleSymbols.value.map((symbol) => symbol.file_path))].slice(0, RAG_GRAPH_FILE_LIMIT))
+const unresolvedExternalEdges = computed(() => {
+  const names = new Set<string>()
+  const edges: CodeIndexEdge[] = []
+  for (const edge of ragEdges.value) {
+    if (!isExternalCallableEdge(edge) || !visibleSymbolIds.value.has(edge.source_id)) continue
+    const name = externalEdgeName(edge)
+    if (!name || names.has(name) || names.size >= RAG_GRAPH_EXTERNAL_LIMIT) continue
+    names.add(name)
+    edges.push(edge)
+  }
+  return edges
 })
 const graphNodes = computed(() => {
   const symbols = visibleSymbols.value
-  const filePaths = [...new Set(symbols.map((symbol) => symbol.file_path))].slice(0, 24)
-  const nodes: Array<{ id: string; label: string; kind: string; file_path?: string; line?: number; source_tool?: string; x: number; y: number }> = []
-  const width = 920
-  const height = 390
-  filePaths.forEach((file, index) => {
-    const y = 58 + index * Math.max(26, Math.min(54, 280 / Math.max(1, filePaths.length - 1)))
-    nodes.push({ id: `file:${file}`, label: compactPath(file), kind: 'file', file_path: file, x: 110, y })
-  })
+  const filePaths = visibleFiles.value
+  const nodes: GraphNode[] = []
+  const width = 1100
+  const height = 520
+  const fileRows = 24
+  const showFileNodes = graphMode.value !== 'semantic'
+  const showExternalNodes = graphMode.value !== 'ownership'
+  const fileAreaWidth = showFileNodes ? 260 : 60
+  if (showFileNodes) {
+    filePaths.forEach((file, index) => {
+      const column = Math.floor(index / fileRows)
+      const row = index % fileRows
+      const columnCount = Math.max(1, Math.ceil(filePaths.length / fileRows))
+      const rowsInColumn = Math.min(fileRows, filePaths.length - column * fileRows)
+      const x = 70 + column * Math.max(62, (fileAreaWidth - 90) / Math.max(1, columnCount - 1))
+      const y = 42 + row * ((height - 84) / Math.max(1, rowsInColumn - 1))
+      nodes.push({ id: `file:${file}`, label: compactPath(file), kind: 'file', file_path: file, x, y })
+    })
+  }
   symbols.forEach((symbol, index) => {
-    const angle = (index / Math.max(1, symbols.length)) * Math.PI * 2
-    const ring = 1 + (index % 3) * 0.18
-    const x = width * 0.62 + Math.cos(angle) * 230 * ring
-    const y = height * 0.5 + Math.sin(angle) * 140 * ring
+    const angle = index * 2.399963229728653
+    const radius = Math.sqrt((index + 0.5) / Math.max(1, symbols.length))
+    const x = fileAreaWidth + (width - fileAreaWidth) * (showExternalNodes ? 0.43 : 0.50) + Math.cos(angle) * (width - fileAreaWidth) * 0.38 * radius
+    const y = height * 0.5 + Math.sin(angle) * height * 0.42 * radius
     nodes.push({ id: symbol.id, label: symbol.name, kind: symbol.kind, file_path: symbol.file_path, line: symbol.start_line, source_tool: symbol.source_tool, x, y })
   })
+  if (showExternalNodes) {
+    const externalEdges = unresolvedExternalEdges.value
+    externalEdges.forEach((edge, index) => {
+      const count = Math.max(1, externalEdges.length)
+      const y = 42 + index * ((height - 84) / Math.max(1, count - 1))
+      nodes.push({
+        id: externalNodeId(edge),
+        label: externalEdgeName(edge),
+        kind: 'external',
+        line: edge.line,
+        source_tool: 'unresolved',
+        x: width - 76,
+        y,
+      })
+    })
+  }
   return nodes
 })
 const graphNodeIds = computed(() => new Set(graphNodes.value.map((node) => node.id)))
 const graphLinks = computed(() => {
-  const links: Array<{ id: string; source: string; target: string; edge_type: string; line?: number | null }> = []
-  for (const symbol of visibleSymbols.value) {
-    const fileId = `file:${symbol.file_path}`
-    if (graphNodeIds.value.has(fileId)) links.push({ id: `file-edge:${symbol.id}`, source: fileId, target: symbol.id, edge_type: 'FILE_CONTAINS_SYMBOL' })
-  }
-  for (const edge of ragEdges.value) {
-    if (edge.target_id && graphNodeIds.value.has(edge.source_id) && graphNodeIds.value.has(edge.target_id)) {
-      links.push({ id: edge.id, source: edge.source_id, target: edge.target_id, edge_type: edge.edge_type, line: edge.line })
+  const links: GraphLink[] = []
+  if (graphMode.value !== 'semantic') {
+    for (const symbol of visibleSymbols.value) {
+      const fileId = `file:${symbol.file_path}`
+      if (graphNodeIds.value.has(fileId)) links.push({ id: `file-edge:${symbol.id}`, source: fileId, target: symbol.id, edge_type: 'FILE_CONTAINS_SYMBOL' })
     }
   }
-  return links.slice(0, 160)
+  for (const edge of ragEdges.value) {
+    if (!shouldDisplayEdge(edge)) continue
+    if (edge.target_id && graphNodeIds.value.has(edge.source_id) && graphNodeIds.value.has(edge.target_id)) {
+      links.push({ id: edge.id, source: edge.source_id, target: edge.target_id, edge_type: edge.edge_type, line: edge.line })
+      continue
+    }
+    if (isExternalCallableEdge(edge) && graphNodeIds.value.has(edge.source_id) && graphNodeIds.value.has(externalNodeId(edge))) {
+      links.push({ id: edge.id, source: edge.source_id, target: externalNodeId(edge), edge_type: 'EXTERNAL_CALL', line: edge.line })
+    }
+  }
+  return links.slice(0, RAG_GRAPH_EDGE_LIMIT)
 })
 const graphNodePosition = computed(() => new Map(graphNodes.value.map((node) => [node.id, node])))
+const ragGraphDisplayText = computed(() => {
+  const totalSymbolNodes = ragSymbols.value.length
+  const visibleSymbolNodes = visibleSymbols.value.length
+  const externalNodes = graphNodes.value.filter((node) => node.kind === 'external').length
+  return `展示 ${visibleSymbolNodes}/${totalSymbolNodes} 个符号节点、${externalNodes} 个外部节点、${graphLinks.value.length}/${ragEdges.value.length} 条索引边。`
+})
 
 const isDefaultCatalogModel = (item: ModelCatalogItem) => {
   const model = defaultModel.value
@@ -199,6 +295,7 @@ const compactPath = (path: string) => {
 
 const nodeClass = (kind: string) => {
   if (kind === 'file') return 'graph-node-file'
+  if (kind === 'external') return 'graph-node-external'
   if (kind === 'function') return 'graph-node-function'
   if (kind === 'declaration') return 'graph-node-declaration'
   if (kind === 'macro') return 'graph-node-macro'
@@ -207,10 +304,41 @@ const nodeClass = (kind: string) => {
 
 const edgeColor = (type: string) => {
   if (type === 'FUNCTION_CALLS_FUNCTION') return '#3d82c4'
+  if (type === 'EXTERNAL_CALL') return '#5a8f6b'
   if (type === 'FILE_CONTAINS_SYMBOL') return '#9fb6c9'
   if (type.includes('INCLUDES')) return '#75a66b'
   if (type.includes('USES')) return '#d19a45'
   return '#8d9fb1'
+}
+
+function isSemanticEdge(edge: CodeIndexEdge) {
+  return SEMANTIC_EDGE_TYPES.has(edge.edge_type)
+}
+
+function isOwnershipEdge(edge: CodeIndexEdge) {
+  return OWNERSHIP_EDGE_TYPES.has(edge.edge_type)
+}
+
+function shouldDisplayEdge(edge: CodeIndexEdge) {
+  if (graphMode.value === 'semantic') return isSemanticEdge(edge)
+  if (graphMode.value === 'ownership') return isOwnershipEdge(edge)
+  return true
+}
+
+function externalEdgeName(edge: CodeIndexEdge) {
+  const value = edge.metadata?.callee_name || edge.metadata?.include || edge.metadata?.name
+  return typeof value === 'string' && value.trim() ? value.trim() : 'external'
+}
+
+function externalNodeId(edge: CodeIndexEdge) {
+  return `external:${edge.edge_type}:${externalEdgeName(edge)}`
+}
+
+function isExternalCallableEdge(edge: CodeIndexEdge) {
+  return graphMode.value !== 'ownership'
+    && edge.edge_type === 'FUNCTION_CALLS_FUNCTION'
+    && !edge.target_id
+    && Boolean(externalEdgeName(edge))
 }
 
 const isDeployedCatalogModel = (item: ModelCatalogItem) => {
@@ -828,9 +956,17 @@ onUnmounted(() => {
             <section class="rag-graph-layout">
               <article class="rag-canvas-card">
                 <div class="section-heading">
-                  <div><h2>索引图结构</h2><p>{{ selectedRagTask?.display_name || '未选择任务' }}，展示最多 80 个高价值节点和 160 条关系边。</p></div>
+                  <div><h2>索引图结构</h2><p>{{ selectedRagTask?.display_name || '未选择任务' }}，{{ ragGraphDisplayText }}</p></div>
+                  <el-segmented
+                    v-model="graphMode"
+                    :options="[
+                      { label: '语义关系', value: 'semantic' },
+                      { label: '文件归属', value: 'ownership' },
+                      { label: '全部关系', value: 'all' },
+                    ]"
+                  />
                 </div>
-                <svg class="rag-graph-canvas" viewBox="0 0 920 390" role="img" aria-label="RAG 索引图结构">
+                <svg class="rag-graph-canvas" viewBox="0 0 1100 520" role="img" aria-label="RAG 索引图结构">
                   <defs>
                     <marker id="rag-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
                       <path d="M 0 0 L 10 5 L 0 10 z" fill="#8d9fb1" />
@@ -890,7 +1026,11 @@ onUnmounted(() => {
 
             <section class="rag-lower-grid">
               <article class="rag-detail-card">
-                <h3>关系类型</h3>
+                <h3>语义关系</h3>
+                <div v-for="[name, count] in graphSemanticEdgeCountEntries.slice(0, 10)" :key="name" class="rag-stat-row"><span>{{ name }}</span><b>{{ count }}</b></div>
+              </article>
+              <article class="rag-detail-card">
+                <h3>全部关系</h3>
                 <div v-for="[name, count] in graphEdgeCountEntries.slice(0, 10)" :key="name" class="rag-stat-row"><span>{{ name }}</span><b>{{ count }}</b></div>
               </article>
               <article class="rag-detail-card">

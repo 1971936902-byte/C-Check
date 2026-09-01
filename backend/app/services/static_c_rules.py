@@ -6,6 +6,7 @@ from typing import Sequence
 
 from app.db.models import ReviewFile
 from app.schemas.model_response import FindingCategory, FindingSeverity, ReviewFinding
+from app.services.security_analysis import detect_protocol_length_buffer_findings
 
 
 _FUNC_MACRO_RE = re.compile(r"^\s*#\s*define\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^)]*)\)\s*(?P<body>.*)")
@@ -47,6 +48,7 @@ def detect_static_c_findings(files: Sequence[ReviewFile]) -> list[ReviewFinding]
         findings.extend(_integer_expression_findings(source, lines))
         findings.extend(_off_by_one_findings(source, lines))
         findings.extend(_copy_boundary_findings(source, lines))
+    findings.extend(detect_protocol_length_buffer_findings(files))
     return findings
 
 

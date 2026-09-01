@@ -13,15 +13,20 @@ export interface ReviewTask {
   created_at: string; updated_at: string; files?: ReviewFile[]; report_id?: string | null; check_types?: string[]
 }
 export type CodeLineKind = 'context' | 'removed' | 'added'
-export interface CodeLine { line: number; content: string; kind: CodeLineKind }
+export interface CodeLine { line: number; content: string; kind: CodeLineKind; issue_title?: string; issue_description?: string }
 export interface Finding {
   severity: Severity; category: string; title: string; description: string; file_path: string; line?: number | null
   remediation?: string; code_snippet?: CodeLine[]; fixed_snippet?: CodeLine[]
 }
+export interface FindingGroup extends Finding {
+  id?: string; primary_line?: number | null; line_numbers?: number[]; related_line_numbers?: number[]
+  function_name?: string | null; function_start_line?: number | null; function_end_line?: number | null
+  findings?: Finding[]
+}
 export interface ReviewEvidence {
   evidence_key: string; file_path: string; symbol_name?: string | null; start_line: number; end_line: number; reason: string; score: number
 }
-export interface Report { id: string; task_id: string; summary: string; score: number; high_count: number; medium_count: number; low_count: number; suggestion_count: number; category_counts: Record<string, number>; result_json: { summary: string; score: number; findings: Finding[] } }
+export interface Report { id: string; task_id: string; summary: string; score: number; high_count: number; medium_count: number; low_count: number; suggestion_count: number; category_counts: Record<string, number>; result_json: { summary: string; score: number; findings: Finding[]; finding_groups?: FindingGroup[] } }
 export interface Dashboard { users: number; enabled_users: number; models: number; enabled_models: number; tasks: number; queued_tasks: number; running_tasks: number; completed_tasks: number; failed_tasks: number }
 export interface SystemResource { cpu_percent?: number | null; load_average_1m?: number | null; memory_total_bytes?: number | null; memory_used_bytes?: number | null; memory_percent?: number | null; disk_total_bytes?: number | null; disk_used_bytes?: number | null; disk_percent?: number | null }
 export interface GpuDevice { index: number; name: string; utilization_percent?: number | null; memory_used_mb?: number | null; memory_total_mb?: number | null; memory_percent?: number | null; temperature_c?: number | null; power_w?: number | null }
