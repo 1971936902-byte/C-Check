@@ -1,0 +1,8 @@
+{
+  "version": "v0.1.0-rc.14",
+  "source_ref": "HEAD",
+  "work_root": "/srv/c-check-builds/v0.1.0-rc.14",
+  "baseline": "rc13",
+  "wheel_cache": null,
+  "wheel_download_policy": "online"
+}

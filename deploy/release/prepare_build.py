@@ -99,15 +99,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('context', type=Path)
     parser.add_argument('--model-root', type=Path, default=Path('/opt/models'))
+    parser.add_argument('--backend-python', default='/opt/c-check/.venv/bin/python')
+    parser.add_argument('--qwen-python', default='/opt/vllm-qwen/bin/python')
+    parser.add_argument('--embedding-python', default='/opt/jina-embedding/bin/python')
+    parser.add_argument('--compiler-python', help='defaults to --backend-python')
     args = parser.parse_args()
     context = args.context.resolve()
     (context / 'locks').mkdir(exist_ok=True)
-    jobs = [('backend', '/opt/c-check/.venv/bin/python', False),
-            ('qwen', '/opt/vllm-qwen/bin/python', False),
-            ('embedding', '/opt/jina-embedding/bin/python', True)]
+    jobs = [('backend', args.backend_python, False),
+            ('qwen', args.qwen_python, False),
+            ('embedding', args.embedding_python, True)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(environment, context, *job) for job in jobs]
-        futures.append(pool.submit(compiler, context, '/opt/c-check/.venv/bin/python'))
+        futures.append(pool.submit(compiler, context, args.compiler_python or args.backend_python))
         for future in futures:
             future.result()
     model_manifest(context, args.model_root)

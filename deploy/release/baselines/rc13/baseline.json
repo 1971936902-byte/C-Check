@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "release_version": "v0.1.0-rc.13",
+  "release_manifest_sha256": "3a8a8ab749562905ea53d6d126fa80f818e228e5de699017f4b7890259f9cb56",
+  "source_commit": "25b44bd59984600fa7deb4db4393559d8eb25d81",
+  "files": {
+    "apt-inventory-backend.txt": "181ae729cf24589da967f27f607772e77502f4e6e8eee91fa469b751b4469a40",
+    "apt-inventory-embedding.txt": "b2d1081aa6a0b1b32f6584ab54d4773d642661094303860af8aca714de94d921",
+    "apt-inventory-qwen.txt": "fa51354f724a1a2df58a2d16b4152c639caca2aebd7fa9d87228dd372fb43070",
+    "base-images.json": "a0b468e2d251bbc4e55a120e8566aa1d54684c0302de20908ba89d34ab8f1091",
+    "locks/backend.lock": "edf02937dd1e1ad57e413b7692d69a86626c4147f955fa63597f6917dd2231c6",
+    "locks/backend.resolved.txt": "654613fc5b3c6a5928db88dc0def80ae46c6a39765b11c260bfbbfec168ab2ce",
+    "locks/backend.wheels.json": "21a18794180e24ee151731369a2db4b9e63fdb1a644ca7a7cb250dd7cafc84e7",
+    "locks/compiler.lock": "d499754c5cf7f82d05ece473f9b62e2dfaa8cead543eed0acba16db18bfde776",
+    "locks/compiler.wheels.json": "e0cfb11948129e02e36a0b0d3962f673cb9fed2b1c2852b91e7426ed1cf51d00",
+    "locks/embedding.lock": "61adcd7318b30d9ee0c9f297564c1ed900d7ccaa72900d97fcce86698ba2d2dd",
+    "locks/embedding.resolved.txt": "2fd7e095ac6a35658b5e382df70997d52b30b7bb88f24d46dc675d1387346097",
+    "locks/embedding.wheels.json": "d517112ca6160286913b3574ee0d6e4585b5cd40b66d5c22b3b1af03a91d78bd",
+    "locks/qwen.lock": "451ff64c8ff7b41af760ccc045feeaeb8f4e904e0d122c2afe13a591dfac37b3",
+    "locks/qwen.resolved.txt": "e745bff4887eaa7d336d564509882a9a3be3ae3f6ac7f3e1c148a7b185ce9ec1",
+    "locks/qwen.wheels.json": "20c70c8b9915adc83a861385085ca905a09f59dabc3eedc075eadd2337a73d50",
+    "models/jina-MODEL-NOTICE.md": "042f7e093545561a4036f630d44dadcd6eca8ce92f9a7102ea7697ee967006ab",
+    "models/model-manifest.json": "fa066ed4f42d0ca0b5b0fb2eabdf63890fc83bcad7493b59d2c093f1f4765b60",
+    "models/qwen-MODEL-NOTICE.md": "9f82018a360d67b339ebbd4ef071f8b0baa56a0d949150442a7f6fc65fca4f1e",
+    "vendor/nuitka-2.7.12-cp312-cp312-linux_x86_64.whl": "47e82653af41c426bd90c7d9d9e2491a67e73341ca84eba8c354b816fd081083",
+    "wheels.json": "52ec5c249e865e312f0bee01d05031d52bea451df5937ecb2180f144c9b58868"
+  },
+  "bit_identical_rebuild_guaranteed": false
+}

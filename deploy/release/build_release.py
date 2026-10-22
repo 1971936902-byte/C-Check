@@ -255,7 +255,7 @@ def main():
         specifications[name] = {'id': image, 'size_bytes': metadata['Size'], 'filesystem_config_sha256': identity(metadata),
                                 'archive_parts': image_archives(image, metadata, output, name, previous, reused)}
     for name, tag in [('mysql', 'mysql:8.0'), ('redis', 'redis:7.4-alpine'), ('qdrant', 'qdrant/qdrant:v1.15.5')]:
-        metadata = json.loads(subprocess.check_output(['docker', 'image', 'inspect', tag]))[0]
+        metadata = json.loads(subprocess.check_output(['docker', 'image', 'inspect', pinned(tag)]))[0]
         image = metadata['Id']
         specifications[name] = {'id': image, 'size_bytes': metadata['Size'], 'filesystem_config_sha256': identity(metadata),
                                 'reference': metadata['RepoDigests'][0],

@@ -11,6 +11,14 @@ def run(command):
 
 
 def pinned(image):
+    lock = os.environ.get('CCHECK_BASE_IMAGE_LOCK')
+    if lock:
+        references = json.loads(Path(lock).read_text())
+        reference = references.get(image, '')
+        import re
+        if not re.fullmatch(r'[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}', reference):
+            raise RuntimeError('Missing/invalid approved base image digest: ' + image)
+        return reference
     data = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image]))[0]
     if not data.get('RepoDigests'):
         raise RuntimeError('Base image must have a registry digest: ' + image)

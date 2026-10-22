@@ -2,14 +2,19 @@
 
 This directory is publisher-side source, not an assembled binary release. Do not
 copy it to a recipient and describe that copy as a completed installation package.
-The full operator procedure is in `docs/V1发布部署操作手册.md`; measured results and
-remaining work are in `docs/V1镜像发布与全新部署验证记录.md`.
+For a new Linux publisher, start with [PUBLISHER-LINUX.md](PUBLISHER-LINUX.md).
+`publisher.py` restores approved inputs without requiring the old host's virtual
+environment paths. See [baselines/README.md](baselines/README.md) for provenance,
+licensing and reproducibility limits. Recipient installation is documented in
+`INSTALL-RTX5880.md`; building a release and installing it are separate workflows.
 
 ## Release pipeline
 
 1. Export an approved committed source snapshot with `pack_source.py`.
 2. Use `prepare_build.py` on the trusted Linux builder to generate reviewed exact
    dependency locks, wheel hashes and immutable per-file model manifests.
+   This is the advanced dependency-refresh route. For the preserved RC13 inputs,
+   use `publisher.py prepare` and the staged Linux publisher procedure instead.
 3. Build the final images with `build_images.py`.
 4. Run `validate_images.py`: baseline/compiled test parity, CLI tests, core loading,
    frontend tests, CUDA/runtime checks, image-layer audits and a deleted-source

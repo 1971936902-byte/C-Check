@@ -1,0 +1,219 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "key": "qwen",
+      "cache_name": "qwen32b-fp8",
+      "repository": "okwinds/Qwen2.5-Coder-32B-Instruct-FP8",
+      "revision": "file-manifest-sha256:683335005a471a64dc0513a92cbe784d49175ac4c5798e08121e91a06192218b",
+      "license": "qwen: see supplied LICENSE",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 10193,
+          "sha256": "9f82018a360d67b339ebbd4ef071f8b0baa56a0d949150442a7f6fc65fca4f1e",
+          "revision": "e48cb89bf93b97161206faad6249a8d3ca9f8ea1",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=README.md&Revision=e48cb89bf93b97161206faad6249a8d3ca9f8ea1"
+        },
+        {
+          "path": "added_tokens.json",
+          "size": 605,
+          "sha256": "58b54bbe36fc752f79a24a271ef66a0a0830054b4dfad94bde757d851968060b",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=added_tokens.json&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "config.json",
+          "size": 887,
+          "sha256": "f9f4a754a4a6f2fc3d0e806cc99bef37dd368fabb406ec07c62c2d4cada5577c",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=config.json&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "configuration.json",
+          "size": 48,
+          "sha256": "a78221ae93dd8977b26fcd1d106fa5ad7e7f1fd3a7d93bfd9d6fba5ed00ec4d2",
+          "revision": "e5c2a11bf6eb28379f25919bb3f66f1a708ad843",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=configuration.json&Revision=e5c2a11bf6eb28379f25919bb3f66f1a708ad843"
+        },
+        {
+          "path": "generation_config.json",
+          "size": 243,
+          "sha256": "43012d37897c41d2f637ee15579f8e43532950434a3adc9655cd4c06b1e47280",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=generation_config.json&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "hash.txt",
+          "size": 721,
+          "sha256": "fb1c5c157fa0f2529aa91ac93d61f6c27da928dc9e4a95879cb5f2dc7e39f184",
+          "revision": "11ab6f8547cba9bc3044e5c112b2bb615d827247",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=hash.txt&Revision=11ab6f8547cba9bc3044e5c112b2bb615d827247"
+        },
+        {
+          "path": "merges.txt",
+          "size": 1671853,
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=merges.txt&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "size": 107222,
+          "sha256": "68e5799dd0ce3d4c0b034938f478bf4fa18879cbfa0c0d42e648ffb79c8613f7",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=model.safetensors.index.json&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "model_407-00001-of-00007.safetensors",
+          "size": 4996733736,
+          "sha256": "409cf56cb0b75f13f90ba2e66fbdbac597a076772a7c24cad0a3d2119b4be124",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=model_407-00001-of-00007.safetensors&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "model_407-00002-of-00007.safetensors",
+          "size": 4912952388,
+          "sha256": "1c8b352e9a28a704b1c57a986c35795b8c5d106e65438a0e4095b22c3927eaeb",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=model_407-00002-of-00007.safetensors&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "model_407-00003-of-00007.safetensors",
+          "size": 4876247320,
+          "sha256": "0ba7c908ad99b03f2114cf25a0b2434ff01a8b75bc25f4e5c9d9b77a50a47ebe",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=model_407-00003-of-00007.safetensors&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "model_407-00004-of-00007.safetensors",
+          "size": 4876247320,
+          "sha256": "5e403fe36859f32e40db3c943eaacc99c2ed9a4cb6b4c5e436f03c3194cf4f1f",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=model_407-00004-of-00007.safetensors&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "model_407-00005-of-00007.safetensors",
+          "size": 4876247320,
+          "sha256": "e2927543bcf498c88b54dabb405f24c01c5ca2ebd09734edf79f424c7cb563d5",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=model_407-00005-of-00007.safetensors&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "model_407-00006-of-00007.safetensors",
+          "size": 4876247320,
+          "sha256": "4e50c0122579a31b801c5a2fac1ee6063f67dcd40c35fa361b28fd5180e4b2b6",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=model_407-00006-of-00007.safetensors&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "model_407-00007-of-00007.safetensors",
+          "size": 4907589084,
+          "sha256": "8853dbbff668d81f331c84611ef28637bf081671b248dfe022ea09049022288a",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=model_407-00007-of-00007.safetensors&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "size": 496,
+          "sha256": "a36726f7fe394c1324021cac4a9ee3ad6c4f6285c0d98721f9b0b95888ec9905",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=special_tokens_map.json&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 7031645,
+          "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=tokenizer.json&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 7302,
+          "sha256": "f14427268304fe914f3fd3759f529672c0e435eb9667e0e7e67475839c4240b9",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=tokenizer_config.json&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        },
+        {
+          "path": "vocab.json",
+          "size": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "revision": "79df7ddc0dd07d4b3a68cfbd230cc8f876c71444",
+          "url": "https://modelscope.cn/api/v1/models/okwinds/Qwen2.5-Coder-32B-Instruct-FP8/repo?FilePath=vocab.json&Revision=79df7ddc0dd07d4b3a68cfbd230cc8f876c71444"
+        }
+      ]
+    },
+    {
+      "key": "jina",
+      "cache_name": "jina-code-embeddings-1.5b",
+      "repository": "jinaai/jina-code-embeddings-1.5b",
+      "revision": "file-manifest-sha256:c4483757e1e7b8cea83953825a34d47620261915c75af81201dfa58de907eed9",
+      "license": "CC-BY-NC-4.0; company use requires separate review",
+      "files": [
+        {
+          "path": "1_Pooling/config.json",
+          "size": 313,
+          "sha256": "960580e241a7a6e89ce97b8f257f268febf4cfc52ef3c3efa075e06ca5c0d973",
+          "revision": "d8e6d7cc2f44eb55008b9f32159b2ff26a09805a",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=1_Pooling%2Fconfig.json&Revision=d8e6d7cc2f44eb55008b9f32159b2ff26a09805a"
+        },
+        {
+          "path": "README.md",
+          "size": 9384,
+          "sha256": "042f7e093545561a4036f630d44dadcd6eca8ce92f9a7102ea7697ee967006ab",
+          "revision": "585255a416f4e7eecee8f3b65fc518ecde264f48",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=README.md&Revision=585255a416f4e7eecee8f3b65fc518ecde264f48"
+        },
+        {
+          "path": "config.json",
+          "size": 952,
+          "sha256": "bf71653d5d80d02b19c2467ac0faa747257e362c1b10ccb1063bee8a6ed964da",
+          "revision": "d8e6d7cc2f44eb55008b9f32159b2ff26a09805a",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=config.json&Revision=d8e6d7cc2f44eb55008b9f32159b2ff26a09805a"
+        },
+        {
+          "path": "config_sentence_transformers.json",
+          "size": 877,
+          "sha256": "bcb2a4ddfa892851f071f868a2d4863c31180a1199626bf072ff7b1b9f6c22b7",
+          "revision": "d8e6d7cc2f44eb55008b9f32159b2ff26a09805a",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=config_sentence_transformers.json&Revision=d8e6d7cc2f44eb55008b9f32159b2ff26a09805a"
+        },
+        {
+          "path": "configuration.json",
+          "size": 76,
+          "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+          "revision": "d8e6d7cc2f44eb55008b9f32159b2ff26a09805a",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=configuration.json&Revision=d8e6d7cc2f44eb55008b9f32159b2ff26a09805a"
+        },
+        {
+          "path": "merges.txt",
+          "size": 1671852,
+          "sha256": "85407d96ccd088398c5df07b7c764ed04dcc084b0e746f70016c16968be5e490",
+          "revision": "d8e6d7cc2f44eb55008b9f32159b2ff26a09805a",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=merges.txt&Revision=d8e6d7cc2f44eb55008b9f32159b2ff26a09805a"
+        },
+        {
+          "path": "model.safetensors",
+          "size": 3087465120,
+          "sha256": "176245ca2217e92638464bda018727f5c9082003d18621c2bb90c8771e829ddc",
+          "revision": "917846f0f4c84c5379a6f0788da07fafefb8b091",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=model.safetensors&Revision=917846f0f4c84c5379a6f0788da07fafefb8b091"
+        },
+        {
+          "path": "modules.json",
+          "size": 349,
+          "sha256": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf",
+          "revision": "d8e6d7cc2f44eb55008b9f32159b2ff26a09805a",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=modules.json&Revision=d8e6d7cc2f44eb55008b9f32159b2ff26a09805a"
+        },
+        {
+          "path": "vocab.json",
+          "size": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "revision": "d8e6d7cc2f44eb55008b9f32159b2ff26a09805a",
+          "url": "https://modelscope.cn/api/v1/models/jinaai/jina-code-embeddings-1.5b/repo?FilePath=vocab.json&Revision=d8e6d7cc2f44eb55008b9f32159b2ff26a09805a"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+publisher.local.json
+*.pem
+*.key
+*.safetensors
+*.pt
+*.pth
+.env*
+/wheelhouse/
+/release-input/
+/locks/
+/built-images.json
+*.whl
+!/baselines/rc13/vendor/nuitka-2.7.12-cp312-cp312-linux_x86_64.whl

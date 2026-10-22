@@ -1,0 +1,4 @@
+** -text
+**/*.whl -diff
+# Preserve approved upstream notices exactly, including their original whitespace.
+rc13/models/*.md -whitespace
