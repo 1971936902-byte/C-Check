@@ -23,6 +23,8 @@ def main():
             command.add_argument('--trusted-key', type=Path)
         if name == 'install':
             command.add_argument('--runtime-source', choices=['image', 'build'])
+        if name in {'install', 'update'}:
+            command.add_argument('--gpu-access-mode', choices=['legacy', 'cdi'])
         if name in {'backup', 'restore', 'update', 'rollback'}:
             command.add_argument('--backup-key', type=Path, required=True)
         if name == 'restore':
@@ -73,6 +75,8 @@ def main():
         if args.command == 'doctor':
             print(json.dumps(doctor(site), indent=2))
         elif args.command == 'install':
+            if args.gpu_access_mode:
+                site['gpu_access_mode'] = args.gpu_access_mode
             if args.runtime_source:
                 site['runtime_source'] = args.runtime_source
             trusted = args.trusted_key
@@ -80,6 +84,8 @@ def main():
                 trusted = root / 'config/publisher.pem'
             lifecycle.install(site, args.release, trusted, args.version)
         elif args.command in {'update', 'rollback'}:
+            if args.command == 'update' and args.gpu_access_mode:
+                site['gpu_access_mode'] = args.gpu_access_mode
             if args.version:
                 metadata = json.loads((args.release / 'release.json').read_text())
                 if metadata.get('version') != args.version:

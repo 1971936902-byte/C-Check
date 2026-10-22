@@ -6,6 +6,7 @@ import shutil
 
 from .core import DeploymentError, atomic_json, checked_path, digest, run
 from .models import obtain_file
+from .gpu import probe
 
 
 def runtime_recipe_identity(release):
@@ -58,10 +59,6 @@ def build_runtime(release, site):
     run(['docker', 'build', '--build-arg', 'BASE_IMAGE=' + specification['base_image'], '-t', tag, str(context)],
         timeout=7200, capture=False)
     image = run(['docker', 'image', 'inspect', tag, '--format', '{{.Id}}']).strip()
-    probe = run(['docker', 'run', '--rm', '--gpus', 'device=' + str(site['gpu']), '--entrypoint', 'python', image,
-                 '-c', "import torch,vllm,transformers,json;assert torch.cuda.is_available();"
-                       "assert torch.__version__.split('+')[0]=='2.6.0';assert torch.version.cuda=='12.4';"
-                       "assert vllm.__version__=='0.8.5.post1';assert transformers.__version__=='4.51.3';"
-                       "print(json.dumps({'torch':torch.__version__,'cuda':torch.version.cuda,'vllm':vllm.__version__}))"], timeout=120)
-    atomic_json(marker, {'image': image, 'recipe': fingerprint, 'probe': probe.strip(), 'release': release['_sha256']})
+    result = probe(site, image, cuda=True)
+    atomic_json(marker, {'image': image, 'recipe': fingerprint, 'probe': result, 'release': release['_sha256']})
     return image

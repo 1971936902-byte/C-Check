@@ -28,6 +28,26 @@ https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install
 
 安装器不配置宿主驱动或全局 Docker。GPU 必须空闲，发现计算进程时会拒绝启动，不会杀掉别人的任务。Docker 管理本质上是高权限，普通账号/rootless 尚未承诺支持。
 
+### 原生 CDI 接入（rc.14 起）
+
+RTX5880 示例配置使用 `gpu_access_mode=cdi`。仅对 C-Check 的 Qwen/API 容器指定 `runtime=runc` 和单个 CDI 设备，不改变 Docker 默认 runtime，不重启 Docker，不安装或修复宿主驱动。原生 CDI 显式设置 `NVIDIA_VISIBLE_DEVICES=void`，避免继承镜像变量触发传统重复注入；设备由 CDI spec 注入。API 仍需 NVML，不能仅验证 Qwen。
+
+```bash
+sudo docker version --format '{{.Server.Version}}'
+sudo docker compose version
+sudo nvidia-ctk cdi list
+```
+
+Docker Engine 28.3+ 默认启用 CDI，但管理员可能禁用；必须以实际容器测试为准。目标环境 Engine 29.1.3 / Compose 2.40.3 已由接收方验证同一 Qwen 镜像可通过原生 CDI 完成 CUDA 运算，尚不能替代完整模型验收。`gpu` 可填单个索引（如 `0`）或 `nvidia-ctk cdi list` 中对应的 `GPU-...` UUID，推荐 UUID。不要填写 `all` 或完整 `nvidia.com/gpu=...`，安装器负责转换。CDI spec 缺失/失效时联系管理员，不自动升级 Toolkit、修改全局 hook 或重启 Docker。传统机器可显式选择 `gpu_access_mode=legacy`；不会失败后静默回退。
+
+普通账号不能访问 Docker 时，`doctor/install/start/stop/verify/update` 等 Docker 相关命令统一使用 `sudo /usr/bin/python3` 和绝对配置路径；不要依赖 Conda 或 sudo 保留环境。`doctor` 只做只读检查，不占用 GPU；安装在启动模型前会以非 root、只读、无网络、全部丢弃 capabilities 的一次性容器分别验证 CUDA/NVML 及 GPU UUID。启动后再次核验实际服务设备。
+
+`model_download_policy=offline` 只约束模型。完全离线部署必须选择 `runtime_source=image` 并提供完整签名镜像分片；`runtime_source=build` 仍需要下载依赖和访问 apt，不应在断网机器上选择。
+
+### 从 rc.13 未完成安装重试
+
+保留原有外置配置、实例目录、模型、密钥和数据库，不删除或重新初始化。将外置配置增加 `"gpu_access_mode": "cdi"`，并选定 GPU；只替换发布包及 CLI。若实例不存在 `state/deployment.json`，用新版 `install` 重试；它保留已有凭据，且会拒绝接管无 owner 标记的非空目录。若已经存在部署记录，则使用新版 `update --gpu-access-mode cdi --backup-key /独立安全路径/备份密钥`（同时提供常规 config/release/trusted-key 参数），不能用 `install` 静默升级。管理命令默认读取已保存配置，仅修改外置 JSON 不会自动改变已部署实例。不要修改旧签名包、绕过哈希或手工重写托管 Compose。
+
 ## 2. 验签并取得完整包
 
 以下使用独立目录，不覆盖已有数据。示例版本为 `@@VERSION@@`，所有 Release 资产缺一不可。

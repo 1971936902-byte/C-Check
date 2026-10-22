@@ -11,6 +11,8 @@ import xml.etree.ElementTree as ET
 from audit_images import inspect_layers
 from build_images import pinned
 from prepare_build import sha
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'cli'))
+from ccheck.gpu import docker_arguments, probe
 
 GATE_RUN_ID = uuid.uuid4().hex
 
@@ -47,7 +49,11 @@ def main():
     parser.add_argument('context', type=Path)
     parser.add_argument('--version', required=True)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--gpu-access-mode', choices=['legacy', 'cdi'], default='legacy')
+    parser.add_argument('--gpu', default='0')
     args = parser.parse_args()
+    gpu_site = {'gpu': args.gpu, 'gpu_access_mode': args.gpu_access_mode}
+    gpu_options = docker_arguments(gpu_site)
     context, output = args.context.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     built = json.loads((context / 'built-images.json').read_text())
@@ -101,12 +107,15 @@ def main():
              '--build-arg', 'NGINX_IMAGE=' + pinned('nginx:1.28-alpine'),
              '-f', str(context / 'deploy/release/Dockerfile.frontend'), str(context)], output / 'frontend-test-build.log')
     execute(['docker', 'run', '--rm', frontend_test_image, 'npm', 'test', '--', '--run'], output / 'frontend-tests.log')
-    execute(['docker', 'run', '--rm', '--gpus', 'device=0', '--entrypoint', 'python', images['qwen'], '-c',
+    gpu_evidence = {name: probe(gpu_site, images[name], cuda=name == 'qwen', uid=10017, gid=10017)
+                    for name in ('qwen', 'backend')}
+    (output / 'gpu-access.json').write_text(json.dumps(gpu_evidence, indent=2))
+    execute(['docker', 'run', '--rm', *gpu_options, '--entrypoint', 'python', images['qwen'], '-c',
              "import torch,vllm,transformers;assert torch.cuda.is_available();"
              "assert torch.__version__.split('+')[0]=='2.6.0';assert torch.version.cuda=='12.4';"
              "assert vllm.__version__=='0.8.5.post1';assert transformers.__version__=='4.51.3';"
              "print(torch.__version__,torch.version.cuda,vllm.__version__,transformers.__version__)"], output / 'gpu-runtime.log')
-    execute(['docker', 'run', '--rm', '--gpus', 'device=0', '--user', '10017:10017', '--read-only',
+    execute(['docker', 'run', '--rm', *gpu_options, '--user', '10017:10017', '--read-only',
              '--tmpfs', '/tmp:rw,exec,mode=1777', '-e', 'HOME=/tmp', '-e', 'TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor',
              '-e', 'VLLM_CACHE_ROOT=/tmp/vllm', '-e', 'TRITON_CACHE_DIR=/tmp/triton',
              '--entrypoint', 'python', images['qwen'], '-c',
@@ -147,7 +156,7 @@ def main():
         raise RuntimeError('negative image-layer source leakage gate failed')
     cleanup_gate_containers()
     result = {'passed': True, 'gate_run_id': GATE_RUN_ID, 'source_tree': source['tree_sha256'], 'version': args.version, 'images': images,
-              'core_policy_sha256': sha(context / 'deploy/release/core-policy.json'),
+              'core_policy_sha256': sha(context / 'deploy/release/core-policy.json'), 'gpu_access': gpu_evidence,
               'deterministic_tests': len(baseline_cases), 'layer_reports': layer_reports,
               'negative_deleted_layer_detected': detected}
     (output / 'gates.json').write_text(json.dumps(result, indent=2))

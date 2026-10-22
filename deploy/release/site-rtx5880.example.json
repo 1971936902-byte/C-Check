@@ -4,6 +4,7 @@
   "engine": "docker",
   "profile": "ada-48g-fp8",
   "gpu": "0",
+  "gpu_access_mode": "cdi",
   "runtime_source": "image",
   "model_paths": {
     "qwen": "/home/lyh/models/Qwen2.5-Coder-32B-Instruct-FP8",

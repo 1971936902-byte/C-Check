@@ -136,13 +136,15 @@ def load_site(path):
     if not isinstance(site, dict) or not re.fullmatch(r"[a-z][a-z0-9-]{2,35}", site.get("instance", "")):
         raise DeploymentError("instance must be a 3-36 character lower-case project name")
     allowed = {"instance", "data_dir", "profile", "gpu", "web", "model_cache", "model_paths",
-               "model_download_policy", "license_mode", "engine", "runtime_source", "backup"}
+               "model_download_policy", "license_mode", "engine", "runtime_source", "backup", "gpu_access_mode"}
     if set(site) - allowed:
         raise DeploymentError("unknown site configuration keys")
     if site.get("engine", "docker") != "docker" or site.get("runtime_source", "image") not in {"image", "build"}:
         raise DeploymentError("select Docker and an explicit image/build runtime source")
     site.setdefault("engine", "docker")
     site.setdefault("runtime_source", "image")
+    from .gpu import access_mode
+    access_mode(site)
     backup = site.get('backup', {'keep': 3})
     if not isinstance(backup, dict) or set(backup) != {'keep'} or type(backup['keep']) is not int or not 1 <= backup['keep'] <= 30:
         raise DeploymentError('backup.keep must be an integer between 1 and 30')

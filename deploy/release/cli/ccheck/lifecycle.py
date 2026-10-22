@@ -9,6 +9,7 @@ from .acceptance import acceptance
 from .core import DeploymentError, atomic_json, checked_path, digest, installation_lock, stage, verify_release
 from .engine import Engine, preflight, prepare_data, prepare_images, render_compose
 from .models import prepare_models, verify_models
+from .gpu import validate_inspection
 
 
 def installed(site):
@@ -78,10 +79,12 @@ def start_stack(engine):
     wait_data_services(engine)
     engine.management('migrate')
     engine.check_gpu_admission()
+    engine.check_gpu_access()
     engine.compose('up', '-d', 'qwen', 'embedding')
     engine.wait(['qwen', 'embedding'])
     engine.compose('up', '-d', 'api', 'worker', 'frontend')
     engine.wait(['api', 'worker', 'frontend'])
+    engine.verify_gpu_access()
     engine.management('register-model')
 
 
@@ -169,6 +172,7 @@ def verify(site, *, fresh=False):
         if identity(inspect_image(actual)) != state['image_identities'][image]:
             raise DeploymentError('running image filesystem/config identity deviated: ' + service)
         host = inspection['HostConfig']
+        validate_inspection(site, inspection, service in {'api', 'qwen'})
         if host.get('Privileged') or host['ReadonlyRootfs'] != canonical['services'][service]['read_only'] or host['NetworkMode'] == 'host':
             raise DeploymentError('running container isolation deviated: ' + service)
         spec = canonical['services'][service]
@@ -176,6 +180,8 @@ def verify(site, *, fresh=False):
             raise DeploymentError('running container user deviated: ' + service)
         if set(host.get('CapDrop') or []) != set(spec.get('cap_drop') or []):
             raise DeploymentError('running container capability restrictions deviated: ' + service)
+        if 'no-new-privileges:true' not in (host.get('SecurityOpt') or []):
+            raise DeploymentError('running container privilege escalation restriction deviated: ' + service)
         expected_binds = {volume['target']: (volume['source'], not volume.get('read_only', False))
                           for volume in spec.get('volumes', [])}
         expected_binds.update({'/run/secrets/' + name: (str(root / 'secrets' / name), False)
@@ -187,6 +193,7 @@ def verify(site, *, fresh=False):
                     raise DeploymentError('unexpected or changed container bind mount: ' + service)
         if expected_binds:
             raise DeploymentError('expected container bind mount missing: ' + service)
+    engine.verify_gpu_access()
     verify_models(release, site)
     result = acceptance(site, release, engine, fresh=fresh)
     state['acceptance'] = result
@@ -245,6 +252,7 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
             images['qwen'] = build_runtime(release, site)
         prepare_models(release, site)
         fix_model_permissions(site)
+        previous_site = (root / 'config/site.json').read_bytes()
         uid, gid = prepare_data(site, release)
         previous_compose = engine.file.read_bytes()
         atomic_json(root / 'state/previous-deployment.json', state)
@@ -255,14 +263,16 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
             result = acceptance(site, release, engine, fresh=True)
         except Exception:
             engine.maintenance(True)
+            (root / 'config/site.json').write_bytes(previous_site)
             engine.file.write_bytes(previous_compose)
-            start_stack(engine)
+            start_stack(Engine(json.loads(previous_site)))
             # Keep submissions paused until the operator verifies the recovered version.
             raise
         new = dict(state)
         new.update(version=release['version'], tag=release['tag'], source=release['source'],
                    release_root=release['_root'], release_sha256=release['_sha256'], images=images,
                    model_manifest_sha256=release['files']['models/model-manifest.json'], acceptance=result,
+                   site_sha256=digest(root / 'config/site.json'),
                    time=time.time(), operation='rollback' if rollback else 'update')
         from .image_identity import identity, inspect_image
         new['image_identities'] = {name: identity(inspect_image(image)) for name, image in images.items()}

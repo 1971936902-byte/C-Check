@@ -9,6 +9,7 @@ import socket
 import time
 
 from .core import DeploymentError, atomic_json, checked_path, digest, gpu_memory_fraction, run
+from .gpu import access_mode, cdi_device, check_identity, configure, NVML_PROBE, probe, validate_inspection
 
 
 def project_name(site):
@@ -23,6 +24,8 @@ def doctor(site):
         probe = probe.parent
     return {
         'prerequisites_passed': True, 'profile': site['profile'], 'gpu': str(site['gpu']),
+        'gpu_access_mode': access_mode(site),
+        'cdi_device': cdi_device(site) if access_mode(site) == 'cdi' else None,
         'docker': run(['docker', 'version', '--format', '{{.Server.Version}}']).strip(),
         'compose': run(['docker', 'compose', 'version', '--short']).strip(),
         'openssl': run(['openssl', 'version']).strip(),
@@ -62,6 +65,12 @@ def preflight(site, release=None):
             raise DeploymentError("administrator must prepare prerequisite: " + name)
     run(["docker", "info"])
     run(["docker", "compose", "version"])
+    if access_mode(site) == 'cdi':
+        if shutil.which('nvidia-ctk') is None:
+            raise DeploymentError('CDI mode requires administrator-prepared nvidia-ctk and CDI specifications')
+        available = run(['nvidia-ctk', 'cdi', 'list'])
+        if cdi_device(site) not in {line.strip() for line in available.splitlines()}:
+            raise DeploymentError('selected GPU is absent from CDI specifications; no driver/daemon changes were attempted')
     run(["nvidia-smi", "-i", str(site["gpu"]), "--query-gpu=uuid,memory.total,driver_version", "--format=csv,noheader"])
     probe = Path(site["data_dir"])
     while not probe.exists():
@@ -248,8 +257,7 @@ def render_compose(site, images, uid, gid):
     api = dict(app)
     api["command"] = ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     api['environment'] = dict(env, NVIDIA_DRIVER_CAPABILITIES='utility')
-    api['deploy'] = {'resources': {'reservations': {'devices': [
-        {'driver': 'nvidia', 'device_ids': [str(site['gpu'])], 'capabilities': ['gpu']}]}}}
+    configure(api, site)
     api["healthcheck"] = health(["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/docs',timeout=5)"])
     worker = dict(app)
     worker["mem_limit"] = "4g"
@@ -287,9 +295,9 @@ def render_compose(site, images, uid, gid):
                              "USER": "ccheck", "LOGNAME": "ccheck", "HOME": "/cache", "TORCHINDUCTOR_CACHE_DIR": "/cache/torchinductor",
                              "LIBRARY_PATH": "/opt/cuda-link"},
                 secrets=["vllm_api_key"], volumes=[bind(root / "models/qwen", "/models/qwen", True), bind(root / "data/cache", "/cache")],
-                shm_size="1g", deploy={"resources": {"reservations": {"devices": [
-                    {"driver": "nvidia", "device_ids": [str(site["gpu"])], "capabilities": ["gpu"]}]}}},
+                shm_size="1g",
                 healthcheck=health(["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=5)"], start="300s"))
+    configure(qwen, site)
     frontend = service("frontend", "256m", 1, ["edge"], user=False)
     frontend.update(user="101:101", ports=[f"{site['web']['bind']}:{site['web']['port']}:8080"],
                     tmpfs=["/tmp:size=16777216,mode=1777", "/var/cache/nginx:size=16777216,uid=101,gid=101", "/var/run:size=1048576,uid=101,gid=101"],
@@ -360,6 +368,28 @@ class Engine:
         fraction = gpu_memory_fraction(self.site['profile'])
         if float(memory[0]) < float(memory[1]) * fraction:
             raise DeploymentError('GPU memory is below the selected profile budget; no processes were killed')
+
+    def check_gpu_access(self):
+        services = json.loads(self.file.read_text())['services']
+        results = {}
+        for name in ('qwen', 'api'):
+            spec = services[name]
+            uid, gid = map(int, spec['user'].split(':'))
+            results[name] = probe(self.site, spec['image'], cuda=name == 'qwen', uid=uid, gid=gid)
+        atomic_json(self.root / 'state/gpu-access.json', results)
+        return results
+
+    def verify_gpu_access(self):
+        result = {}
+        for name in ('qwen', 'api'):
+            container = self.compose('ps', '-q', name).strip()
+            if not container:
+                raise DeploymentError('GPU service container is missing: ' + name)
+            inspection = json.loads(run(['docker', 'inspect', container]))[0]
+            validate_inspection(self.site, inspection, True)
+            output = self.compose('exec', '-T', name, 'python', '-c', NVML_PROBE)
+            result[name] = check_identity(self.site, output)
+        return result
 
     def drain(self, timeout=600):
         self.maintenance(True)
