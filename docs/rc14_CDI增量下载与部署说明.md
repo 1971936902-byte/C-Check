@@ -21,6 +21,7 @@ set -eu
 umask 077
 OLD=/home/lyh/c-check-packages/release-v0.1.0-rc.13
 NEW=/home/lyh/c-check-packages/release-v0.1.0-rc.14
+TRUST=/etc/c-check/publisher.pem
 BASE=https://github.com/1971936902-byte/C-Check/releases/download/release-v0.1.0-rc.14
 test -d "$OLD/images"
 test -f "$OLD/publisher.pem"
@@ -70,11 +71,19 @@ tar -xzf bootstrap.tar.gz
 
 ```bash
 cp -a --reflink=auto "$OLD/images" "$NEW/images"
+if ! sudo test -e "$TRUST"; then
+  sudo install -D -m 600 "$OLD/publisher.pem" "$TRUST"
+fi
+printf '%s  %s\n' \
+  9d1e2a1fe9de3b4245f3abaaa72ccc8ef19e8322e0bc7a3de878353561d86e37 \
+  "$TRUST" | sudo sha256sum -c -
 sudo /usr/bin/python3 "$NEW/cli/ccheck.pyz" package-verify \
-  --release "$NEW" --trusted-key "$OLD/publisher.pem"
+  --release "$NEW" --trusted-key "$TRUST"
 ```
 
 `package-verify` 按 rc.14 的新签名清单检查所有文件，不只检查镜像 ID。缺分片、内容被修改、错误版本文件或多余文件均应先处理，禁止跳过验证。
+
+通过 sudo 运行时，可信公钥必须由 root 管理且不能被其他用户写入，因此不能直接使用普通用户拥有的下载公钥文件。若已有 `/etc/c-check/publisher.pem` 指纹不同，立即停止，不覆盖现有信任锚。
 
 若只剩 Docker 中的镜像、没有旧 `images/` 分片，请使用完整包下载流程。不要通过 `docker save` 重新导出并重压缩来冒充原分片，其字节及哈希通常不同。
 
@@ -100,7 +109,7 @@ sudo /usr/bin/python3 "$NEW/cli/ccheck.pyz" package-verify \
 ```bash
 sudo /usr/bin/python3 "$NEW/cli/ccheck.pyz" install \
   --config /home/lyh/c-check-site.json --release "$NEW" \
-  --trusted-key "$OLD/publisher.pem" --version v0.1.0-rc.14 \
+  --trusted-key "$TRUST" --version v0.1.0-rc.14 \
   --gpu-access-mode cdi
 ```
 
@@ -109,7 +118,7 @@ sudo /usr/bin/python3 "$NEW/cli/ccheck.pyz" install \
 ```bash
 sudo /usr/bin/python3 "$NEW/cli/ccheck.pyz" update \
   --config /home/lyh/c-check-site.json --release "$NEW" \
-  --trusted-key "$OLD/publisher.pem" --version v0.1.0-rc.14 \
+  --trusted-key "$TRUST" --version v0.1.0-rc.14 \
   --gpu-access-mode cdi --backup-key /独立安全路径/备份密钥
 ```
 
