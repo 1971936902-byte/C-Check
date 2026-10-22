@@ -18,8 +18,8 @@ class GpuTests(unittest.TestCase):
                 'web': {'bind': '127.0.0.1', 'port': 18800, 'public_url': 'http://127.0.0.1:18800'}}
 
     def inspection(self, site):
-        return {'HostConfig': {'Runtime': 'runc', 'DeviceRequests': [], 'Devices': [
-            {'PathOnHost': cdi_device(site), 'PathInContainer': '', 'CgroupPermissions': ''}]},
+        return {'HostConfig': {'Runtime': 'runc', 'Devices': None, 'DeviceRequests': [
+            {'Driver': 'cdi', 'DeviceIDs': [cdi_device(site)], 'Count': 0, 'Capabilities': None, 'Options': None}]},
             'Config': {'Env': ['NVIDIA_VISIBLE_DEVICES=void']}}
 
     def test_single_index_and_uuid_conversion(self):
@@ -64,12 +64,13 @@ class GpuTests(unittest.TestCase):
         original = self.inspection(site)
         validate_inspection(site, original, True)
         mutations = [
-            lambda x: x['HostConfig']['Devices'][0].update(PathOnHost='nvidia.com/gpu=all'),
-            lambda x: x['HostConfig']['Devices'].append(copy.deepcopy(x['HostConfig']['Devices'][0])),
+            lambda x: x['HostConfig']['DeviceRequests'][0].update(DeviceIDs=['nvidia.com/gpu=all']),
+            lambda x: x['HostConfig']['DeviceRequests'].append(copy.deepcopy(x['HostConfig']['DeviceRequests'][0])),
             lambda x: x['HostConfig'].update(DeviceRequests=[{'Driver': 'nvidia'}]),
             lambda x: x['HostConfig'].update(Runtime='nvidia'),
             lambda x: x['Config'].update(Env=['NVIDIA_VISIBLE_DEVICES=all']),
-            lambda x: x['HostConfig']['Devices'][0].update(PathInContainer='/dev/nvidia0'),
+            lambda x: x['HostConfig'].update(Devices=[{'PathOnHost': '/dev/nvidia0'}]),
+            lambda x: x['HostConfig'].update(DeviceCgroupRules=['c 195:* rwm']),
         ]
         for mutate in mutations:
             changed = copy.deepcopy(original)
@@ -78,6 +79,16 @@ class GpuTests(unittest.TestCase):
                 validate_inspection(site, changed, True)
         with self.assertRaises(DeploymentError):
             validate_inspection(site, original, False)
+
+    def test_cdi_device_mapping_representation_is_exact(self):
+        site = self.site('3')
+        row = {'HostConfig': {'Runtime': 'runc', 'DeviceRequests': [], 'Devices': [
+            {'PathOnHost': cdi_device(site), 'PathInContainer': '', 'CgroupPermissions': ''}]},
+            'Config': {'Env': ['NVIDIA_VISIBLE_DEVICES=void']}}
+        validate_inspection(site, row, True)
+        row['HostConfig']['Devices'][0]['PathInContainer'] = '/dev/nvidia0'
+        with self.assertRaises(DeploymentError):
+            validate_inspection(site, row, True)
 
     def test_probe_checks_uuid_and_runs_nonroot_restricted_cuda(self):
         site = self.site()

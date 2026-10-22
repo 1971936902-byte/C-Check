@@ -40,16 +40,22 @@ def validate_inspection(site, inspection, gpu_service):
     requests = host.get('DeviceRequests') or []
     devices = host.get('Devices') or []
     runtime = host.get('Runtime') or 'runc'
+    if host.get('DeviceCgroupRules'):
+        raise DeploymentError('unexpected extra device cgroup permissions')
     if not gpu_service:
         if requests or devices:
             raise DeploymentError('unexpected GPU/device grant on a non-GPU service')
         return
     if access_mode(site) == 'cdi':
         expected = cdi_device(site)
-        if requests or len(devices) != 1 or devices[0].get('PathOnHost') != expected:
+        native_request = (not devices and len(requests) == 1 and requests[0].get('Driver') == 'cdi'
+                          and requests[0].get('DeviceIDs') == [expected] and not requests[0].get('Count')
+                          and not requests[0].get('Capabilities') and not requests[0].get('Options'))
+        device_mapping = (not requests and len(devices) == 1 and devices[0].get('PathOnHost') == expected
+                          and devices[0].get('PathInContainer') in {'', expected}
+                          and devices[0].get('CgroupPermissions') in {'', 'rwm'})
+        if not (native_request or device_mapping):
             raise DeploymentError('CDI device grant differs from the selected single GPU')
-        if devices[0].get('PathInContainer') not in {'', expected} or devices[0].get('CgroupPermissions') not in {'', 'rwm'}:
-            raise DeploymentError('unexpected CDI device mapping')
         if runtime not in {'runc', 'io.containerd.runc.v2'}:
             raise DeploymentError('native CDI requires the standard runc runtime')
         environment = dict(item.split('=', 1) for item in inspection['Config'].get('Env', []) if '=' in item)
