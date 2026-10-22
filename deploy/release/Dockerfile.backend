@@ -1,0 +1,46 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS dependencies
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends \
+    libclang-14-dev clang-14 clangd-14 universal-ctags fonts-noto-cjk libgomp1 ca-certificates \
+    && ln -s /usr/bin/clangd-14 /usr/local/bin/clangd \
+    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=wheelhouse/backend,target=/wheels \
+    --mount=type=bind,source=locks/backend.lock,target=/tmp/backend.lock \
+    pip install --no-index --find-links=/wheels --require-hashes -r /tmp/backend.lock && pip check
+
+FROM dependencies AS compiler
+RUN apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends gcc g++ binutils \
+    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=wheelhouse/compiler,target=/wheels \
+    --mount=type=bind,source=locks/compiler.lock,target=/tmp/compiler.lock \
+    pip install --no-index --find-links=/wheels --require-hashes -r /tmp/compiler.lock
+COPY backend/app/services /src/backend/app/services
+COPY backend/app/__init__.py /src/backend/app/__init__.py
+COPY build-core-policy.json /policy/core-policy.json
+COPY deploy/release/compile_core.py /builder/compile_core.py
+RUN python /builder/compile_core.py
+
+FROM dependencies AS assembler
+COPY backend /src/backend
+COPY --from=compiler /artifacts/backend /artifacts/backend
+COPY deploy/release/core-policy.json /policy/core-policy.json
+COPY deploy/release/assemble_backend.py /builder/assemble_backend.py
+RUN python /builder/assemble_backend.py
+
+FROM dependencies AS runtime
+ARG RELEASE_VERSION
+ARG SOURCE_SHA
+LABEL org.opencontainers.image.version=${RELEASE_VERSION} org.opencontainers.image.revision=${SOURCE_SHA}
+RUN groupadd -g 10001 ccheck && useradd -u 10001 -g 10001 -M ccheck
+COPY --from=assembler /artifacts/backend /app/backend
+COPY deploy/release/core-policy.json /opt/release/core-policy.json
+COPY deploy/models/catalog.json /app/deploy/models/catalog.json
+WORKDIR /app/backend
+ENV LD_LIBRARY_PATH=/usr/lib/llvm-14/lib
+USER 10001:10001
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,21 @@
+{
+  "instance": "rtx5880-review",
+  "data_dir": "/home/lyh/c-check-instance",
+  "engine": "docker",
+  "profile": "ada-48g-fp8",
+  "gpu": "0",
+  "runtime_source": "image",
+  "model_paths": {
+    "qwen": "/home/lyh/models/Qwen2.5-Coder-32B-Instruct-FP8",
+    "jina": "/home/lyh/models/jina-code-embeddings-1.5b"
+  },
+  "model_download_policy": "offline",
+  "license_mode": "evaluation",
+  "backup": {"keep": 3},
+  "web": {
+    "bind": "127.0.0.1",
+    "port": 18800,
+    "public_url": "http://127.0.0.1:18800",
+    "exposure": "private"
+  }
+}

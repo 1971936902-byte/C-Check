@@ -1,0 +1,15 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends libgomp1 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=wheelhouse/embedding,target=/wheels \
+    --mount=type=bind,source=locks/embedding.lock,target=/tmp/embedding.lock \
+    pip install --no-index --find-links=/wheels --require-hashes -r /tmp/embedding.lock && pip check
+COPY deploy/release/runtime/embedding_api.py /opt/runtime/embedding_api.py
+WORKDIR /opt/runtime
+RUN groupadd -g 10001 ccheck && useradd -u 10001 -g 10001 -M ccheck
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 USER=ccheck LOGNAME=ccheck HOME=/tmp
+USER 10001:10001
+CMD ["uvicorn", "embedding_api:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1"]

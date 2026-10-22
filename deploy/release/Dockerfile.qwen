@@ -1,0 +1,15 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends build-essential libgomp1 ca-certificates \
+    && mkdir -p /opt/cuda-link && ln -s /usr/lib/x86_64-linux-gnu/libcuda.so.1 /opt/cuda-link/libcuda.so \
+    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=wheelhouse/qwen,target=/wheels \
+    --mount=type=bind,source=locks/qwen.lock,target=/tmp/qwen.lock \
+    pip install --no-index --find-links=/wheels --require-hashes -r /tmp/qwen.lock && pip check
+COPY deploy/release/runtime/qwen_entry.py /opt/runtime/qwen_entry.py
+RUN groupadd -g 10001 ccheck && useradd -u 10001 -g 10001 -M ccheck
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 LIBRARY_PATH=/opt/cuda-link USER=ccheck LOGNAME=ccheck HOME=/cache TORCHINDUCTOR_CACHE_DIR=/cache/torchinductor
+USER 10001:10001
+ENTRYPOINT ["python", "/opt/runtime/qwen_entry.py"]

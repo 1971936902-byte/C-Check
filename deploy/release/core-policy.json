@@ -1,0 +1,24 @@
+{
+  "compiled_modules": [
+    "app.services.model_router", "app.services.security_analysis", "app.services.static_c_rules",
+    "app.services.model_output_sanitizer", "app.services.prompts", "app.services.check_types",
+    "app.services.code_index.parser", "app.services.code_index.chunker", "app.services.code_index.graph_builder",
+    "app.services.code_index.retriever", "app.services.code_index.context_builder", "app.services.code_index.planner"
+  ],
+  "plaintext_allowlist": [
+    "app/__init__.py", "app/main.py", "app/worker.py", "app/deployment.py", "app/backup.py",
+    "app/api/__init__.py", "app/api/admin.py", "app/api/auth.py", "app/api/code_index.py", "app/api/deps.py",
+    "app/api/models.py", "app/api/reports.py", "app/api/reviews.py",
+    "app/core/__init__.py", "app/core/bootstrap.py", "app/core/config.py", "app/core/security.py",
+    "app/db/__init__.py", "app/db/base.py", "app/db/models.py", "app/db/session.py",
+    "app/schemas/__init__.py", "app/schemas/admin.py", "app/schemas/auth.py", "app/schemas/model_response.py", "app/schemas/reviews.py",
+    "app/tasks/__init__.py", "app/tasks/reviews.py", "app/services/__init__.py",
+    "app/services/model_deployments.py", "app/services/reports.py", "app/services/resources.py",
+    "app/services/review_queue.py", "app/services/submissions.py", "app/services/code_index/__init__.py",
+    "app/services/code_index/clang_static_analyzer.py", "app/services/code_index/clangd.py",
+    "app/services/code_index/ctags.py", "app/services/code_index/embeddings.py", "app/services/code_index/evaluator.py",
+    "app/services/code_index/indexer.py", "app/services/code_index/keyword_search.py", "app/services/code_index/parse_cache.py",
+    "app/services/code_index/qdrant.py", "app/services/code_index/tree_sitter_c.py"
+  ],
+  "resource_allowlist": ["app/prompts/default_c_review.md"]
+}

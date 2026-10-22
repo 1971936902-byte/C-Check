@@ -22,6 +22,7 @@ class Settings(BaseSettings):
         env_file=(REPOSITORY_ROOT / ".env",),
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     database_url: str = "mysql+pymysql://c_check:c_check_password@localhost:3306/c_check"
@@ -107,6 +108,37 @@ class Settings(BaseSettings):
     model_deployment_script: Path = REPOSITORY_ROOT / "deploy" / "models" / "deploy-vllm-model.sh"
     vllm_api_key: str | None = None
     allow_insecure_defaults: bool = False
+    deployment_maintenance_file: Path | None = None
+    database_url_file: Path | None = None
+    jwt_secret_file: Path | None = None
+    admin_password_file: Path | None = None
+    rag_embedding_api_key_file: Path | None = None
+    rag_qdrant_api_key_file: Path | None = None
+    vllm_api_key_file: Path | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_secret_files(cls, values):
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        for name in (
+            "database_url", "jwt_secret", "admin_password", "rag_embedding_api_key",
+            "rag_qdrant_api_key", "vllm_api_key",
+        ):
+            filename = values.get(f"{name}_file")
+            if filename is None:
+                continue
+            if values.get(name) is not None:
+                raise ValueError(f"configure only one of {name.upper()} and {name.upper()}_FILE")
+            path = Path(filename)
+            if not path.is_absolute() or not path.is_file() or path.stat().st_size > 65536:
+                raise ValueError(f"invalid secret file for {name.upper()}")
+            secret = path.read_text(encoding="utf-8").rstrip("\r\n")
+            if not secret or "\x00" in secret:
+                raise ValueError(f"empty or invalid secret file for {name.upper()}")
+            values[name] = secret
+        return values
 
     @model_validator(mode="after")
     def validate_deployment_settings(self) -> "Settings":

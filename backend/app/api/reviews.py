@@ -40,6 +40,9 @@ def _create_task(
     check_types: list[str],
     display_name: str | None = None,
 ) -> ReviewTask:
+    maintenance = get_settings().deployment_maintenance_file
+    if maintenance is not None and maintenance.exists():
+        raise HTTPException(status_code=503, detail="deployment maintenance: new reviews are temporarily disabled")
     try:
         return create_review_task(
             db,
