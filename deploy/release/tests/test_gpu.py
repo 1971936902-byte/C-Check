@@ -57,7 +57,8 @@ class GpuTests(unittest.TestCase):
             self.assertEqual(spec['security_opt'], ['no-new-privileges:true'])
         for name in ['worker', 'init', 'embedding', 'frontend', 'mysql', 'redis', 'qdrant']:
             self.assertNotIn('devices', services[name])
-            self.assertNotIn('NVIDIA_VISIBLE_DEVICES', services[name].get('environment', {}))
+            self.assertEqual(services[name]['environment']['NVIDIA_VISIBLE_DEVICES'], 'void')
+            self.assertEqual(services[name]['runtime'], 'runc')
 
     def test_inspection_accepts_cdi_and_rejects_device_env_runtime_drift(self):
         site = self.site()
@@ -112,6 +113,15 @@ class GpuTests(unittest.TestCase):
         row['HostConfig']['DeviceRequests'][0]['DeviceIDs'] = ['2', '3']
         with self.assertRaises(DeploymentError):
             validate_inspection(site, row, True)
+
+    def test_non_gpu_service_rejects_environment_runtime_backdoor(self):
+        row = {'HostConfig': {'Runtime': 'runc'}, 'Config': {'Env': ['NVIDIA_VISIBLE_DEVICES=void']}}
+        validate_inspection(self.site(), row, False)
+        for runtime, value in [('nvidia', 'void'), ('runc', 'all'), ('nvidia', 'all')]:
+            row['HostConfig']['Runtime'] = runtime
+            row['Config']['Env'] = ['NVIDIA_VISIBLE_DEVICES=' + value]
+            with self.assertRaises(DeploymentError):
+                validate_inspection(self.site(), row, False)
 
 
 if __name__ == '__main__':

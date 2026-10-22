@@ -45,6 +45,9 @@ def validate_inspection(site, inspection, gpu_service):
     if not gpu_service:
         if requests or devices:
             raise DeploymentError('unexpected GPU/device grant on a non-GPU service')
+        environment = dict(item.split('=', 1) for item in inspection['Config'].get('Env', []) if '=' in item)
+        if runtime not in {'runc', 'io.containerd.runc.v2'} or environment.get('NVIDIA_VISIBLE_DEVICES') != 'void':
+            raise DeploymentError('non-GPU service must disable NVIDIA runtime/environment injection')
         return
     if access_mode(site) == 'cdi':
         expected = cdi_device(site)
@@ -68,15 +71,28 @@ def validate_inspection(site, inspection, gpu_service):
         raise DeploymentError('legacy GPU grant differs from the selected single GPU')
 
 
-NVML_PROBE = (
-    "import ctypes,json; n=ctypes.CDLL('libnvidia-ml.so.1');"
-    "assert n.nvmlInit_v2()==0; count=ctypes.c_uint();"
-    "assert n.nvmlDeviceGetCount_v2(ctypes.byref(count))==0 and count.value==1;"
-    "h=ctypes.c_void_p(); assert n.nvmlDeviceGetHandleByIndex_v2(0,ctypes.byref(h))==0;"
-    "u=ctypes.create_string_buffer(96); assert n.nvmlDeviceGetUUID(h,u,len(u))==0;"
-    "print(json.dumps({'uuid':u.value.decode(),'visible_gpus':count.value}),flush=True);"
-    "assert n.nvmlShutdown()==0;"
-)
+NVML_PROBE = '''import ctypes,json
+n=ctypes.CDLL('libnvidia-ml.so.1')
+assert n.nvmlInit_v2()==0
+count=ctypes.c_uint()
+assert n.nvmlDeviceGetCount_v2(ctypes.byref(count))==0
+accessible=[]
+for index in range(count.value):
+    h=ctypes.c_void_p()
+    status=n.nvmlDeviceGetHandleByIndex_v2(index,ctypes.byref(h))
+    if status==4:
+        continue
+    assert status==0, ('nvml handle',index,status)
+    u=ctypes.create_string_buffer(96)
+    status=n.nvmlDeviceGetUUID(h,u,len(u))
+    if status==4:
+        continue
+    assert status==0, ('nvml uuid',index,status)
+    accessible.append(u.value.decode())
+assert len(accessible)==1, accessible
+print(json.dumps({'uuid':accessible[0],'visible_gpus':len(accessible)}),flush=True)
+assert n.nvmlShutdown()==0
+'''
 CUDA_PROBE = NVML_PROBE + (
     "import torch,vllm,transformers; assert torch.cuda.is_available() and torch.cuda.device_count()==1;"
     "assert torch.__version__.split('+')[0]=='2.6.0' and torch.version.cuda=='12.4';"

@@ -302,6 +302,9 @@ def render_compose(site, images, uid, gid):
     frontend.update(user="101:101", ports=[f"{site['web']['bind']}:{site['web']['port']}:8080"],
                     tmpfs=["/tmp:size=16777216,mode=1777", "/var/cache/nginx:size=16777216,uid=101,gid=101", "/var/run:size=1048576,uid=101,gid=101"],
                     healthcheck=health(["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]))
+    for isolated in (worker, init, mysql, redis, qdrant, embedding, frontend):
+        isolated['runtime'] = 'runc'
+        isolated['environment'] = dict(isolated.get('environment', {}), NVIDIA_VISIBLE_DEVICES='void')
     return {"name": project_name(site), "services": {"mysql": mysql, "redis": redis, "qdrant": qdrant,
             "embedding": embedding, "qwen": qwen, "api": api, "worker": worker, "frontend": frontend, "init": init},
             "secrets": {name: {"file": str(root / "secrets" / name)} for name in secret_names},
