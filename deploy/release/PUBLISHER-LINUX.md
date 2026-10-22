@@ -19,7 +19,7 @@
 | `pack_source.py` | 导出批准的已提交源码，不混入当前目录的私人文件 |
 | `Dockerfile.*`、`compile_core.py`、`assemble_backend.py` | 容器构建、核心编译、最终镜像组装 |
 | `build_images.py`、`validate_images.py` | 镜像构建、源码/编译版对照、前端/CUDA/隔离及泄漏检查 |
-| `build_release.py`、`build_cli.py` | 二进制包、CLI、许可材料、分片和签名组装 |
+| `build_release.py`、`build_cli.py`、`INSTALL-RTX5880.template.md` | 二进制包、CLI、许可材料、分片、签名及版本化安装说明组装 |
 | `capture_baseline.py` | 从后续已验证构建中提取新的可公开基线 |
 | `prepare_build.py` | 需要升级依赖时的高级基线生成工具，不是普通恢复步骤 |
 | `upload_github_release.py` | 显式、人工授权的 GitHub 草稿发布工具 |
@@ -193,7 +193,7 @@ sha256sum "$HOME/c-check-publisher-keys/publisher.pem"
 
 输出目录是 `work_root/release-版本/`，包含签名清单、CLI、镜像压缩分片、核心 wheel、模型清单、锁及许可。每分片默认 1.5GiB，权重不在包内。组装再次核对 source、version、image IDs 与 gates 一致。
 
-同一输出版本目录存在时拒绝覆盖。组装失败的私有未发布目录要先诊断；已公开版本永远不能覆盖。新签名身份还需审查安装说明中的原 RC13 固定公钥/版本示例，更新对应未来版本文档并重新提交测试，不能直接沿用原指纹说明。
+同一输出版本目录存在时拒绝覆盖。组装失败的私有未发布目录要先诊断；已公开版本永远不能覆盖。随包 INSTALL-RTX5880.md 从模板生成，版本和公钥文件 SHA256 来自本次组装，不沿用旧 RC13 值。仓库静态 RC13 手册仍只适用于 RC13；接收者使用新包生成的说明，并通过独立可信渠道批准本次公钥指纹。
 
 ## 6. 结果、日志和恢复
 

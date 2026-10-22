@@ -26,6 +26,15 @@ from ccheck.image_identity import identity
 from ccheck.core import checked_path, verify_release
 
 
+def render_install_guide(template, version, fingerprint):
+    markers = set(re.findall(r'@@([A-Z0-9_]+)@@', template))
+    if markers != {'VERSION', 'PUBLISHER_PEM_SHA256'}:
+        raise RuntimeError('installation guide template must contain exactly the approved placeholders')
+    if not re.fullmatch(r'v\d+\.\d+\.\d+(?:-rc\.\d+)?', version) or not re.fullmatch(r'[0-9a-f]{64}', fingerprint):
+        raise RuntimeError('invalid guide version or publisher fingerprint')
+    return template.replace('@@VERSION@@', version).replace('@@PUBLISHER_PEM_SHA256@@', fingerprint)
+
+
 class SplitWriter:
     def __init__(self, directory, name, limit=1536 * 1024 * 1024):
         self.directory, self.name, self.limit = directory, name, limit
@@ -243,12 +252,15 @@ def main():
     for name in ('ccheck', 'install.sh'):
         shutil.copy2(context / 'deploy/release' / name, output / name)
         (output / name).chmod(0o755)
-    for name in ('INSTALL-RTX5880.md', 'site-rtx5880.example.json'):
+    for name in ('site-rtx5880.example.json',):
         shutil.copy2(context / 'deploy/release' / name, output / name)
     shutil.copy2(output / 'ccheck', output / 'ccheckctl')
     subprocess.run([sys.executable, str(context / 'deploy/release/build_cli.py'), '--output', str(output / 'cli/ccheck.pyz'),
                     '--yaml-package', str(args.yaml_package)], check=True)
     subprocess.run(['openssl', 'pkey', '-in', str(key), '-pubout', '-out', str(output / 'publisher.pem')], check=True)
+    template = (context / 'deploy/release/INSTALL-RTX5880.template.md').read_text(encoding='utf-8')
+    (output / 'INSTALL-RTX5880.md').write_text(render_install_guide(template, args.version,
+                                                                 sha(output / 'publisher.pem')), encoding='utf-8')
     specifications, reused = {}, []
     for name, image in images.items():
         metadata = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image]))[0]

@@ -12,10 +12,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import publisher
 from build_images import pinned
 from upload_github_release import verify_remote_tag
+from build_release import render_install_guide
 from ccheck.core import DeploymentError
 
 
 class PublisherTests(unittest.TestCase):
+    def test_installation_guide_uses_actual_version_and_publisher(self):
+        template = (Path(publisher.__file__).parent / 'INSTALL-RTX5880.template.md').read_text(encoding='utf-8')
+        result = render_install_guide(template, 'v1.2.3', 'a' * 64)
+        self.assertIn('release-v1.2.3', result)
+        self.assertIn('a' * 64, result)
+        self.assertNotIn('v0.1.0-rc.13', result)
+        self.assertNotIn('@@', result)
+        self.assertNotIn('9d1e2a1fe9de3b4245f3abaaa72ccc8ef19e8322e0bc7a3de878353561d86e37', result)
+
+    def test_unknown_guide_marker_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, 'placeholders'):
+            render_install_guide('@@VERSION@@ @@UNAPPROVED@@', 'v1.2.3', 'a' * 64)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

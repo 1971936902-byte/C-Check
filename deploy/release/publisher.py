@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / 'cli'))
 from ccheck.core import DeploymentError, atomic_json, checked_path, digest
 from ccheck.models import obtain_file
 
-REPOSITORY = Path(__file__).resolve().parents[2]
+REPOSITORY = Path(__file__).resolve().parent.parent.parent
 GROUPS = {'backend', 'qwen', 'embedding', 'compiler'}
 
 
