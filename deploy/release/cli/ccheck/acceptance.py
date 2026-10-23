@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 import zipfile
 
 from .core import DeploymentError, atomic_json
+from .inference import served_name
 
 
 class API:
@@ -65,7 +66,7 @@ def acceptance(site, release, engine, *, fresh=False):
     api.token = login['access_token']
     models = api.request('/api/models')
     selected = [model for model in models if model['is_default']]
-    if len(selected) != 1 or selected[0]['model_identifier'] != 'qwen2.5-coder-32b-instruct-fp8':
+    if len(selected) != 1 or selected[0]['model_identifier'] != served_name(site):
         raise DeploymentError('expected exactly one real default model')
     html = api.request('/', binary=True).decode()
     assets = re.findall(r'(?:src|href)="([^"]+\.(?:js|css))"', html)

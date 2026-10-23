@@ -138,7 +138,8 @@ def load_site(path):
     if not isinstance(site, dict) or not re.fullmatch(r"[a-z][a-z0-9-]{2,35}", site.get("instance", "")):
         raise DeploymentError("instance must be a 3-36 character lower-case project name")
     allowed = {"instance", "data_dir", "profile", "gpu", "web", "model_cache", "model_paths",
-               "model_download_policy", "license_mode", "engine", "runtime_source", "backup", "gpu_access_mode", "network_subnets", "performance", "delivery"}
+               "model_download_policy", "license_mode", "engine", "runtime_source", "backup", "gpu_access_mode", "network_subnets", "performance", "delivery",
+               "review_model", "qwen_model_revision"}
     if set(site) - allowed:
         raise DeploymentError("unknown site configuration keys")
     if site.get("engine", "docker") != "docker" or site.get("runtime_source", "image") not in {"image", "build"}:
@@ -200,6 +201,8 @@ def load_site(path):
     site["web"]["public_url"] = web["public_url"].rstrip("/")
     if site.get("license_mode") not in {"evaluation", "authorized"}:
         raise DeploymentError("explicit model license mode is required; review the release model notices")
+    from .inference import validate_site
+    validate_site(site)
     return site
 
 

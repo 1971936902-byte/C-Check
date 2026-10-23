@@ -50,15 +50,24 @@ def gpu_embedding(site):
 def validate_release(site, release):
     if settings(site):
         expected = {name: hashlib.sha256(resource(name)).hexdigest()
-                    for name in ('qwen_gpu.py', 'embedding_gpu.py')}
+                    for name in launcher_names(site)}
         if release.get('runtime_launchers') != expected:
             raise DeploymentError('performance recipe is not authorized by this signed release; use the matching release CLI')
 
 
 def resource(name):
-    if name not in {'qwen_gpu.py', 'embedding_gpu.py'}:
+    if name not in {'qwen_gpu.py', 'qwen3_gpu.py', 'embedding_gpu.py'}:
         raise DeploymentError('unapproved runtime launcher')
     return importlib.resources.files('ccheck').joinpath('launchers', name).read_bytes()
+
+
+def qwen_launcher(site):
+    from .inference import QWEN3, served_name
+    return 'qwen3_gpu.py' if served_name(site) == QWEN3 else 'qwen_gpu.py'
+
+
+def launcher_names(site):
+    return (qwen_launcher(site), 'embedding_gpu.py')
 
 
 def launcher_path(site, name):
@@ -71,7 +80,7 @@ def prepare(site):
         return
     directory = checked_path(site['data_dir'], 'config/launchers')
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for name in ('qwen_gpu.py', 'embedding_gpu.py'):
+    for name in launcher_names(site):
         path = launcher_path(site, name)
         expected = resource(name)
         if path.exists():
@@ -88,7 +97,7 @@ def prepare(site):
 def verify(site):
     if not settings(site):
         return
-    for name in ('qwen_gpu.py', 'embedding_gpu.py'):
+    for name in launcher_names(site):
         path = launcher_path(site, name)
         if not path.is_file() or digest(path) != hashlib.sha256(resource(name)).hexdigest():
             raise DeploymentError('signed runtime launcher verification failed')

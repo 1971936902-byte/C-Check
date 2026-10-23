@@ -12,6 +12,7 @@ from .models import prepare_models, verify_models
 from .gpu import validate_inspection
 from . import networks
 from . import acceleration
+from . import inference
 
 
 def installed(site):
@@ -180,6 +181,7 @@ def verify(site, *, fresh=False):
     state = installed(site)
     root = Path(site['data_dir'])
     release = verify_release(state['release_root'], root / 'config/publisher.pem', state['publisher'])
+    inference.configure(site, release)
     acceleration.validate_release(site, release)
     engine = Engine(site)
     engine.wait(['mysql', 'redis', 'qdrant', 'qwen', 'embedding', 'api', 'worker', 'frontend'], timeout=120)
@@ -255,6 +257,7 @@ def start(site):
     with installation_lock(engine.root):
         assert_no_pending_network_migration(engine.root)
         release = verify_release(state['release_root'], engine.root / 'config/publisher.pem', state['publisher'])
+        inference.configure(site, release)
         verify_models(release, site)
         start_stack(engine)
         engine.maintenance(False)
@@ -272,15 +275,25 @@ def stop(site, *, models_only=False):
             engine.compose('stop', '--timeout', '120')
 
 
-def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=None, cold_network=False):
+def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=None, cold_network=False,
+           model_migration=False):
     state = installed(site)
     root = Path(site['data_dir'])
     trusted_key = trusted_key or root / 'config/publisher.pem'
     release = verify_release(release_root, trusted_key, state['publisher'])
     if release['schema_epoch'] != state['schema_epoch']:
         raise DeploymentError('schema compatibility is not proven; use an approved migration/backup restore, not blind image rollback')
-    if release['files']['models/model-manifest.json'] != state['model_manifest_sha256']:
-        raise DeploymentError('model/index revision changed; validate it in a separate instance, not an in-place application update')
+    changing_model = release['files']['models/model-manifest.json'] != state['model_manifest_sha256']
+    if changing_model:
+        if not model_migration:
+            raise DeploymentError('model/index revision changed; validate separately, then explicitly use --model-migration')
+        previous = verify_release(state['release_root'], trusted_key, state['publisher'])
+        if (previous['_sha256'] != state['release_sha256']
+                or previous['files']['models/model-manifest.json'] != state['model_manifest_sha256']):
+            raise DeploymentError('installed release differs from recorded model migration source')
+        from .model_migration import validate
+        validate(previous, release)
+        inference.configure(site, release, transition=True)
     if backup_key is None:
         raise DeploymentError('update/rollback requires an external --backup-key for a consistent encrypted backup')
     preflight(site, release)
@@ -326,6 +339,9 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         if migrating:
             begin_network_migration(engine, json.loads(previous_site), json.loads(previous_compose), state, release['_sha256'])
         try:
+            if changing_model:
+                # The old backend can only re-register its legacy model on rollback.
+                engine.management('disable-model')
             if migrating:
                 networks.teardown(engine)
             prepare_data(site, release)

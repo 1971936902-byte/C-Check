@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .core import DeploymentError, atomic_json, checked_path, digest
+from .inference import directory as model_directory
 
 
 def model_cache_directory(site, model):
@@ -42,7 +43,7 @@ def validate_offline_models(release, site):
     for model in manifest['models']:
         cache = model_cache_directory(site, model)
         for entry in model['files']:
-            installed = checked_path(site['data_dir'], 'models/' + model['key'] + '/' + entry['path'])
+            installed = checked_path(model_directory(site, model['key']), entry['path'])
             candidates = [installed]
             if cache:
                 candidates.append(checked_path(cache, entry['path']))
@@ -162,7 +163,7 @@ def prepare_models(release, site):
     root = Path(site["data_dir"]) / "models"
     for model in manifest["models"]:
         cache_root = model_cache_directory(site, model)
-        destination = checked_path(site['data_dir'], 'models/' + model['key'])
+        destination = model_directory(site, model['key'])
         destination.mkdir(mode=0o700, parents=True, exist_ok=True)
         def one(entry):
             target = checked_path(destination, entry["path"])
@@ -185,7 +186,7 @@ def verify_models(release, site):
     manifest = json.loads(checked_path(release['_root'], 'models/model-manifest.json').read_text())
     for model in manifest['models']:
         for entry in model['files']:
-            path = checked_path(site['data_dir'], 'models/' + model['key'] + '/' + entry['path'])
+            path = checked_path(model_directory(site, model['key']), entry['path'])
             if not path.is_file() or path.stat().st_size != entry['size'] or digest(path) != entry['sha256']:
                 raise DeploymentError('model revision deviated or is incomplete; rerun install to repair: ' + model['key'])
-        validate_model_layout(model, checked_path(site['data_dir'], 'models/' + model['key']))
+        validate_model_layout(model, model_directory(site, model['key']))

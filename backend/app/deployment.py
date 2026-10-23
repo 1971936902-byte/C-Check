@@ -2,6 +2,7 @@
 import argparse
 import importlib
 import json
+import os
 from pathlib import Path
 
 from alembic import command
@@ -24,11 +25,20 @@ def migrate():
     command.upgrade(Config("alembic.ini"), "head")
 
 
+def review_model():
+    name = os.environ.get('CCHECK_REVIEW_MODEL', 'qwen2.5-coder-32b-instruct-fp8')
+    labels = {'qwen2.5-coder-32b-instruct-fp8': 'Qwen2.5-Coder-32B FP8',
+              'qwen3-coder-30b-a3b-instruct-fp8': 'Qwen3-Coder-30B-A3B FP8'}
+    if name not in labels:
+        raise RuntimeError('unsupported deployed review model')
+    return name, labels[name]
+
+
 def register_model():
     import httpx
 
     settings = get_settings()
-    name = "qwen2.5-coder-32b-instruct-fp8"
+    name, label = review_model()
     base = "http://qwen:8001"
     response = httpx.get(base + "/v1/models", headers={"Authorization": "Bearer " + settings.vllm_api_key},
                          timeout=30, trust_env=False)
@@ -39,7 +49,11 @@ def register_model():
         nodes = list(db.scalars(select(ModelNode).where(ModelNode.model_identifier == name)).all())
         if len(nodes) > 1:
             raise RuntimeError("duplicate model nodes require administrator resolution")
-        node = nodes[0] if nodes else ModelNode(display_name="Qwen2.5-Coder-32B FP8", model_identifier=name)
+        node = nodes[0] if nodes else ModelNode(display_name=label, model_identifier=name)
+        for previous in db.scalars(select(ModelNode).where(ModelNode.model_identifier != name)).all():
+            previous.is_default = False
+            if previous.base_url == base:
+                previous.is_enabled = False
         node.base_url = base
         node.api_key = settings.vllm_api_key
         node.timeout_seconds = 600
@@ -65,6 +79,7 @@ def disable_model():
         nodes = db.scalars(select(ModelNode).where(ModelNode.base_url == "http://qwen:8001")).all()
         for node in nodes:
             node.is_enabled = False
+            node.is_default = False
         db.commit()
         print(json.dumps({"disabled": len(nodes)}))
 
@@ -108,7 +123,7 @@ def verify_runtime():
     with httpx.Client(timeout=180, trust_env=False) as client:
         response = client.post("http://qwen:8001/v1/chat/completions",
             headers={"Authorization": "Bearer " + settings.vllm_api_key},
-            json={"model": "qwen2.5-coder-32b-instruct-fp8", "temperature": 0, "max_tokens": 64,
+            json={"model": review_model()[0], "temperature": 0, "max_tokens": 64,
                   "messages": [{"role": "user", "content": 'Return {"ok":true}.'}],
                   "response_format": {"type": "json_schema", "json_schema": {"name": "probe", "strict": True,
                       "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}},

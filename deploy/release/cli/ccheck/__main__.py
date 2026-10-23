@@ -36,6 +36,9 @@ def main():
                                  help='stop this project and cold-backup when old network prevents healthy service access')
         if name in {'backup', 'restore', 'update', 'rollback'}:
             command.add_argument('--backup-key', type=Path, required=True)
+        if name in {'update', 'rollback'}:
+            command.add_argument('--model-migration', action='store_true',
+                                 help='explicit Qwen-only model transition; preserves Jina/index and old model files')
         if name == 'restore':
             command.add_argument('--backup', type=Path, required=True)
             command.add_argument('--confirm-instance', required=True)
@@ -81,7 +84,10 @@ def main():
                 site = saved
             elif args.command == 'update':
                 delivery = site.get('delivery')
+                model_options = {key: site[key] for key in ('model_paths', 'model_cache', 'model_download_policy')
+                                 if key in site} if args.model_migration else {}
                 site = saved
+                site.update(model_options)
                 if delivery is not None:
                     site['delivery'] = delivery
             elif args.command == 'install' and args.runtime_source is None:
@@ -124,7 +130,8 @@ def main():
                 if metadata.get('version') != args.version:
                     raise DeploymentError('requested update version does not match package')
             lifecycle.update(site, args.release, args.trusted_key, rollback=args.command == 'rollback', backup_key=args.backup_key,
-                             cold_network=args.command == 'update' and args.cold_network_migration)
+                             cold_network=args.command == 'update' and args.cold_network_migration,
+                             model_migration=args.model_migration)
         elif args.command in {'start', 'model-start'}:
             lifecycle.start(site)
         elif args.command in {'stop', 'model-stop'}:

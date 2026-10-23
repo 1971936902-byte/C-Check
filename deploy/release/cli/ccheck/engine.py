@@ -13,6 +13,7 @@ from .gpu import access_mode, cdi_device, check_identity, configure, NVML_PROBE,
 from .networks import specifications, subnets
 from . import acceleration
 from . import delivery
+from . import inference
 
 
 def project_name(site):
@@ -62,6 +63,7 @@ def gateway_snippet(site):
 
 def preflight(site, release=None):
     if release is not None:
+        inference.configure(site, release)
         delivery.validate_release(release)
         if delivery.is_online(release):
             site.setdefault('delivery', {})
@@ -102,7 +104,7 @@ def preflight(site, release=None):
         for model in models:
             cache = model_cache_directory(site, model)
             for entry in model['files']:
-                target = Path(site['data_dir']) / 'models' / model['key'] / entry['path']
+                target = inference.directory(site, model['key']) / entry['path']
                 if target.is_file() and target.stat().st_size == entry['size']:
                     continue
                 source = model_cache_file(site, model, entry)
@@ -264,6 +266,8 @@ def render_compose(site, images, uid, gid):
         "USER": "ccheck", "LOGNAME": "ccheck", "HOME": "/cache",
         "LD_LIBRARY_PATH": "/usr/lib/llvm-14/lib", "PYTHONDONTWRITEBYTECODE": "1", "OMP_NUM_THREADS": "4",
     }
+    if inference.served_name(site) != inference.LEGACY:
+        env['CCHECK_REVIEW_MODEL'] = inference.served_name(site)
     def bind(source, target, readonly=False):
         return {"type": "bind", "source": str(source), "target": target, "read_only": readonly,
                 "bind": {"create_host_path": False}}
@@ -322,9 +326,11 @@ def render_compose(site, images, uid, gid):
                              "TRITON_CACHE_DIR": "/cache/triton", "XDG_CACHE_HOME": "/cache", "OMP_NUM_THREADS": "4",
                              "USER": "ccheck", "LOGNAME": "ccheck", "HOME": "/cache", "TORCHINDUCTOR_CACHE_DIR": "/cache/torchinductor",
                              "LIBRARY_PATH": "/opt/cuda-link"},
-                secrets=["vllm_api_key"], volumes=[bind(root / "models/qwen", "/models/qwen", True), bind(root / "data/cache", "/cache")],
+                secrets=["vllm_api_key"], volumes=[bind(inference.directory(site, 'qwen'), "/models/qwen", True), bind(root / "data/cache", "/cache")],
                 shm_size="1g",
                 healthcheck=health(["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=5)"], start="300s"))
+    if inference.served_name(site) != inference.LEGACY:
+        qwen['environment']['CCHECK_REVIEW_MODEL'] = inference.served_name(site)
     configure(qwen, site)
     performance = acceleration.settings(site)
     if performance:
@@ -335,7 +341,7 @@ def render_compose(site, images, uid, gid):
         qwen['entrypoint'] = ['python', '/opt/ccheck-launcher.py']
         qwen['environment'].update(MAX_NUM_SEQS=str(performance['max_num_seqs']),
             MAX_NUM_BATCHED_TOKENS=str(performance['max_num_batched_tokens']))
-        qwen['volumes'].append(bind(acceleration.launcher_path(site, 'qwen_gpu.py'), '/opt/ccheck-launcher.py', True))
+        qwen['volumes'].append(bind(acceleration.launcher_path(site, acceleration.qwen_launcher(site)), '/opt/ccheck-launcher.py', True))
         if acceleration.gpu_embedding(site):
             embedding['image'] = images['qwen']
             embedding['entrypoint'] = ['python', '-m', 'uvicorn', 'ccheck_embedding:app',

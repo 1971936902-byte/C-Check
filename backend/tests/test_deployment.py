@@ -7,6 +7,21 @@ from pydantic import ValidationError
 from app.core.config import Settings
 
 
+def test_deployed_model_name_defaults_to_legacy(monkeypatch):
+    from app.deployment import review_model
+    monkeypatch.delenv('CCHECK_REVIEW_MODEL', raising=False)
+    assert review_model() == ('qwen2.5-coder-32b-instruct-fp8', 'Qwen2.5-Coder-32B FP8')
+
+
+def test_deployed_model_name_accepts_qwen3_and_rejects_unknown(monkeypatch):
+    from app.deployment import review_model
+    monkeypatch.setenv('CCHECK_REVIEW_MODEL', 'qwen3-coder-30b-a3b-instruct-fp8')
+    assert review_model() == ('qwen3-coder-30b-a3b-instruct-fp8', 'Qwen3-Coder-30B-A3B FP8')
+    monkeypatch.setenv('CCHECK_REVIEW_MODEL', 'unvalidated-model')
+    with pytest.raises(RuntimeError, match='unsupported'):
+        review_model()
+
+
 @pytest.mark.parametrize('name', ['database_url', 'jwt_secret', 'admin_password',
                                   'rag_embedding_api_key', 'rag_qdrant_api_key', 'vllm_api_key'])
 def test_secret_file_loading_without_host_installation(tmp_path, monkeypatch, name):
