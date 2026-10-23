@@ -142,7 +142,7 @@ sudo /usr/bin/python3 "$PKG/cli/ccheck.pyz" install \
 
 命令完成镜像导入、模型校验复用、数据库初始化、服务注册及真实小任务验收。成功显示 READY 才算完成，后台 PID、模型健康或下载完成单独都不算。
 
-默认 0.88 显存占比、32B FP8 权重、BF16 计算/KV auto 路线、8K 上下文、单并发、关闭 n-gram；Jina1.5B 在 CPU 上运行、1536 维。建议不少于 48GB 系统 RAM，资源不足需现场评估，不宣称只要显卡够就一定可用。
+未启用 `performance` 时沿用旧配置：0.88 显存占比、32B FP8 权重、BF16 计算/KV auto 路线、8K 上下文、单并发、关闭 n-gram，Jina1.5B 使用 CPU、1536 维。rc16 新示例启用了前述 shared-gpu 配置，以本文首节为准。建议不少于 48GB 系统 RAM，资源不足需现场评估，不宣称只要显卡够就一定可用。
 
 初始用户 `admin`，随机密码在专用实例 `secrets/admin_password`，不会设成 admin/admin。只在本机显示密码，勿粘贴进工单或公开日志。
 
