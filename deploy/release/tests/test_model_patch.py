@@ -33,6 +33,11 @@ class ModelPatchTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'cannot change'):
                     model_patch.verify_inputs(base, candidate, self.root)
 
+    def test_migration_guide_generates_hexadecimal_backup_key(self):
+        guide = (Path(__file__).resolve().parents[1] / 'INSTALL-QWEN3.template.md').read_text(encoding='utf-8')
+        self.assertIn('openssl rand -hex 48 > /home/lyh/private-backup-key', guide)
+        self.assertNotIn('openssl rand -out /home/lyh/private-backup-key 32', guide)
+
     def report_fixture(self):
         manifest = self.root/'manifest.json'
         manifest.write_text('{}')

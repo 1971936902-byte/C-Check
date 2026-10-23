@@ -118,10 +118,11 @@ sudo /usr/bin/python3 "$RELEASE/cli/ccheck.pyz" install \
 
 ```bash
 umask 077
-openssl rand -out /home/lyh/private-backup-key 32
+openssl rand -hex 48 > /home/lyh/private-backup-key
 ```
 
-若已设置备份密钥，直接沿用，不要重复生成覆盖。执行：
+若已设置符合安装器要求的十六进制文本备份密钥，直接沿用，不要重复生成覆盖。
+密钥文件必须仅当前用户可读写，不能用原始二进制随机文件替代。执行：
 
 ```bash
 sudo /usr/bin/python3 "$RELEASE/cli/ccheck.pyz" update \
