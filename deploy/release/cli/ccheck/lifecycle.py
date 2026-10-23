@@ -95,8 +95,11 @@ def start_stack(engine):
     else:
         engine.compose('up', '-d', 'qwen', 'embedding')
         engine.wait(['qwen', 'embedding'])
-    engine.compose('up', '-d', 'api', 'worker', 'frontend')
-    engine.wait(['api', 'worker', 'frontend'])
+    engine.compose('up', '-d', 'api', 'worker')
+    engine.wait(['api', 'worker'])
+    # Nginx resolves its static upstream on startup; API replacement can change IP.
+    engine.compose('up', '-d', '--no-deps', '--force-recreate', 'frontend')
+    engine.wait(['frontend'])
     engine.verify_gpu_access()
     networks.verify(engine)
     engine.management('register-model')

@@ -509,6 +509,19 @@ class ReleaseTests(unittest.TestCase):
                          ['data-health', 'data-health', 'migrate', 'register-model'])
         sleep.assert_called_once_with(2)
 
+    def test_frontend_refreshes_dns_after_api_replacement_without_restarting_dependencies(self):
+        engine = MagicMock()
+        engine.site = {}
+        with patch('ccheck.lifecycle.networks.verify'):
+            start_stack(engine)
+        calls = [(call[0], call.args) for call in engine.mock_calls]
+        ready = calls.index(('wait', (['api', 'worker'],)))
+        refresh = calls.index(('compose', ('up', '-d', '--no-deps', '--force-recreate', 'frontend')))
+        frontend_ready = calls.index(('wait', (['frontend'],)))
+        self.assertLess(ready, refresh)
+        self.assertLess(refresh, frontend_ready)
+        self.assertNotIn(('compose', ('up', '-d', 'api', 'worker', 'frontend')), calls)
+
     def test_data_readiness_deadline_never_proceeds_with_failed_dependencies(self):
         engine = MagicMock()
         engine.management.side_effect = DeploymentError('not ready')
