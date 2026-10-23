@@ -26,6 +26,9 @@ def main():
             command.add_argument('--backup-key', type=Path)
         if name in {'install', 'update'}:
             command.add_argument('--gpu-access-mode', choices=['legacy', 'cdi'])
+        if name == 'update':
+            command.add_argument('--cold-network-migration', action='store_true',
+                                 help='stop this project and cold-backup when old network prevents healthy service access')
         if name in {'backup', 'restore', 'update', 'rollback'}:
             command.add_argument('--backup-key', type=Path, required=True)
         if name == 'restore':
@@ -96,7 +99,8 @@ def main():
                 metadata = json.loads((args.release / 'release.json').read_text())
                 if metadata.get('version') != args.version:
                     raise DeploymentError('requested update version does not match package')
-            lifecycle.update(site, args.release, args.trusted_key, rollback=args.command == 'rollback', backup_key=args.backup_key)
+            lifecycle.update(site, args.release, args.trusted_key, rollback=args.command == 'rollback', backup_key=args.backup_key,
+                             cold_network=args.command == 'update' and args.cold_network_migration)
         elif args.command in {'start', 'model-start'}:
             lifecycle.start(site)
         elif args.command in {'stop', 'model-stop'}:

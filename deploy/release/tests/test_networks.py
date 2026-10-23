@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cli'))
 from ccheck.core import DeploymentError
 from ccheck.engine import Engine, project_name, render_compose
 from ccheck import networks
-from ccheck.lifecycle import assert_no_pending_network_migration, begin_network_migration, finish_network_migration, recover_network
+from ccheck.lifecycle import assert_no_pending_network_migration, begin_network_migration, finish_network_migration, recover_network, update
 
 
 class NetworkTests(unittest.TestCase):
@@ -187,6 +187,65 @@ class NetworkTests(unittest.TestCase):
                 patch('ccheck.lifecycle.start_stack'), \
                 patch('ccheck.lifecycle.verify', side_effect=DeploymentError('not ready')), self.assertRaises(DeploymentError):
             recover_network(self.site)
+        self.assertEqual(json.loads((self.engine.root / 'state/network-migration.json').read_text())['status'], 'pending')
+
+    @contextlib.contextmanager
+    def cold_update_fixture(self, backup_error=None):
+        state = self.committed_fixture()
+        state.update(version='v0.1.0-rc.14', release_sha256='old', schema_epoch='schema',
+                     model_manifest_sha256='models')
+        old_document = json.loads(self.engine.file.read_text())
+        old_document['networks'] = {'data': {'internal': True}, 'inference': {'internal': True}, 'edge': {}}
+        self.engine.file.write_text(json.dumps(old_document))
+        (self.engine.root / 'state/network-migration.json').unlink()
+        release = {'_sha256': 'new', 'version': 'v0.1.0-rc.15', 'tag': 'release-v0.1.0-rc.15',
+                   'schema_epoch': 'schema', 'source': {}, '_root': '/new',
+                   'files': {'models/model-manifest.json': 'models'}}
+        events = []
+        fake = MagicMock()
+        fake.root, fake.file, fake.site = self.engine.root, self.engine.file, self.site
+        fake.compose.side_effect = lambda *args, **kwargs: events.append(args[0])
+        def backup(*args, **kwargs):
+            events.append('backup')
+            self.assertTrue(kwargs.get('cold'))
+            if backup_error:
+                raise backup_error
+        with contextlib.ExitStack() as stack:
+            patches = {
+                'ccheck.lifecycle.installation_lock': {'return_value': contextlib.nullcontext()},
+                'ccheck.lifecycle.installed': {'return_value': state},
+                'ccheck.lifecycle.verify_release': {'return_value': release},
+                'ccheck.lifecycle.preflight': {}, 'ccheck.lifecycle.networks.preflight': {},
+                'ccheck.lifecycle.Engine': {'return_value': fake},
+                'ccheck.backup.key_material': {}, 'ccheck.backup.make_backup': {'side_effect': backup},
+                'ccheck.lifecycle.cache_release': {'return_value': release},
+                'ccheck.lifecycle.prepare_images': {'return_value': state['images']},
+                'ccheck.lifecycle.prepare_models': {}, 'ccheck.lifecycle.fix_model_permissions': {},
+                'ccheck.lifecycle.prepare_data': {},
+                'ccheck.lifecycle.networks.teardown': {'side_effect': lambda *args: events.append('down')},
+                'ccheck.lifecycle.start_stack': {'side_effect': lambda *args: events.append('start')},
+                'ccheck.lifecycle.acceptance': {'return_value': {}},
+                'ccheck.image_identity.inspect_image': {'return_value': {}},
+                'ccheck.image_identity.identity': {'return_value': 'identity'},
+            }
+            for name, values in patches.items():
+                stack.enter_context(patch(name, **values))
+            yield events, fake, old_document
+
+    def test_cold_update_backs_up_before_teardown_without_api_drain(self):
+        with self.cold_update_fixture() as (events, engine, _):
+            update(self.site, Path('/new'), backup_key=Path('/external-key'), cold_network=True)
+            engine.drain.assert_not_called()
+        self.assertEqual(events, ['stop', 'backup', 'down', 'start'])
+        self.assertEqual(json.loads((self.engine.root / 'state/deployment.json').read_text())['version'], 'v0.1.0-rc.15')
+        self.assertEqual(json.loads((self.engine.root / 'state/network-migration.json').read_text())['status'], 'completed')
+
+    def test_failed_cold_backup_never_tears_down_network_or_rewrites_recipe(self):
+        with self.cold_update_fixture(DeploymentError('backup failed')) as (events, engine, previous):
+            with self.assertRaisesRegex(DeploymentError, 'backup failed'):
+                update(self.site, Path('/new'), backup_key=Path('/external-key'), cold_network=True)
+        self.assertEqual(events, ['stop', 'backup'])
+        self.assertEqual(json.loads(self.engine.file.read_text()), previous)
         self.assertEqual(json.loads((self.engine.root / 'state/network-migration.json').read_text())['status'], 'pending')
 
 

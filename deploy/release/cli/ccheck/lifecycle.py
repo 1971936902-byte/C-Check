@@ -257,7 +257,7 @@ def stop(site, *, models_only=False):
             engine.compose('stop', '--timeout', '120')
 
 
-def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=None):
+def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=None, cold_network=False):
     state = installed(site)
     root = Path(site['data_dir'])
     trusted_key = trusted_key or root / 'config/publisher.pem'
@@ -275,10 +275,22 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         engine = Engine(site)
         previous_site = (root / 'config/site.json').read_bytes()
         previous_compose = engine.file.read_bytes()
-        engine.drain()
+        desired_networks = networks.specifications(site)
+        recipe_change = json.loads(previous_compose)['networks'] != desired_networks
         from .backup import make_backup
-        make_backup(json.loads(previous_site), state, backup_key, locked=True)
-        engine.drain()
+        if cold_network:
+            if not recipe_change and not networks.needs_recreate(engine, {'networks': desired_networks}):
+                raise DeploymentError('cold-network-migration is restricted to a network recipe change')
+            from .backup import key_material
+            key_material(backup_key)
+            begin_network_migration(engine, json.loads(previous_site), json.loads(previous_compose), state, release['_sha256'])
+            engine.maintenance(True)
+            engine.compose('stop', '--timeout', '120')
+            make_backup(json.loads(previous_site), state, backup_key, locked=True, cold=True)
+        else:
+            engine.drain()
+            make_backup(json.loads(previous_site), state, backup_key, locked=True)
+            engine.drain()
         preflight(site, release)
         release = cache_release(site, release, trusted_key)
         build = site.get('runtime_source') == 'build'
@@ -290,7 +302,7 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         fix_model_permissions(site)
         uid, gid = state['uid'], state['gid']
         document = render_compose(site, images, uid, gid)
-        migrating = networks.needs_recreate(engine, document)
+        migrating = recipe_change or networks.needs_recreate(engine, document)
         atomic_json(root / 'state/previous-deployment.json', state)
         if migrating:
             begin_network_migration(engine, json.loads(previous_site), json.loads(previous_compose), state, release['_sha256'])
