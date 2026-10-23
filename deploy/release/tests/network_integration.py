@@ -32,6 +32,7 @@ def main():
     engine = Engine(site)
     foreign = None
     (root / 'data').mkdir(mode=0o755)
+    (root / 'data').chmod(0o755)
     (root / 'secrets').mkdir(mode=0o700)
     (root / 'data/sentinel').write_text('existing-data-must-survive')
     (root / 'data/sentinel').chmod(0o644)
@@ -40,7 +41,8 @@ def main():
         'image': args.image, 'pull_policy': 'never', 'restart': 'no', 'user': '10001:10001',
         'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
         'runtime': 'runc', 'environment': {'NVIDIA_VISIBLE_DEVICES': 'void'},
-        'entrypoint': ['sh'], 'command': ['-c', 'sleep 600'], 'networks': list(networks.DEFAULT_SUBNETS),
+        'entrypoint': ['sh'], 'command': ['-c', "trap 'exit 0' TERM INT; while :; do sleep 1 & wait $!; done"],
+        'networks': list(networks.DEFAULT_SUBNETS),
         'volumes': [{'type': 'bind', 'source': str(root / 'data'), 'target': '/check', 'read_only': True}]}},
         'networks': {'data': {'internal': True}, 'inference': {'internal': True}, 'edge': {}}}
     desired = copy.deepcopy(previous)
