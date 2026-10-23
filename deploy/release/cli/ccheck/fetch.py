@@ -22,7 +22,16 @@ def asset_prefix(manifest, name, base_url):
     return base_url.rstrip('/') + '/release-' + version + '/'
 
 
-def fetch_release(base_url, version, destination, trusted_key):
+def cached_asset(manifest, name, previous):
+    if previous is None or name not in manifest.get('distribution', {}).get('reused_files', []):
+        return None
+    if (not name.startswith('images/') or previous.get('files', {}).get(name) != manifest['files'][name]
+            or previous.get('artifact_sizes', {}).get(name) != manifest['artifact_sizes'][name]):
+        return None
+    return checked_path(previous['_root'], name)
+
+
+def fetch_release(base_url, version, destination, trusted_key, *, reuse_release=None):
     origin = urlsplit(base_url)
     if origin.scheme != 'https' or not origin.netloc or origin.username or origin.query or origin.fragment:
         raise DeploymentError('release source must be an HTTPS base URL without embedded credentials')
@@ -57,6 +66,7 @@ def fetch_release(base_url, version, destination, trusted_key):
         raise DeploymentError('signed release does not match requested version')
     if len(manifest['files']) > 10000:
         raise DeploymentError('too many release assets')
+    previous = verify_release(reuse_release, trusted_key) if reuse_release is not None else None
     bootstrap = manifest['bootstrap']
     target = checked_path(root, bootstrap['file'])
     obtain_file({'size': bootstrap['size'], 'sha256': bootstrap['sha256'],
@@ -79,7 +89,8 @@ def fetch_release(base_url, version, destination, trusted_key):
     for name, checksum in manifest['files'].items():
         target = checked_path(root, name)
         obtain_file({'size': manifest['artifact_sizes'][name], 'sha256': checksum,
-                     'url': asset_prefix(manifest, name, base_url) + quote(Path(name).name, safe='')}, target)
+                     'url': asset_prefix(manifest, name, base_url) + quote(Path(name).name, safe='')}, target,
+                    cache=cached_asset(manifest, name, previous))
     release = verify_release(root, trusted_key)
     print('FETCHED', release['version'], root)
     return root

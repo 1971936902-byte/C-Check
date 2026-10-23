@@ -60,6 +60,8 @@ def main():
     fetch.add_argument('--base-url', required=True)
     fetch.add_argument('--destination', type=Path, required=True)
     fetch.add_argument('--trusted-key', type=Path, required=True)
+    fetch.add_argument('--reuse-release', type=Path,
+                       help='verify an existing signed release and reuse matching unchanged image archive parts')
     package = sub.add_parser('package-verify', help='verify publisher signature and every release file without installing')
     package.add_argument('--release', type=Path, required=True)
     package.add_argument('--trusted-key', type=Path, required=True)
@@ -67,7 +69,7 @@ def main():
     try:
         if args.command == 'fetch':
             from .fetch import fetch_release
-            fetch_release(args.base_url, args.version, args.destination, args.trusted_key)
+            fetch_release(args.base_url, args.version, args.destination, args.trusted_key, reuse_release=args.reuse_release)
             return 0
         if args.command == 'package-verify':
             from .core import verify_release

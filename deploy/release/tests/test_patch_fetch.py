@@ -1,13 +1,30 @@
 from pathlib import Path
 import sys
 import unittest
+import tempfile
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cli'))
 from ccheck.core import DeploymentError
-from ccheck.fetch import asset_prefix
+from ccheck.fetch import asset_prefix, cached_asset
 
 
 class PatchFetchTests(unittest.TestCase):
+    def test_cache_only_reuses_explicit_matching_image_parts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            name = 'images/frontend.tar.gz.part0000'
+            manifest = {'files': {name: 'a'*64}, 'artifact_sizes': {name: 7},
+                        'distribution': {'reused_files': [name]}}
+            previous = {'_root': temporary, 'files': {name: 'a'*64}, 'artifact_sizes': {name: 7}}
+            self.assertEqual(cached_asset(manifest, name, previous), Path(temporary)/name)
+            self.assertIsNone(cached_asset(manifest, name, None))
+            previous['files'][name] = 'b'*64
+            self.assertIsNone(cached_asset(manifest, name, previous))
+            previous['files'][name] = 'a'*64
+            previous['artifact_sizes'][name] = 8
+            self.assertIsNone(cached_asset(manifest, name, previous))
+            self.assertIsNone(cached_asset({'distribution': {}}, 'other', previous))
+
     def test_unchanged_images_are_retrieved_from_signed_base_version(self):
         manifest = {'version': 'v0.1.0-rc.15', 'distribution': {'kind': 'deployment-patch',
                     'base_version': 'v0.1.0-rc.14', 'reused_files': ['images/qwen.tar.gz.part0000']}}

@@ -157,7 +157,7 @@ def validate_model_layout(model, directory):
         raise DeploymentError('model manifest is missing safetensors weights/index')
 
 
-def prepare_models(release, site):
+def prepare_models(release, site, *, persist=True):
     manifest = json.loads(checked_path(release["_root"], "models/model-manifest.json").read_text())
     results = []
     root = Path(site["data_dir"]) / "models"
@@ -177,7 +177,8 @@ def prepare_models(release, site):
         results.append({"key": model["key"], "repository": model["repository"],
                         "revision": model["revision"], "files": files})
         counts = {action: sum(row['action'] == action for row in files) for action in {row['action'] for row in files}}
-        atomic_json(Path(site['data_dir']) / 'state/models.json', results)
+        if persist:
+            atomic_json(Path(site['data_dir']) / 'state/models.json', results)
         print('  model', model['key'], json.dumps(counts), flush=True)
     return results
 

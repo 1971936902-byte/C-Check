@@ -4,11 +4,15 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cli'))
 from ccheck import acceleration, inference, model_migration
 from ccheck.core import DeploymentError
 from ccheck.engine import render_compose
+from ccheck.image_identity import identity, locate
+from ccheck.models import prepare_models
+import hashlib
 
 
 class InferenceTests(unittest.TestCase):
@@ -41,6 +45,23 @@ class InferenceTests(unittest.TestCase):
         self.assertNotIn('qwen_model_revision', self.site)
         self.assertEqual(inference.directory(self.site, 'qwen'), self.root / 'data/models/qwen')
         self.assertEqual(acceleration.qwen_launcher(self.site), 'qwen_gpu.py')
+        images = {key: value['id'] for key, value in release['images'].items()}
+        document = render_compose(self.site, images, 10001, 10001)
+        self.assertNotIn('CCHECK_REVIEW_MODEL', document['services']['api']['environment'])
+        self.assertNotIn('CCHECK_REVIEW_MODEL', document['services']['qwen']['environment'])
+
+    def test_imported_untagged_image_is_found_by_signed_execution_identity(self):
+        metadata = {'Id': 'sha256:' + 'b' * 64, 'Os': 'linux', 'Architecture': 'amd64',
+                    'RootFS': {'Type': 'layers', 'Layers': ['sha256:' + 'c' * 64]}, 'Config': {}}
+        specification = {'id': 'sha256:' + 'a' * 64, 'filesystem_config_sha256': identity(metadata)}
+        def inspect(reference):
+            if reference == specification['id']:
+                raise DeploymentError('OCI index ID absent in legacy store')
+            return metadata
+        with patch('ccheck.image_identity.inspect_image', side_effect=inspect), \
+                patch('ccheck.image_identity.run', return_value=metadata['Id']) as run:
+            self.assertEqual(locate(specification), metadata['Id'])
+            self.assertIn('--all', run.call_args.args[0])
 
     def test_qwen3_storage_is_disjoint_from_legacy_and_jina(self):
         release = self.release(inference.QWEN3, 'b')
@@ -74,6 +95,33 @@ class InferenceTests(unittest.TestCase):
     def test_qwen3_requires_validated_image_not_legacy_runtime_build(self):
         with self.assertRaisesRegex(DeploymentError, 'pinned runtime image'):
             inference.configure(dict(self.site, runtime_source='build'), self.release(inference.QWEN3, 'b'))
+
+    def test_prefetch_new_revision_preserves_legacy_and_active_audit(self):
+        root = Path(self.site['data_dir'])
+        for relative, content in [('models/qwen/config.json', b'old-qwen'),
+                                  ('models/jina/config.json', b'unchanged-jina'),
+                                  ('state/models.json', b'old-active-audit')]:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        cache = self.root/'new-qwen-cache'
+        cache.mkdir()
+        (cache/'config.json').write_bytes(b'new-qwen')
+        release = self.release(inference.QWEN3, 'b')
+        rows = []
+        for key, content in [('qwen', b'new-qwen'), ('jina', b'unchanged-jina')]:
+            rows.append({'key':key, 'repository':key, 'revision':'fixture', 'files':[
+                {'path':'config.json', 'sha256':hashlib.sha256(content).hexdigest(),
+                 'size':len(content), 'url':'https://example.invalid/not-used'}]})
+        (Path(release['_root'])/'models/model-manifest.json').write_text(json.dumps({'models':rows}))
+        inference.configure(self.site, release)
+        self.site.update(model_paths={'qwen':str(cache)}, model_download_policy='offline')
+        with patch('ccheck.models.validate_model_layout'):
+            prepare_models(release, self.site, persist=False)
+        self.assertEqual((root/'models/qwen/config.json').read_bytes(), b'old-qwen')
+        self.assertEqual((inference.directory(self.site,'qwen')/'config.json').read_bytes(), b'new-qwen')
+        self.assertEqual((root/'models/jina/config.json').read_bytes(), b'unchanged-jina')
+        self.assertEqual((root/'state/models.json').read_bytes(), b'old-active-audit')
 
     def test_qwen_only_transition_and_reverse_are_allowed(self):
         old, new = self.release(inference.LEGACY, 'a'), self.release(inference.QWEN3, 'b')

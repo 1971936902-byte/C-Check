@@ -304,6 +304,8 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         if delivery.is_online(release):
             # Network failures must occur before draining a healthy installation.
             delivery.prepare_assets(release, site)
+        prepared_models = prepare_models(release, site, persist=False) if changing_model else None
+        prepared_images = prepare_images(release, site=site) if changing_model else None
         engine = Engine(site)
         previous_site = (root / 'config/site.json').read_bytes()
         previous_compose = engine.file.read_bytes()
@@ -326,11 +328,13 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         preflight(site, release)
         release = cache_release(site, release, trusted_key)
         build = site.get('runtime_source') == 'build'
-        images = prepare_images(release, skip={'qwen'} if build else (), site=site)
+        images = prepared_images if prepared_images is not None else prepare_images(
+            release, skip={'qwen'} if build else (), site=site)
         if build:
             from .runtime import build_runtime
             images['qwen'] = build_runtime(release, site)
-        prepare_models(release, site)
+        if not changing_model:
+            prepare_models(release, site)
         fix_model_permissions(site)
         uid, gid = state['uid'], state['gid']
         document = render_compose(site, images, uid, gid)
@@ -369,6 +373,8 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         from .image_identity import identity, inspect_image
         new['image_identities'] = {name: identity(inspect_image(image)) for name, image in images.items()}
         atomic_json(root / 'state/deployment.json', new)
+        if prepared_models is not None:
+            atomic_json(root / 'state/models.json', prepared_models)
         finish_network_migration(root)
         print('READY', site['web']['public_url'], release['version'])
 

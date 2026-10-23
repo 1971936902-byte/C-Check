@@ -25,9 +25,12 @@ def validate(previous, target):
             raise DeploymentError('signed review model and Qwen repository disagree')
     if previous['schema_epoch'] != target['schema_epoch']:
         raise DeploymentError('Qwen migration cannot change the database schema epoch')
+    if previous['files'].get('core-policy.json') != target['files'].get('core-policy.json'):
+        raise DeploymentError('Qwen migration cannot change the compiled core policy')
     for release in (previous, target):
         if release['files'][release['core_wheel']['file']] != previous['files'][previous['core_wheel']['file']]:
             raise DeploymentError('Qwen-only migration requires unchanged compiled core wheel')
     for name in ('frontend', 'embedding', 'mysql', 'redis', 'qdrant'):
-        if previous['images'][name]['id'] != target['images'][name]['id']:
+        if (previous['images'][name]['id'] != target['images'][name]['id']
+                or previous['images'][name].get('filesystem_config_sha256') != target['images'][name].get('filesystem_config_sha256')):
             raise DeploymentError('Qwen-only migration cannot replace unrelated images: ' + name)

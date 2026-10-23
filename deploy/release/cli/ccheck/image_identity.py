@@ -34,7 +34,7 @@ def locate(specification):
             return metadata['Id']
     except DeploymentError:
         pass
-    for image in set(run(['docker', 'image', 'ls', '--quiet', '--no-trunc']).splitlines()):
+    for image in set(run(['docker', 'image', 'ls', '--all', '--quiet', '--no-trunc']).splitlines()):
         metadata = inspect_image(image)
         if identity(metadata) == specification['filesystem_config_sha256']:
             return metadata['Id']
