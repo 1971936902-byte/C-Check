@@ -432,6 +432,28 @@ class ReleaseTests(unittest.TestCase):
         download.assert_not_called()
         copy_file.assert_not_called()
 
+    def test_preflight_reuses_verified_image_identity_across_storage_formats(self):
+        site, release, image, _ = self.runtime_budget_fixture()
+        site['runtime_source'] = 'image'
+        release['images']['qwen']['filesystem_config_sha256'] = 'd' * 64
+        def engine_run(command):
+            if command[:3] == ['docker', 'image', 'inspect']:
+                raise DeploymentError('OCI index ID not present in legacy image store')
+            if command[:3] == ['docker', 'info', '--format']:
+                return str(self.root)
+            return ''
+        with patch('ccheck.engine.platform.system', return_value='Linux'), \
+                patch('ccheck.engine.platform.machine', return_value='x86_64'), \
+                patch('ccheck.engine.shutil.which', return_value='/test/tool'), \
+                patch('ccheck.engine.shutil.disk_usage', return_value=SimpleNamespace(free=20 * 1024**3)), \
+                patch('ccheck.engine.run', side_effect=engine_run), \
+                patch('ccheck.image_identity.locate', return_value=image) as locate:
+            preflight(site, release)
+            locate.assert_called_once_with(release['images']['qwen'])
+            locate.return_value = None
+            with self.assertRaisesRegex(DeploymentError, 'peak budget'):
+                preflight(site, release)
+
     def test_runtime_recipe_changes_preserve_full_cold_build_budget(self):
         site, release, image, _ = self.runtime_budget_fixture()
         prefix = Path(release['_root']) / 'runtime/qwen'

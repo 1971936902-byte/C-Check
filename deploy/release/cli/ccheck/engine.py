@@ -117,6 +117,10 @@ def preflight(site, release=None):
             try:
                 run(['docker', 'image', 'inspect', spec['id']])
             except DeploymentError:
+                if spec.get('filesystem_config_sha256'):
+                    from .image_identity import locate
+                    if locate(spec):
+                        continue
                 if not (name == 'qwen' and site.get('runtime_source') == 'build'):
                     needed_docker += int(spec.get('size_bytes', 0)) * 2
                     if delivery.is_online(release):
