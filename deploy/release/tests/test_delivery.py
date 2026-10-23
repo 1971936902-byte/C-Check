@@ -163,6 +163,16 @@ class DeliveryTests(unittest.TestCase):
                 'deploy/release/build_online_release.py':'new'})},self.root)
         self.assertEqual(changed,['deploy/release/build_online_release.py'])
 
+    def test_prefetch_refuses_image_expansion_when_shared_disk_budget_is_insufficient(self):
+        cache=Path(self.site['delivery']['cache_dir'])
+        cache.mkdir()
+        self.spec['size_bytes']=4*1024**3
+        with patch('ccheck.image_identity.locate',return_value=None), \
+                patch('ccheck.delivery.run',return_value=str(self.root)), \
+                patch('shutil.disk_usage',return_value=SimpleNamespace(free=3*1024**3)):
+            with self.assertRaisesRegex(DeploymentError,'no services were stopped'):
+                delivery.check_space(self.release,self.site)
+
 
 if __name__=='__main__':
     unittest.main()

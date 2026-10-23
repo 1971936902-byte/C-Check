@@ -186,11 +186,13 @@ def prepare_assets(release, site, *, include_models=True):
     from .engine import prepare_images
     from .models import model_cache_file, obtain_file
     with cache_lock(site):
+        check_space(release, site)
         images = prepare_images(release, site=site, cache_locked=True)
         counts = {}
         if include_models:
             models = json.loads(checked_path(release['_root'], 'models/model-manifest.json').read_text())['models']
             for model in models:
+                print('  prefetch model', model['key'], 'SHA256 verification', flush=True)
                 for entry in model['files']:
                     source = model_cache_file(site, model, entry)
                     action = obtain_file(entry, model_file(site, model, entry), source,
@@ -198,3 +200,19 @@ def prepare_assets(release, site, *, include_models=True):
                     counts[action] = counts.get(action, 0) + 1
     return {'version': release['version'], 'images_verified': sorted(images), 'model_actions': counts,
             'services_started': False, 'cache_dir': settings(site)['cache_dir']}
+
+
+def check_space(release, site):
+    from .image_identity import locate
+    import shutil
+    missing = [spec for spec in release['images'].values() if locate(spec) is None]
+    compressed = sum(part['size'] for spec in missing for part in spec['remote_parts'])
+    expanded = sum(spec.get('size_bytes', 0) * 2 for spec in missing)
+    cache = Path(settings(site)['cache_dir'])
+    docker = Path(run(['docker', 'info', '--format', '{{.DockerRootDir}}']).strip())
+    reserve = 2 * 1024**3
+    if cache.stat().st_dev == docker.stat().st_dev:
+        if shutil.disk_usage(cache).free < compressed + expanded + reserve:
+            raise DeploymentError('insufficient shared disk space for online image download/import; no services were stopped')
+    elif shutil.disk_usage(cache).free < compressed + reserve or shutil.disk_usage(docker).free < expanded + reserve:
+        raise DeploymentError('insufficient cache or Docker disk space for online image download/import; no services were stopped')
