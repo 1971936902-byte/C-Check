@@ -1,0 +1,33 @@
+{
+  "instance": "rtx5880-online",
+  "data_dir": "/home/lyh/c-check-online-instance",
+  "engine": "docker",
+  "profile": "ada-48g-fp8",
+  "gpu": "0",
+  "gpu_access_mode": "cdi",
+  "runtime_source": "image",
+  "performance": {},
+  "delivery": {
+    "cache_dir": "/home/lyh/.cache/c-check-downloads",
+    "offline": false,
+    "registry_mirrors": {}
+  },
+  "model_paths": {
+    "qwen": "/home/lyh/models/Qwen2.5-Coder-32B-Instruct-FP8",
+    "jina": "/home/lyh/models/jina-code-embeddings-1.5b"
+  },
+  "model_download_policy": "online",
+  "license_mode": "evaluation",
+  "backup": {"keep": 3},
+  "network_subnets": {
+    "data": "172.30.20.0/26",
+    "inference": "172.30.20.64/26",
+    "edge": "172.30.20.128/26"
+  },
+  "web": {
+    "bind": "127.0.0.1",
+    "port": 18810,
+    "public_url": "http://127.0.0.1:18810",
+    "exposure": "private"
+  }
+}

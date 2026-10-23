@@ -12,6 +12,7 @@ from .core import DeploymentError, atomic_json, checked_path, digest, gpu_memory
 from .gpu import access_mode, cdi_device, check_identity, configure, NVML_PROBE, probe, validate_inspection
 from .networks import specifications, subnets
 from . import acceleration
+from . import delivery
 
 
 def project_name(site):
@@ -60,6 +61,12 @@ def gateway_snippet(site):
 
 
 def preflight(site, release=None):
+    if release is not None:
+        delivery.validate_release(release)
+        if delivery.is_online(release):
+            site.setdefault('delivery', {})
+        if delivery.is_online(release) and site.get('runtime_source') == 'build':
+            raise DeploymentError('online release uses pinned runtime images, not deployment-time source builds')
     if platform.system() != "Linux" or platform.machine() not in {"x86_64", "amd64"}:
         raise DeploymentError("this release supports Linux/amd64 only")
     for name in ("docker", "openssl", "nvidia-smi"):
@@ -82,11 +89,12 @@ def preflight(site, release=None):
     probe = Path(site["data_dir"])
     while not probe.exists():
         probe = probe.parent
-    if shutil.disk_usage(probe).free < 12 * 1024**3:
-        raise DeploymentError("at least 12 GiB free is required before artifact/model preparation")
+    minimum = 6 if release is not None and delivery.is_online(release) else 12
+    if shutil.disk_usage(probe).free < minimum * 1024**3:
+        raise DeploymentError(f'at least {minimum} GiB free is required before artifact/model preparation')
     if release is not None:
         acceleration.validate_release(site, release)
-        from .models import model_cache_directory, validate_offline_models
+        from .models import model_cache_directory, model_cache_file, validate_offline_models
         validate_offline_models(release, site)
         cached = Path(site['data_dir']) / 'releases' / release['version']
         needed_data = 0 if cached.exists() else sum(release.get('artifact_sizes', {}).values())
@@ -97,7 +105,7 @@ def preflight(site, release=None):
                 target = Path(site['data_dir']) / 'models' / model['key'] / entry['path']
                 if target.is_file() and target.stat().st_size == entry['size']:
                     continue
-                source = checked_path(cache, entry['path']) if cache else None
+                source = model_cache_file(site, model, entry)
                 if (source and source.is_file() and source.stat().st_size == entry['size']
                         and source.stat().st_dev == probe.stat().st_dev and source.stat().st_mode & 0o004):
                     continue
@@ -109,6 +117,8 @@ def preflight(site, release=None):
             except DeploymentError:
                 if not (name == 'qwen' and site.get('runtime_source') == 'build'):
                     needed_docker += int(spec.get('size_bytes', 0)) * 2
+                    if delivery.is_online(release):
+                        needed_data += sum(part['size'] for part in spec['remote_parts'])
         if site.get('runtime_source') == 'build':
             from .runtime import cached_runtime_image
             if cached_runtime_image(release, site) is None:
@@ -179,7 +189,13 @@ def prepare_data(site, release):
     return uid, gid
 
 
-def prepare_images(release, skip=()):
+def prepare_images(release, skip=(), *, site=None, cache_locked=False):
+    delivery.validate_release(release)
+    if delivery.is_online(release) and site is None:
+        raise DeploymentError('online image preparation requires site download configuration')
+    if delivery.is_online(release) and not cache_locked:
+        with delivery.cache_lock(site):
+            return prepare_images(release, skip=skip, site=site, cache_locked=True)
     from .image_identity import locate
     images = {}
     for name, specification in release["images"].items():
@@ -190,7 +206,9 @@ def prepare_images(release, skip=()):
         actual = locate(specification)
         if actual is None:
             imported = True
-            if specification.get("archive_parts"):
+            if delivery.is_online(release):
+                delivery.import_image(specification, site)
+            elif specification.get("archive_parts"):
                 import subprocess
                 with __import__('tempfile').TemporaryFile() as log:
                     process = subprocess.Popen(['docker', 'image', 'load'], stdin=subprocess.PIPE, stdout=log, stderr=log)

@@ -128,7 +128,7 @@ def install(site, release_root, trusted_key, version=None, backup_key=None):
         uid, gid = stage(root, 'prepare-data', lambda: prepare_data(site, release))
         release = stage(root, 'verify-release-cache', lambda: cache_release(site, release, trusted_key))
         build = site.get('runtime_source') == 'build'
-        images = stage(root, 'import-images', lambda: prepare_images(release, skip={'qwen'} if build else ()))
+        images = stage(root, 'import-images', lambda: prepare_images(release, skip={'qwen'} if build else (), site=site))
         if build:
             from .runtime import build_runtime
             images['qwen'] = stage(root, 'prepare-runtime', lambda: build_runtime(release, site))
@@ -287,6 +287,10 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
     networks.preflight(site)
     with installation_lock(root):
         assert_no_pending_network_migration(root)
+        from . import delivery
+        if delivery.is_online(release):
+            # Network failures must occur before draining a healthy installation.
+            delivery.prepare_assets(release, site)
         engine = Engine(site)
         previous_site = (root / 'config/site.json').read_bytes()
         previous_compose = engine.file.read_bytes()
@@ -309,7 +313,7 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         preflight(site, release)
         release = cache_release(site, release, trusted_key)
         build = site.get('runtime_source') == 'build'
-        images = prepare_images(release, skip={'qwen'} if build else ())
+        images = prepare_images(release, skip={'qwen'} if build else (), site=site)
         if build:
             from .runtime import build_runtime
             images['qwen'] = build_runtime(release, site)

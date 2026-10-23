@@ -248,6 +248,16 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(json.loads(self.engine.file.read_text()), previous)
         self.assertEqual(json.loads((self.engine.root / 'state/network-migration.json').read_text())['status'], 'pending')
 
+    def test_online_download_failure_never_drains_or_stops_existing_services(self):
+        with self.cold_update_fixture() as (events, engine, previous), \
+                patch('ccheck.delivery.is_online', return_value=True), \
+                patch('ccheck.delivery.prepare_assets', side_effect=DeploymentError('download failed')):
+            with self.assertRaisesRegex(DeploymentError, 'download failed'):
+                update(self.site, Path('/new'), backup_key=Path('/external-key'))
+            engine.drain.assert_not_called()
+        self.assertEqual(events, [])
+        self.assertEqual(json.loads(self.engine.file.read_text()), previous)
+
 
 if __name__ == '__main__':
     unittest.main()

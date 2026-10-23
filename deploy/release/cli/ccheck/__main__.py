@@ -14,13 +14,16 @@ def main():
     parser = argparse.ArgumentParser(prog='ccheck', description='C-Check signed release deployment manager')
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ['doctor', 'install', 'status', 'version', 'start', 'stop', 'model-start', 'model-stop', 'verify',
-                 'logs', 'backup', 'restore', 'update', 'rollback', 'publish', 'uninstall', 'network-plan', 'network-recover']:
+                 'logs', 'backup', 'restore', 'update', 'rollback', 'publish', 'uninstall', 'network-plan', 'network-recover',
+                 'download-plan', 'prepare-assets']:
         command = sub.add_parser(name)
         command.add_argument('--config', required=True, type=Path, help='site YAML/JSON configuration')
-        if name in {'install', 'update', 'rollback'}:
+        if name in {'install', 'update', 'rollback', 'download-plan', 'prepare-assets'}:
             command.add_argument('--release', type=Path, default=Path(sys.argv[0]).resolve().parent.parent)
             command.add_argument('--version')
             command.add_argument('--trusted-key', type=Path)
+        if name == 'prepare-assets':
+            command.add_argument('--images-only', action='store_true')
         if name == 'install':
             command.add_argument('--runtime-source', choices=['image', 'build'])
             command.add_argument('--backup-key', type=Path)
@@ -74,16 +77,30 @@ def main():
             saved = load_site(root / 'config/site.json')
             if saved['instance'] != site['instance']:
                 raise DeploymentError('configuration does not match installed instance')
-            if args.command != 'install':
+            if args.command not in {'install', 'download-plan', 'prepare-assets', 'update'}:
                 site = saved
-            elif args.runtime_source is None:
+            elif args.command == 'update':
+                delivery = site.get('delivery')
+                site = saved
+                if delivery is not None:
+                    site['delivery'] = delivery
+            elif args.command == 'install' and args.runtime_source is None:
                 site['runtime_source'] = saved.get('runtime_source', 'image')
         if args.command in {'install', 'update'} and args.performance_profile:
             if args.performance_profile == 'shared-gpu':
                 site['performance'] = {}
             else:
                 site.pop('performance', None)
-        if args.command == 'doctor':
+        if args.command in {'download-plan', 'prepare-assets'}:
+            from .core import verify_release
+            from .delivery import plan, prepare_assets
+            trusted = args.trusted_key or root / 'config/publisher.pem'
+            release = verify_release(args.release, trusted)
+            site.setdefault('delivery', {})
+            result = plan(release, site) if args.command == 'download-plan' else prepare_assets(
+                release, site, include_models=not args.images_only)
+            print(json.dumps(result, indent=2))
+        elif args.command == 'doctor':
             print(json.dumps(doctor(site), indent=2))
         elif args.command == 'install':
             if args.gpu_access_mode:

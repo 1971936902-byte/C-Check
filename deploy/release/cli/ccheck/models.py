@@ -20,8 +20,23 @@ def model_cache_directory(site, model):
     return None
 
 
+def model_cache_file(site, model, entry):
+    if site.get('delivery') is not None:
+        from .delivery import model_file
+        prepared = model_file(site, model, entry)
+        if prepared.is_file() and prepared.stat().st_size == entry['size']:
+            return prepared
+    root = model_cache_directory(site, model)
+    return checked_path(root, entry['path']) if root else None
+
+
+def allow_model_download(site):
+    from .delivery import settings
+    return site.get('model_download_policy', 'online') != 'offline' and not settings(site)['offline']
+
+
 def validate_offline_models(release, site):
-    if site.get('model_download_policy', 'online') != 'offline':
+    if allow_model_download(site):
         return
     manifest = json.loads(checked_path(release['_root'], 'models/model-manifest.json').read_text())
     for model in manifest['models']:
@@ -31,6 +46,9 @@ def validate_offline_models(release, site):
             candidates = [installed]
             if cache:
                 candidates.append(checked_path(cache, entry['path']))
+            prepared = model_cache_file(site, model, entry)
+            if prepared:
+                candidates.append(prepared)
             if not any(p.is_file() and p.stat().st_size == entry['size'] and digest(p) == entry['sha256']
                        for p in candidates):
                 raise DeploymentError('offline model missing or differs from signed version: ' + model['key'] +
@@ -148,9 +166,9 @@ def prepare_models(release, site):
         destination.mkdir(mode=0o700, parents=True, exist_ok=True)
         def one(entry):
             target = checked_path(destination, entry["path"])
-            cached = checked_path(cache_root, entry["path"]) if cache_root else None
+            cached = model_cache_file(site, model, entry)
             result = obtain_file(entry, target, cached,
-                                 allow_download=site.get('model_download_policy', 'online') != 'offline')
+                                 allow_download=allow_model_download(site))
             return {"path": entry["path"], "action": result, "sha256": entry["sha256"]}
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             files = list(pool.map(one, model["files"]))
