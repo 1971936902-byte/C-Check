@@ -11,6 +11,7 @@ import time
 from .core import DeploymentError, atomic_json, checked_path, digest, gpu_memory_fraction, run
 from .gpu import access_mode, cdi_device, check_identity, configure, NVML_PROBE, probe, validate_inspection
 from .networks import specifications, subnets
+from . import acceleration
 
 
 def project_name(site):
@@ -79,6 +80,7 @@ def preflight(site, release=None):
     if shutil.disk_usage(probe).free < 12 * 1024**3:
         raise DeploymentError("at least 12 GiB free is required before artifact/model preparation")
     if release is not None:
+        acceleration.validate_release(site, release)
         from .models import model_cache_directory, validate_offline_models
         validate_offline_models(release, site)
         cached = Path(site['data_dir']) / 'releases' / release['version']
@@ -168,6 +170,7 @@ def prepare_data(site, release):
     if not database_file.is_file() or database_file.stat().st_mode & 0o077:
         raise DeploymentError('database URL secret must be a regular owner-only file')
     atomic_json(root / "config/site.json", site)
+    acceleration.prepare(site)
     return uid, gid
 
 
@@ -214,7 +217,7 @@ def prepare_images(release, skip=()):
 
 def render_compose(site, images, uid, gid):
     root = Path(site["data_dir"])
-    memory_fraction = gpu_memory_fraction(site['profile'])
+    memory_fraction = acceleration.memory_fraction(site)
     secret_names = ("mysql_password", "mysql_root_password", "database_url", "jwt_secret", "admin_password", "vllm_api_key", "embedding_api_key")
     env = {
         "DATABASE_URL_FILE": "/run/secrets/database_url", "REDIS_URL": "redis://redis:6379/0",
@@ -300,11 +303,33 @@ def render_compose(site, images, uid, gid):
                 shm_size="1g",
                 healthcheck=health(["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=5)"], start="300s"))
     configure(qwen, site)
+    performance = acceleration.settings(site)
+    if performance:
+        for target in (api, worker, init):
+            target['environment'] = dict(target['environment'],
+                MODEL_CHUNK_CONCURRENCY=str(performance['model_chunk_concurrency']),
+                RAG_EMBEDDING_BATCH_SIZE=str(performance['embedding_batch_size']))
+        qwen['entrypoint'] = ['python', '/opt/ccheck-launcher.py']
+        qwen['environment'].update(MAX_NUM_SEQS=str(performance['max_num_seqs']),
+            MAX_NUM_BATCHED_TOKENS=str(performance['max_num_batched_tokens']))
+        qwen['volumes'].append(bind(acceleration.launcher_path(site, 'qwen_gpu.py'), '/opt/ccheck-launcher.py', True))
+        if acceleration.gpu_embedding(site):
+            embedding['image'] = images['qwen']
+            embedding['entrypoint'] = ['python', '-m', 'uvicorn', 'ccheck_embedding:app',
+                '--app-dir', '/opt/ccheck-runtime', '--host', '0.0.0.0', '--port', '8002', '--workers', '1']
+            embedding['volumes'].append(bind(acceleration.launcher_path(site, 'embedding_gpu.py'),
+                '/opt/ccheck-runtime/ccheck_embedding.py', True))
+            embedding['environment'].update(EMBEDDING_BATCH_SIZE=str(performance['embedding_batch_size']),
+                EMBEDDING_TOKEN_BUDGET=str(performance['embedding_token_budget']),
+                NVIDIA_DRIVER_CAPABILITIES='compute,utility', PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True')
+            configure(embedding, site)
     frontend = service("frontend", "256m", 1, ["edge"], user=False)
     frontend.update(user="101:101", ports=[f"{site['web']['bind']}:{site['web']['port']}:8080"],
                     tmpfs=["/tmp:size=16777216,mode=1777", "/var/cache/nginx:size=16777216,uid=101,gid=101", "/var/run:size=1048576,uid=101,gid=101"],
                     healthcheck=health(["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]))
     for isolated in (worker, init, mysql, redis, qdrant, embedding, frontend):
+        if isolated is embedding and acceleration.gpu_embedding(site):
+            continue
         isolated['runtime'] = 'runc'
         isolated['environment'] = dict(isolated.get('environment', {}), NVIDIA_VISIBLE_DEVICES='void')
     return {"name": project_name(site), "services": {"mysql": mysql, "redis": redis, "qdrant": qdrant,
@@ -370,23 +395,23 @@ class Engine:
             raise DeploymentError('GPU has active compute workloads; prepared artifacts are retained, coordinate a free GPU slot before retrying')
         memory = run(['nvidia-smi', '-i', str(self.site['gpu']), '--query-gpu=memory.free,memory.total',
                       '--format=csv,noheader,nounits']).strip().split(',')
-        fraction = gpu_memory_fraction(self.site['profile'])
+        fraction = acceleration.memory_fraction(self.site)
         if float(memory[0]) < float(memory[1]) * fraction:
             raise DeploymentError('GPU memory is below the selected profile budget; no processes were killed')
 
     def check_gpu_access(self):
         services = json.loads(self.file.read_text())['services']
         results = {}
-        for name in ('qwen', 'api'):
+        for name in (('qwen', 'api', 'embedding') if acceleration.gpu_embedding(self.site) else ('qwen', 'api')):
             spec = services[name]
             uid, gid = map(int, spec['user'].split(':'))
-            results[name] = probe(self.site, spec['image'], cuda=name == 'qwen', uid=uid, gid=gid)
+            results[name] = probe(self.site, spec['image'], cuda=name in {'qwen', 'embedding'}, uid=uid, gid=gid)
         atomic_json(self.root / 'state/gpu-access.json', results)
         return results
 
     def verify_gpu_access(self):
         result = {}
-        for name in ('qwen', 'api'):
+        for name in (('qwen', 'api', 'embedding') if acceleration.gpu_embedding(self.site) else ('qwen', 'api')):
             container = self.compose('ps', '-q', name).strip()
             if not container:
                 raise DeploymentError('GPU service container is missing: ' + name)
@@ -394,6 +419,12 @@ class Engine:
             validate_inspection(self.site, inspection, True)
             output = self.compose('exec', '-T', name, 'python', '-c', NVML_PROBE)
             result[name] = check_identity(self.site, output)
+            if name == 'embedding':
+                health = json.loads(self.compose('exec', '-T', name, 'python', '-c',
+                    "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8002/health').read().decode())"))
+                if health.get('device') != 'cuda:0' or health.get('dtype') != 'torch.bfloat16' or health.get('dimension') != 1536:
+                    raise DeploymentError('embedding service is not using the verified CUDA BF16 recipe')
+                result[name]['embedding_health'] = health
         return result
 
     def drain(self, timeout=600):

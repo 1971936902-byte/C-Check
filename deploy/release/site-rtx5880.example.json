@@ -11,6 +11,15 @@
     "edge": "172.30.10.128/26"
   },
   "runtime_source": "image",
+  "performance": {
+    "embedding_device": "cuda",
+    "qwen_gpu_memory_utilization": 0.82,
+    "max_num_seqs": 2,
+    "max_num_batched_tokens": 8192,
+    "model_chunk_concurrency": 2,
+    "embedding_batch_size": 1,
+    "embedding_token_budget": 8192
+  },
   "model_paths": {
     "qwen": "/home/lyh/models/Qwen2.5-Coder-32B-Instruct-FP8",
     "jina": "/home/lyh/models/jina-code-embeddings-1.5b"

@@ -11,6 +11,7 @@ from .engine import Engine, preflight, prepare_data, prepare_images, project_nam
 from .models import prepare_models, verify_models
 from .gpu import validate_inspection
 from . import networks
+from . import acceleration
 
 
 def installed(site):
@@ -79,10 +80,20 @@ def start_stack(engine):
     engine.wait(['mysql', 'redis', 'qdrant'])
     wait_data_services(engine)
     engine.management('migrate')
+    acceleration.verify(engine.site)
+    if acceleration.gpu_embedding(engine.site):
+        # Stop only this project's models before re-budgeting the shared GPU.
+        engine.compose('stop', '--timeout', '120', 'qwen', 'embedding')
     engine.check_gpu_admission()
     engine.check_gpu_access()
-    engine.compose('up', '-d', 'qwen', 'embedding')
-    engine.wait(['qwen', 'embedding'])
+    if acceleration.gpu_embedding(engine.site):
+        engine.compose('up', '-d', 'qwen')
+        engine.wait(['qwen'])
+        engine.compose('up', '-d', 'embedding')
+        engine.wait(['embedding'])
+    else:
+        engine.compose('up', '-d', 'qwen', 'embedding')
+        engine.wait(['qwen', 'embedding'])
     engine.compose('up', '-d', 'api', 'worker', 'frontend')
     engine.wait(['api', 'worker', 'frontend'])
     engine.verify_gpu_access()
@@ -169,12 +180,14 @@ def verify(site, *, fresh=False):
     state = installed(site)
     root = Path(site['data_dir'])
     release = verify_release(state['release_root'], root / 'config/publisher.pem', state['publisher'])
+    acceleration.validate_release(site, release)
     engine = Engine(site)
     engine.wait(['mysql', 'redis', 'qdrant', 'qwen', 'embedding', 'api', 'worker', 'frontend'], timeout=120)
     expected = state['images']
     if digest(root / 'config/site.json') != state['site_sha256']:
         raise DeploymentError('site configuration changed outside ccheck publish/update')
     canonical = render_compose(site, expected, state['uid'], state['gid'])
+    acceleration.verify(site)
     if json.loads(engine.file.read_text()) != canonical:
         raise DeploymentError('managed Compose configuration deviates from the deployment recipe')
     for image, spec in release['images'].items():
@@ -187,6 +200,8 @@ def verify(site, *, fresh=False):
     rows = json.loads(engine.compose('config', '--format', 'json'))
     for service, specification in rows['services'].items():
         image = 'backend' if service in {'api', 'worker', 'init'} else service
+        if service == 'embedding' and acceleration.gpu_embedding(site):
+            image = 'qwen'
         if specification['image'] != expected[image]:
             raise DeploymentError('compose image deviated from installed release: ' + service)
         if service == 'init':
@@ -201,7 +216,7 @@ def verify(site, *, fresh=False):
         if identity(inspect_image(actual)) != state['image_identities'][image]:
             raise DeploymentError('running image filesystem/config identity deviated: ' + service)
         host = inspection['HostConfig']
-        validate_inspection(site, inspection, service in {'api', 'qwen'})
+        validate_inspection(site, inspection, service in {'api', 'qwen'} or (service == 'embedding' and acceleration.gpu_embedding(site)))
         if host.get('Privileged') or host['ReadonlyRootfs'] != canonical['services'][service]['read_only'] or host['NetworkMode'] == 'host':
             raise DeploymentError('running container isolation deviated: ' + service)
         spec = canonical['services'][service]

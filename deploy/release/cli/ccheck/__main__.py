@@ -26,6 +26,8 @@ def main():
             command.add_argument('--backup-key', type=Path)
         if name in {'install', 'update'}:
             command.add_argument('--gpu-access-mode', choices=['legacy', 'cdi'])
+            command.add_argument('--performance-profile', choices=['shared-gpu', 'cpu-serial'],
+                                 help='explicitly enable shared-GPU embedding or restore the legacy CPU serial recipe')
         if name == 'update':
             command.add_argument('--cold-network-migration', action='store_true',
                                  help='stop this project and cold-backup when old network prevents healthy service access')
@@ -76,6 +78,11 @@ def main():
                 site = saved
             elif args.runtime_source is None:
                 site['runtime_source'] = saved.get('runtime_source', 'image')
+        if args.command in {'install', 'update'} and args.performance_profile:
+            if args.performance_profile == 'shared-gpu':
+                site['performance'] = {}
+            else:
+                site.pop('performance', None)
         if args.command == 'doctor':
             print(json.dumps(doctor(site), indent=2))
         elif args.command == 'install':

@@ -477,6 +477,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_start_waits_for_application_data_connections_before_migration(self):
         engine = MagicMock()
+        engine.site = {}
         engine.management.side_effect = [DeploymentError('initializing'), '{}', '', '']
         with patch('ccheck.lifecycle.time.monotonic', side_effect=[0, 0.5]), \
                 patch('ccheck.lifecycle.time.sleep') as sleep, \

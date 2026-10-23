@@ -1,4 +1,4 @@
-"""CPU-only deployment tooling repack; never builds or tests runtime images."""
+"""Repack signed deployment recipes; reuse image identities without rebuilding."""
 import argparse
 import copy
 import errno
@@ -194,16 +194,27 @@ def repack(args):
     if any(destination.is_relative_to(source) for destination in (output, patch) for source in inputs):
         raise RuntimeError('outputs must be outside source and base release')
     key = signing_key(args.signing_key, inputs + [args.yaml_package, output, patch])
-    if args.version != 'v0.1.0-rc.15':
-        raise RuntimeError('this repacker requires version v0.1.0-rc.15')
+    if args.version not in {'v0.1.0-rc.15', 'v0.1.0-rc.16'}:
+        raise RuntimeError('this repacker requires version v0.1.0-rc.15 or v0.1.0-rc.16')
+    accelerated = args.version == 'v0.1.0-rc.16'
     base = verify_release(base_root, args.trusted_key)
-    if base['version'] != 'v0.1.0-rc.14':
-        raise RuntimeError('base release must be v0.1.0-rc.14')
+    if base['version'] != ('v0.1.0-rc.15' if accelerated else 'v0.1.0-rc.14'):
+        raise RuntimeError('base release version does not match this patch')
     # Parse again with duplicate-key rejection after cryptographic verification.
     read_json(base_root / 'release.json')
     source = verify_source(root, committed=True)
     changed = approved_sources(base, source, args.base_source, Path(__file__).resolve().parents[2])
-    validation_report(args.validation_report, source)
+    report = validation_report(args.validation_report, source)
+    if accelerated and (report.get('gpu_tested') is not True or report.get('gpu_integration', {}).get('passed') is not True):
+        raise RuntimeError('rc16 requires new GPU integration evidence, not inherited GPU validation')
+    if accelerated:
+        gpu = report['gpu_integration']
+        launchers = {name: source['files']['deploy/release/cli/ccheck/launchers/' + name]
+                     for name in ('qwen_gpu.py', 'embedding_gpu.py')}
+        if (gpu.get('launcher_sha256') != launchers or gpu.get('original_services_restored') is not True
+                or gpu.get('embedding', {}).get('semantic_ranking_passed') is not True
+                or gpu.get('qwen', {}).get('two_requests_completed') is not True):
+            raise RuntimeError('rc16 GPU evidence does not cover these exact launchers and recovery')
     if 'verify/build-gates.json' not in base['files']:
         raise RuntimeError('signed baseline build gates are required')
     for name in ('ccheck', 'install.sh', 'build_cli.py', 'INSTALL-RTX5880.template.md',
@@ -236,9 +247,12 @@ def repack(args):
         'Requires Python 3.10+, OpenSSL 3, Docker Compose and NVIDIA GPU container support. '
         'Verify publisher.pem against an independent trust anchor before installation. '
         'See INSTALL-RTX5880.md and models/ notices. '
-        'Images, models and core wheel are reused unchanged from ' + base['version'] + '. '
-        'Only CPU deployment tooling tests were run for this repack. '
-        'verify/build-gates.json is historical baseline evidence; no new GPU acceptance was performed.\n',
+        'Images, models and core wheel are reused unchanged from ' + base['version'] + '. ' +
+        ('Signed launchers enable optional GPU embedding and bounded Qwen concurrency. '
+         'See verify/deployment-tooling.json for exact GPU test hardware and scope; '
+         'target RTX5880 installation acceptance remains required.\n' if accelerated else
+         'Only CPU deployment tooling tests were run for this repack. '
+         'verify/build-gates.json is historical baseline evidence; no new GPU acceptance was performed.\n'),
         encoding='utf-8')
     (output / 'verify').mkdir(exist_ok=True)
     shutil.copy2(args.validation_report, output / 'verify/deployment-tooling.json')
@@ -264,10 +278,18 @@ def repack(args):
         'kind': 'deployment-patch', 'base_version': base['version'],
         'base_release_sha256': base['_sha256'],
         'reused_files': sorted(name for name in files if name.startswith('images/'))}
+    if accelerated:
+        inherited = base.get('distribution', {})
+        if inherited.get('kind') != 'deployment-patch' or set(inherited.get('reused_files', [])) != set(release['distribution']['reused_files']):
+            raise RuntimeError('rc16 requires a complete signed original image provenance')
+        release['distribution'].update(base_version=inherited['base_version'],
+            base_release_sha256=inherited['base_release_sha256'],
+            upgrade_from_version=base['version'], upgrade_from_sha256=base['_sha256'])
     release['artifact_reuse'] = {
         'release_sha256': base['_sha256'], 'version': base['version'], 'source': base['source'],
         'images': sorted(base['images']), 'core_wheel': 'unchanged', 'models': 'unchanged',
-        'reason': 'CPU-only deployment tooling repack; all runtime artifacts reused unchanged',
+        'reason': ('Signed GPU launcher recipe; all images and model weights reused unchanged' if accelerated else
+                   'CPU-only deployment tooling repack; all runtime artifacts reused unchanged'),
         'changed_source_files': changed, 'previous': base.get('artifact_reuse')}
     release['validation'] = {
         'deployment_tooling': {'report': 'verify/deployment-tooling.json', 'passed': True,
@@ -277,6 +299,12 @@ def repack(args):
                 'release_sha256': base['_sha256'], 'report': 'verify/build-gates.json',
                 'note': 'Historical baseline GPU evidence, not testing of this repack'},
         'inherited_metadata': base.get('validation')}
+    if accelerated:
+        release['runtime_launchers'] = {name: digest(root / 'deploy/release/cli/ccheck/launchers' / name)
+                                       for name in ('qwen_gpu.py', 'embedding_gpu.py')}
+        release['validation']['deployment_tooling']['scope'] = 'Tooling, network integration and signed GPU launcher recipe'
+        release['validation']['gpu'] = {'tested_this_release': True, 'report': 'verify/deployment-tooling.json',
+            'scope': report['gpu_integration'], 'target_rtx5880_tested': False}
     write_json(output / 'release.json', release)
     subprocess.run(['openssl', 'pkeyutl', '-sign', '-inkey', str(key), '-rawin', '-in',
                     str(output / 'release.json'), '-out', str(output / 'release.sig')], check=True)
