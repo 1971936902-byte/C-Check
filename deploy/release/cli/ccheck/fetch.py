@@ -9,6 +9,19 @@ from .core import DeploymentError, atomic_json, checked_path, run, verify_releas
 from .models import obtain_file
 
 
+def asset_prefix(manifest, name, base_url):
+    version = manifest['version']
+    distribution = manifest.get('distribution') or {}
+    if name in distribution.get('reused_files', []):
+        previous = distribution.get('base_version', '')
+        if (distribution.get('kind') != 'deployment-patch' or not name.startswith('images/')
+                or not re.fullmatch(r'v\d+\.\d+\.\d+(?:-rc\.\d+)?', previous)
+                or previous == version):
+            raise DeploymentError('invalid signed patch artifact source')
+        version = previous
+    return base_url.rstrip('/') + '/release-' + version + '/'
+
+
 def fetch_release(base_url, version, destination, trusted_key):
     origin = urlsplit(base_url)
     if origin.scheme != 'https' or not origin.netloc or origin.username or origin.query or origin.fragment:
@@ -66,7 +79,7 @@ def fetch_release(base_url, version, destination, trusted_key):
     for name, checksum in manifest['files'].items():
         target = checked_path(root, name)
         obtain_file({'size': manifest['artifact_sizes'][name], 'sha256': checksum,
-                     'url': prefix + quote(Path(name).name, safe='')}, target)
+                     'url': asset_prefix(manifest, name, base_url) + quote(Path(name).name, safe='')}, target)
     release = verify_release(root, trusted_key)
     print('FETCHED', release['version'], root)
     return root

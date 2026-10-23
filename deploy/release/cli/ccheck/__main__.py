@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(prog='ccheck', description='C-Check signed release deployment manager')
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ['doctor', 'install', 'status', 'version', 'start', 'stop', 'model-start', 'model-stop', 'verify',
-                 'logs', 'backup', 'restore', 'update', 'rollback', 'publish', 'uninstall']:
+                 'logs', 'backup', 'restore', 'update', 'rollback', 'publish', 'uninstall', 'network-plan', 'network-recover']:
         command = sub.add_parser(name)
         command.add_argument('--config', required=True, type=Path, help='site YAML/JSON configuration')
         if name in {'install', 'update', 'rollback'}:
@@ -23,6 +23,7 @@ def main():
             command.add_argument('--trusted-key', type=Path)
         if name == 'install':
             command.add_argument('--runtime-source', choices=['image', 'build'])
+            command.add_argument('--backup-key', type=Path)
         if name in {'install', 'update'}:
             command.add_argument('--gpu-access-mode', choices=['legacy', 'cdi'])
         if name in {'backup', 'restore', 'update', 'rollback'}:
@@ -82,7 +83,12 @@ def main():
             trusted = args.trusted_key
             if trusted is None:
                 trusted = root / 'config/publisher.pem'
-            lifecycle.install(site, args.release, trusted, args.version)
+            lifecycle.install(site, args.release, trusted, args.version, backup_key=args.backup_key)
+        elif args.command == 'network-plan':
+            from .networks import preflight as network_preflight
+            print(json.dumps(network_preflight(site), indent=2))
+        elif args.command == 'network-recover':
+            lifecycle.recover_network(site)
         elif args.command in {'update', 'rollback'}:
             if args.command == 'update' and args.gpu_access_mode:
                 site['gpu_access_mode'] = args.gpu_access_mode

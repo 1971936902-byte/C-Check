@@ -10,6 +10,7 @@ import time
 
 from .core import DeploymentError, atomic_json, checked_path, digest, gpu_memory_fraction, run
 from .gpu import access_mode, cdi_device, check_identity, configure, NVML_PROBE, probe, validate_inspection
+from .networks import specifications, subnets
 
 
 def project_name(site):
@@ -122,6 +123,7 @@ def preflight(site, release=None):
 
 
 def prepare_data(site, release):
+    site['network_subnets'] = subnets(site)
     root = Path(site["data_dir"])
     owner = checked_path(root, "state/owner.json")
     expected = {"instance": site["instance"], "root": str(root)}
@@ -308,7 +310,7 @@ def render_compose(site, images, uid, gid):
     return {"name": project_name(site), "services": {"mysql": mysql, "redis": redis, "qdrant": qdrant,
             "embedding": embedding, "qwen": qwen, "api": api, "worker": worker, "frontend": frontend, "init": init},
             "secrets": {name: {"file": str(root / "secrets" / name)} for name in secret_names},
-            "networks": {"data": {"internal": True}, "inference": {"internal": True}, "edge": {}}}
+            "networks": specifications(site)}
 
 
 class Engine:

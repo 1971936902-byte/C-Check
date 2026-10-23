@@ -129,6 +129,20 @@ sudo /usr/bin/python3 "$PKG/cli/ccheck.pyz" install \
 
 ## 5. 管理与限制
 
+### rc.15 固定网段与迁移
+
+rc.15 默认 data=`172.30.10.0/26`、inference=`172.30.10.64/26`、edge=`172.30.10.128/26`；这是子网，不是固定每个容器的 IP。前两个网络仍为内部网络，服务名不变。生成、持久化配置和运行时检查使用相同规则。不得仅手改旧 Compose 绕过校验。
+
+先使用新版 CLI 执行 `network-plan --config /绝对路径/site.json`。它只读取 Docker 网络和 IPv4 路由，拒绝与其他项目、LAN/VPN 冲突的网段；不自动换网段或修改宿主路由。若有多个实例或实际冲突，可在外置配置中设置完整的 `network_subnets` 三项，并由管理员确认。已部署实例默认使用已保存配置，不通过编辑外置文件静默改网段。
+
+已有 rc.14 部署使用 `update --backup-key /独立路径/备份密钥`。旧安装尚未完成时使用 `install --backup-key /独立路径/备份密钥`；发现已有网络需要迁移且未提供密钥时，会在停止服务前拒绝继续。网络迁移会暂停并仅重建本项目的容器与网络，不使用 `down -v` 或网络 prune，不删除模型、上传、数据库或凭据。完整实例先做加密一致性备份，部分安装先停止本项目写入者再做加密冷备。
+
+备份密钥与发布签名密钥是两种密钥。备份密钥须是独立保存、权限 600 的十六进制文本（例如 `openssl rand -hex 48` 的输出）；妥善离机保管，不使用或复制发布签名私钥。
+
+若断电或中断后检测到 `state/network-migration.json` 为 pending，新版 CLI 会拒绝 start/install/update。使用 `network-recover --config /绝对路径/site.json` 尝试恢复原容器/网络配方，再检查后重试。恢复不回写数据库备份，不删除数据，且保持提交暂停；恢复原 rc.14 时须使用 rc.14 CLI 做版本一致性验证。原配方自动分配子网时，恢复后的地址可能由 Docker 重新分配。恢复也失败时保留维护状态、日志和备份，禁止通过删除迁移标记强行绕过。
+
+本次是部署工具补丁，沿用 rc.14 镜像及模型。完整 `fetch` 可从 rc.14 Release 下载未变化的镜像分片；已有完整 rc.14 包时推荐按 Release 附带的增量说明只下载约 5MB，再核验全包。历史 GPU 门禁不是本次新增 GPU 验收，目标机仍须完成真实安装验收。
+
 ```bash
 sudo /usr/bin/python3 "$PKG/cli/ccheck.pyz" status --config "$HOME/c-check-site.json"
 sudo /usr/bin/python3 "$PKG/cli/ccheck.pyz" verify --config "$HOME/c-check-site.json" --fresh

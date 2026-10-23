@@ -479,7 +479,8 @@ class ReleaseTests(unittest.TestCase):
         engine = MagicMock()
         engine.management.side_effect = [DeploymentError('initializing'), '{}', '', '']
         with patch('ccheck.lifecycle.time.monotonic', side_effect=[0, 0.5]), \
-                patch('ccheck.lifecycle.time.sleep') as sleep:
+                patch('ccheck.lifecycle.time.sleep') as sleep, \
+                patch('ccheck.lifecycle.networks.verify'):
             start_stack(engine)
         self.assertEqual([call.args[0] for call in engine.management.call_args_list],
                          ['data-health', 'data-health', 'migrate', 'register-model'])

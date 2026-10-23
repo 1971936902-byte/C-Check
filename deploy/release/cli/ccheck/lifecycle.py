@@ -7,9 +7,10 @@ import time
 
 from .acceptance import acceptance
 from .core import DeploymentError, atomic_json, checked_path, digest, installation_lock, stage, verify_release
-from .engine import Engine, preflight, prepare_data, prepare_images, render_compose
+from .engine import Engine, preflight, prepare_data, prepare_images, project_name, render_compose
 from .models import prepare_models, verify_models
 from .gpu import validate_inspection
+from . import networks
 
 
 def installed(site):
@@ -85,10 +86,11 @@ def start_stack(engine):
     engine.compose('up', '-d', 'api', 'worker', 'frontend')
     engine.wait(['api', 'worker', 'frontend'])
     engine.verify_gpu_access()
+    networks.verify(engine)
     engine.management('register-model')
 
 
-def install(site, release_root, trusted_key, version=None):
+def install(site, release_root, trusted_key, version=None, backup_key=None):
     old = None
     root = Path(site['data_dir'])
     if (root / 'state/deployment.json').exists():
@@ -99,7 +101,19 @@ def install(site, release_root, trusted_key, version=None):
     if old and old['release_sha256'] != release['_sha256']:
         raise DeploymentError('use update for a different release; install never silently upgrades')
     preflight(site, release)
+    networks.preflight(site)
     with installation_lock(root, create=True):
+        previous_site = json.loads((root / 'config/site.json').read_text()) if (root / 'config/site.json').exists() else None
+        previous_compose = json.loads((root / 'state/compose.json').read_text()) if (root / 'state/compose.json').exists() else None
+        assert_no_pending_network_migration(root)
+        initial_migration = previous_compose is not None and networks.needs_recreate(Engine(site), render_compose(site,
+                old['images'] if old else {name: value['id'] for name, value in release['images'].items()}, 10001, 10001))
+        if initial_migration:
+            if backup_key is None:
+                raise DeploymentError('network migration of an existing instance requires --backup-key; data and credentials were not reset')
+            from .backup import key_material
+            key_material(backup_key)
+            begin_network_migration(Engine(site), previous_site, previous_compose, old)
         uid, gid = stage(root, 'prepare-data', lambda: prepare_data(site, release))
         release = stage(root, 'verify-release-cache', lambda: cache_release(site, release, trusted_key))
         build = site.get('runtime_source') == 'build'
@@ -112,7 +126,21 @@ def install(site, release_root, trusted_key, version=None):
         engine = Engine(site)
         if old:
             stage(root, 'drain', engine.drain)
-        atomic_json(engine.file, render_compose(site, images, uid, gid))
+        document = render_compose(site, images, uid, gid)
+        migrating = previous_compose is not None and networks.needs_recreate(engine, document)
+        if migrating:
+            begin_network_migration(engine, previous_site, previous_compose, old)
+            engine.maintenance(True)
+            engine.compose('stop', '--timeout', '120')
+            from .backup import make_backup
+            from .image_identity import identity, inspect_image
+            backup_state = old or {'version': 'partial-install', 'release_sha256': None,
+                'schema_epoch': release['schema_epoch'], 'images': images, 'uid': uid, 'gid': gid,
+                'model_manifest_sha256': release['files']['models/model-manifest.json'],
+                'image_identities': {name: identity(inspect_image(image)) for name, image in images.items()}}
+            stage(root, 'cold-backup', lambda: make_backup(site, backup_state, backup_key, locked=True, cold=True))
+            networks.teardown(engine)
+        atomic_json(engine.file, document)
         stage(root, 'start-services', lambda: start_stack(engine))
         engine.maintenance(False)
         try:
@@ -130,6 +158,7 @@ def install(site, release_root, trusted_key, version=None):
         from .image_identity import identity, inspect_image
         deployment['image_identities'] = {name: identity(inspect_image(image)) for name, image in images.items()}
         atomic_json(root / 'state/deployment.json', deployment)
+        finish_network_migration(root)
         print('READY local application verified; configured origin:', site['web']['public_url'], release['version'])
         print('External DNS/gateway/NAT reachability still requires verification from an actual client.')
         print('Initial administrator: admin; password file:', root / 'secrets/admin_password')
@@ -176,6 +205,7 @@ def verify(site, *, fresh=False):
         if host.get('Privileged') or host['ReadonlyRootfs'] != canonical['services'][service]['read_only'] or host['NetworkMode'] == 'host':
             raise DeploymentError('running container isolation deviated: ' + service)
         spec = canonical['services'][service]
+        networks.verify_container(engine, spec, inspection, canonical)
         if spec.get('user') and inspection['Config']['User'] != spec['user']:
             raise DeploymentError('running container user deviated: ' + service)
         if set(host.get('CapDrop') or []) != set(spec.get('cap_drop') or []):
@@ -194,6 +224,7 @@ def verify(site, *, fresh=False):
         if expected_binds:
             raise DeploymentError('expected container bind mount missing: ' + service)
     engine.verify_gpu_access()
+    networks.verify(engine)
     verify_models(release, site)
     result = acceptance(site, release, engine, fresh=fresh)
     state['acceptance'] = result
@@ -207,6 +238,7 @@ def start(site):
     state = installed(site)
     engine = Engine(site)
     with installation_lock(engine.root):
+        assert_no_pending_network_migration(engine.root)
         release = verify_release(state['release_root'], engine.root / 'config/publisher.pem', state['publisher'])
         verify_models(release, site)
         start_stack(engine)
@@ -237,11 +269,15 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
     if backup_key is None:
         raise DeploymentError('update/rollback requires an external --backup-key for a consistent encrypted backup')
     preflight(site, release)
+    networks.preflight(site)
     with installation_lock(root):
+        assert_no_pending_network_migration(root)
         engine = Engine(site)
+        previous_site = (root / 'config/site.json').read_bytes()
+        previous_compose = engine.file.read_bytes()
         engine.drain()
         from .backup import make_backup
-        make_backup(site, state, backup_key, locked=True)
+        make_backup(json.loads(previous_site), state, backup_key, locked=True)
         engine.drain()
         preflight(site, release)
         release = cache_release(site, release, trusted_key)
@@ -252,20 +288,29 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
             images['qwen'] = build_runtime(release, site)
         prepare_models(release, site)
         fix_model_permissions(site)
-        previous_site = (root / 'config/site.json').read_bytes()
-        uid, gid = prepare_data(site, release)
-        previous_compose = engine.file.read_bytes()
+        uid, gid = state['uid'], state['gid']
+        document = render_compose(site, images, uid, gid)
+        migrating = networks.needs_recreate(engine, document)
         atomic_json(root / 'state/previous-deployment.json', state)
-        atomic_json(engine.file, render_compose(site, images, uid, gid))
+        if migrating:
+            begin_network_migration(engine, json.loads(previous_site), json.loads(previous_compose), state)
         try:
+            if migrating:
+                networks.teardown(engine)
+            prepare_data(site, release)
+            atomic_json(engine.file, document)
             start_stack(engine)
             engine.maintenance(False)
             result = acceptance(site, release, engine, fresh=True)
         except Exception:
             engine.maintenance(True)
+            if migrating:
+                networks.teardown(engine)
             (root / 'config/site.json').write_bytes(previous_site)
             engine.file.write_bytes(previous_compose)
             start_stack(Engine(json.loads(previous_site)))
+            if migrating:
+                finish_network_migration(root, status='recovered')
             # Keep submissions paused until the operator verifies the recovered version.
             raise
         new = dict(state)
@@ -277,7 +322,62 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         from .image_identity import identity, inspect_image
         new['image_identities'] = {name: identity(inspect_image(image)) for name, image in images.items()}
         atomic_json(root / 'state/deployment.json', new)
+        finish_network_migration(root)
         print('READY', site['web']['public_url'], release['version'])
+
+
+def assert_no_pending_network_migration(root):
+    path = Path(root) / 'state/network-migration.json'
+    if path.exists() and json.loads(path.read_text()).get('status') == 'pending':
+        raise DeploymentError('interrupted network migration; use the signed CLI network-recover command before retrying')
+
+
+def begin_network_migration(engine, previous_site, previous_compose, state):
+    if (not isinstance(previous_site, dict) or previous_site.get('instance') != engine.site['instance']
+            or previous_site.get('data_dir') != str(engine.root)):
+        raise DeploymentError('previous site ownership differs; refusing network migration')
+    if previous_compose.get('name') != project_name(engine.site):
+        raise DeploymentError('previous Compose project identity differs; refusing network teardown')
+    if set(previous_compose.get('networks', {})) != set(networks.DEFAULT_SUBNETS):
+        raise DeploymentError('unexpected previous project networks; refusing migration')
+    atomic_json(engine.root / 'state/network-migration.json', {'status': 'pending',
+        'instance': engine.site['instance'], 'root': str(engine.root), 'previous_site': previous_site,
+        'previous_compose': previous_compose, 'previous_deployment': state, 'time': time.time()})
+
+
+def finish_network_migration(root, status='completed'):
+    path = Path(root) / 'state/network-migration.json'
+    if path.exists():
+        value = json.loads(path.read_text())
+        value.update(status=status, finished=time.time())
+        atomic_json(path, value)
+
+
+def recover_network(site):
+    root = Path(site['data_dir'])
+    with installation_lock(root):
+        path = root / 'state/network-migration.json'
+        journal = json.loads(path.read_text())
+        if (journal.get('status') != 'pending' or journal['instance'] != site['instance']
+                or journal['root'] != str(root)):
+            raise DeploymentError('no matching pending network migration')
+        old_site = journal['previous_site']
+        if old_site['data_dir'] != str(root) or old_site['instance'] != site['instance']:
+            raise DeploymentError('network recovery ownership mismatch')
+        previous = journal['previous_deployment']
+        if previous:
+            current = installed(site)
+            if current['release_sha256'] != previous['release_sha256']:
+                raise DeploymentError('deployment already changed; refusing stale recovery')
+            verify_release(previous['release_root'], root / 'config/publisher.pem', previous['publisher'])
+        engine = Engine(site)
+        engine.maintenance(True)
+        networks.teardown(engine)
+        atomic_json(root / 'config/site.json', old_site)
+        atomic_json(engine.file, journal['previous_compose'])
+        start_stack(Engine(old_site))
+        finish_network_migration(root, status='recovered')
+        print('Recovered previous containers/networks; submissions remain paused until verification.')
 
 
 def publish(site, *, mode, bind=None, port=None, public_url=None):
@@ -297,6 +397,9 @@ def publish(site, *, mode, bind=None, port=None, public_url=None):
     state = installed(site)
     engine = Engine(site)
     with installation_lock(root):
+        assert_no_pending_network_migration(root)
+        if networks.needs_recreate(engine, render_compose(candidate, state['images'], state['uid'], state['gid'])):
+            raise DeploymentError('network migration requires signed update/install; publish does not rebuild project networks')
         engine.drain()
         uid, gid = state['uid'], state['gid']
         atomic_json(engine.file, render_compose(candidate, state['images'], uid, gid))

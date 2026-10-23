@@ -5,6 +5,11 @@
   "profile": "ada-48g-fp8",
   "gpu": "0",
   "gpu_access_mode": "cdi",
+  "network_subnets": {
+    "data": "172.30.10.0/26",
+    "inference": "172.30.10.64/26",
+    "edge": "172.30.10.128/26"
+  },
   "runtime_source": "image",
   "model_paths": {
     "qwen": "/home/lyh/models/Qwen2.5-Coder-32B-Instruct-FP8",

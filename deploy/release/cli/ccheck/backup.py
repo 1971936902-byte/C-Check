@@ -57,21 +57,23 @@ def prune_completed(engine, site, mac_key):
         shutil.rmtree(directory)
 
 
-def make_backup(site, state, key_file, *, locked=False):
+def make_backup(site, state, key_file, *, locked=False, cold=False):
     engine = Engine(site)
     key_file, mac_key = key_material(key_file)
     if key_file.is_relative_to(engine.root):
         raise DeploymentError('backup key must be outside the installation and its backups')
     if not locked:
         with installation_lock(engine.root):
-            return make_backup(site, state, key_file, locked=True)
+            return make_backup(site, state, key_file, locked=True, cold=cold)
     prior_maintenance = (engine.root / 'data/control/maintenance').exists()
-    engine.wait(['mysql', 'redis', 'qdrant', 'qwen', 'embedding', 'api', 'worker', 'frontend'], timeout=60)
+    if not cold:
+        engine.wait(['mysql', 'redis', 'qdrant', 'qwen', 'embedding', 'api', 'worker', 'frontend'], timeout=60)
     amount = json.loads(run(helper(engine, state, 'measure')).strip())
     needed = amount['bytes'] + amount['entries'] * 4096 + 3 * 1024**3
     if shutil.disk_usage(engine.root).free < needed:
         raise DeploymentError('insufficient space for encrypted backup and safety reserve')
-    engine.drain()
+    if not cold:
+        engine.drain()
     directory = Path(tempfile.mkdtemp(prefix=time.strftime('%Y%m%d-%H%M%S') + '-', dir=engine.root / 'backups'))
     encrypted = directory / 'snapshot.tar.enc'
     try:
@@ -116,8 +118,9 @@ def make_backup(site, state, key_file, *, locked=False):
         raise
     finally:
         from .lifecycle import start_stack
-        start_stack(engine)
-        engine.maintenance(prior_maintenance)
+        if not cold:
+            start_stack(engine)
+            engine.maintenance(prior_maintenance)
     print('ENCRYPTED_BACKUP', directory)
     return directory
 
