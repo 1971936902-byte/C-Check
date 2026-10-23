@@ -351,6 +351,9 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
             prepare_data(site, release)
             atomic_json(engine.file, document)
             start_stack(engine)
+            if changing_model:
+                from .model_migration import restore_registration
+                restore_registration(engine, site)
             engine.maintenance(False)
             result = acceptance(site, release, engine, fresh=True)
         except Exception:
@@ -359,7 +362,11 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
                 networks.teardown(engine)
             (root / 'config/site.json').write_bytes(previous_site)
             engine.file.write_bytes(previous_compose)
-            start_stack(Engine(json.loads(previous_site)))
+            recovered_engine = Engine(json.loads(previous_site))
+            start_stack(recovered_engine)
+            if changing_model:
+                from .model_migration import restore_registration
+                restore_registration(recovered_engine, recovered_engine.site)
             if migrating:
                 finish_network_migration(root, status='recovered')
             # Keep submissions paused until the operator verifies the recovered version.

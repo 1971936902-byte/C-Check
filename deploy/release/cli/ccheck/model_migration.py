@@ -5,6 +5,30 @@ from .core import DeploymentError, checked_path
 from .inference import LEGACY, QWEN3
 
 
+RESTORE_REGISTRATION = '''import sys
+from sqlalchemy import select
+from app.db.models import ModelNode
+from app.db.session import SessionLocal
+with SessionLocal() as db:
+    nodes=list(db.scalars(select(ModelNode)).all())
+    selected=[node for node in nodes if node.base_url=='http://qwen:8001' and node.model_identifier==sys.argv[1]]
+    if len(selected)!=1:
+        raise RuntimeError('expected exactly one registered local review model')
+    for node in nodes:
+        node.is_default=node.id==selected[0].id
+        if node.base_url=='http://qwen:8001':
+            node.is_enabled=node.id==selected[0].id
+    db.commit()
+print('MODEL_REGISTRATION_RESTORED',sys.argv[1])
+'''
+
+
+def restore_registration(engine, site):
+    from .inference import served_name
+    return engine.compose('run', '--rm', '--no-deps', 'init', 'python', '-c',
+                          RESTORE_REGISTRATION, served_name(site))
+
+
 def models(release):
     rows = json.loads(checked_path(release['_root'], 'models/model-manifest.json').read_text())['models']
     result = {row['key']: row for row in rows}

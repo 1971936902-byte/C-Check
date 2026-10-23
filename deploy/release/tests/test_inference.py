@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cli'))
 from ccheck import acceleration, inference, model_migration
@@ -140,6 +140,18 @@ class InferenceTests(unittest.TestCase):
         old, new = self.release(inference.LEGACY, 'a'), self.release(inference.QWEN3, 'b')
         model_migration.validate(old, new)
         model_migration.validate(new, old)
+
+    def test_recovery_resets_model_registration_even_with_legacy_backend(self):
+        engine=Mock()
+        model_migration.restore_registration(engine, self.site)
+        args=engine.compose.call_args.args
+        self.assertEqual(args[-1], inference.LEGACY)
+        self.assertEqual(args[:6], ('run','--rm','--no-deps','init','python','-c'))
+        self.assertIn('db.commit()', args[-2])
+        self.assertIn("node.base_url=='http://qwen:8001'", args[-2])
+        self.assertNotIn('.delete(', args[-2])
+        with self.assertRaises(DeploymentError):
+            model_migration.restore_registration(engine, dict(self.site, review_model='unexpected'))
 
     def test_other_images_core_and_schema_changes_are_rejected(self):
         old, new = self.release(inference.LEGACY, 'a'), self.release(inference.QWEN3, 'b')
