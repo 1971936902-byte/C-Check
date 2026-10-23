@@ -1,4 +1,5 @@
 import copy
+import contextlib
 import json
 from pathlib import Path
 import sys
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cli'))
 from ccheck.core import DeploymentError
 from ccheck.engine import Engine, project_name, render_compose
 from ccheck import networks
-from ccheck.lifecycle import assert_no_pending_network_migration, begin_network_migration, finish_network_migration
+from ccheck.lifecycle import assert_no_pending_network_migration, begin_network_migration, finish_network_migration, recover_network
 
 
 class NetworkTests(unittest.TestCase):
@@ -68,10 +69,21 @@ class NetworkTests(unittest.TestCase):
         route = {'dst': row['IPAM']['Config'][0]['Subnet'], 'dev': 'br-' + row['Id'][:12]}
         with patch('ccheck.networks.inventory', return_value=[row]), patch('ccheck.networks.run', return_value=json.dumps([route])):
             networks.preflight(self.site)
+        route['dst'] = '172.30.10.1/32'
+        route['table'] = 'local'
+        with patch('ccheck.networks.inventory', return_value=[row]), patch('ccheck.networks.run', return_value=json.dumps([route])):
+            networks.preflight(self.site)
         route['dev'] = 'eth0'
         with patch('ccheck.networks.inventory', return_value=[row]), patch('ccheck.networks.run', return_value=json.dumps([route])), \
                 self.assertRaises(DeploymentError):
             networks.preflight(self.site)
+
+    def test_policy_route_tables_are_included(self):
+        with patch('ccheck.networks.inventory', return_value=[]), \
+                patch('ccheck.networks.run', return_value='[{"dst":"172.30.10.0/24","dev":"vpn0","table":100}]') as run, \
+                self.assertRaises(DeploymentError):
+            networks.preflight(self.site)
+        self.assertEqual(run.call_args.args[0], ['ip', '-j', '-4', 'route', 'show', 'table', 'all'])
 
     def test_namespace_collision_and_foreign_endpoint_rejected(self):
         row = self.network()
@@ -140,6 +152,42 @@ class NetworkTests(unittest.TestCase):
         with self.assertRaises(DeploymentError):
             begin_network_migration(self.engine, self.site, {'name': 'other'}, None)
         self.assertFalse((self.engine.root / 'state/network-migration.json').exists())
+
+    def committed_fixture(self):
+        images = {name: 'sha256:' + 'a' * 64 for name in
+                  ['backend', 'mysql', 'redis', 'qdrant', 'qwen', 'embedding', 'frontend']}
+        document = render_compose(self.site, images, 10001, 10001)
+        begin_network_migration(self.engine, self.site, document, {'release_sha256': 'old'}, 'new')
+        self.engine.file.write_text(json.dumps(document))
+        (self.engine.root / 'config').mkdir()
+        (self.engine.root / 'config/site.json').write_text(json.dumps(self.site))
+        (self.engine.root / 'state/deployment.json').write_text('{}')
+        (self.engine.root / 'data/control').mkdir(parents=True)
+        return {'release_sha256': 'new', 'images': images, 'uid': 10001, 'gid': 10001,
+                'release_root': '/new-release', 'publisher': 'fingerprint'}
+
+    def test_commit_window_interruption_finalizes_without_downgrade_or_teardown(self):
+        state = self.committed_fixture()
+        with patch('ccheck.lifecycle.installation_lock', return_value=contextlib.nullcontext()), \
+                patch('ccheck.lifecycle.installed', return_value=state), \
+                patch('ccheck.core.load_site', return_value=self.site), \
+                patch('ccheck.lifecycle.verify_release'), patch('ccheck.lifecycle.start_stack') as start, \
+                patch('ccheck.lifecycle.verify') as verify, patch('ccheck.lifecycle.networks.teardown') as down:
+            recover_network(self.site)
+        self.assertEqual(json.loads((self.engine.root / 'state/network-migration.json').read_text())['status'], 'completed')
+        down.assert_not_called()
+        start.assert_called_once()
+        verify.assert_called_once_with(self.site)
+
+    def test_failed_commit_finalization_retains_pending_journal(self):
+        state = self.committed_fixture()
+        with patch('ccheck.lifecycle.installation_lock', return_value=contextlib.nullcontext()), \
+                patch('ccheck.lifecycle.installed', return_value=state), \
+                patch('ccheck.core.load_site', return_value=self.site), patch('ccheck.lifecycle.verify_release'), \
+                patch('ccheck.lifecycle.start_stack'), \
+                patch('ccheck.lifecycle.verify', side_effect=DeploymentError('not ready')), self.assertRaises(DeploymentError):
+            recover_network(self.site)
+        self.assertEqual(json.loads((self.engine.root / 'state/network-migration.json').read_text())['status'], 'pending')
 
 
 if __name__ == '__main__':

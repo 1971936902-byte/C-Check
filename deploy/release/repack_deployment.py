@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tarfile
 
+sys.dont_write_bytecode = True
+
 from build_release import render_install_guide
 from pack_source import EXCLUDED, PREFIXES
 from ccheck.core import checked_path, digest, verify_release

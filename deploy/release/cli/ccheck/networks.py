@@ -87,13 +87,14 @@ def preflight(site):
                 continue
             if any(net.overlaps(target) for target in desired.values()):
                 raise DeploymentError('fixed subnet overlaps another Docker network: ' + network['Name'])
-    routes = json.loads(run(['ip', '-j', '-4', 'route', 'show']))
+    routes = json.loads(run(['ip', '-j', '-4', 'route', 'show', 'table', 'all']))
     for route in routes:
         destination = route.get('dst', 'default')
         if destination in {'default', '0.0.0.0/0'}:
             continue
         net = ipaddress.IPv4Network(destination, strict=False)
-        if (str(net), route.get('dev')) in ignored_routes:
+        if any(route.get('dev') == device and net.subnet_of(ipaddress.IPv4Network(owned_cidr))
+               for owned_cidr, device in ignored_routes):
             continue
         if any(net.overlaps(target) for target in desired.values()):
             raise DeploymentError('fixed subnet overlaps host/LAN/VPN route: ' + destination)

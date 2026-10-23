@@ -113,7 +113,7 @@ def install(site, release_root, trusted_key, version=None, backup_key=None):
                 raise DeploymentError('network migration of an existing instance requires --backup-key; data and credentials were not reset')
             from .backup import key_material
             key_material(backup_key)
-            begin_network_migration(Engine(site), previous_site, previous_compose, old)
+            begin_network_migration(Engine(site), previous_site, previous_compose, old, release['_sha256'])
         uid, gid = stage(root, 'prepare-data', lambda: prepare_data(site, release))
         release = stage(root, 'verify-release-cache', lambda: cache_release(site, release, trusted_key))
         build = site.get('runtime_source') == 'build'
@@ -129,7 +129,7 @@ def install(site, release_root, trusted_key, version=None, backup_key=None):
         document = render_compose(site, images, uid, gid)
         migrating = previous_compose is not None and networks.needs_recreate(engine, document)
         if migrating:
-            begin_network_migration(engine, previous_site, previous_compose, old)
+            begin_network_migration(engine, previous_site, previous_compose, old, release['_sha256'])
             engine.maintenance(True)
             engine.compose('stop', '--timeout', '120')
             from .backup import make_backup
@@ -293,7 +293,7 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         migrating = networks.needs_recreate(engine, document)
         atomic_json(root / 'state/previous-deployment.json', state)
         if migrating:
-            begin_network_migration(engine, json.loads(previous_site), json.loads(previous_compose), state)
+            begin_network_migration(engine, json.loads(previous_site), json.loads(previous_compose), state, release['_sha256'])
         try:
             if migrating:
                 networks.teardown(engine)
@@ -332,7 +332,7 @@ def assert_no_pending_network_migration(root):
         raise DeploymentError('interrupted network migration; use the signed CLI network-recover command before retrying')
 
 
-def begin_network_migration(engine, previous_site, previous_compose, state):
+def begin_network_migration(engine, previous_site, previous_compose, state, target_release_sha256=None):
     if (not isinstance(previous_site, dict) or previous_site.get('instance') != engine.site['instance']
             or previous_site.get('data_dir') != str(engine.root)):
         raise DeploymentError('previous site ownership differs; refusing network migration')
@@ -342,7 +342,8 @@ def begin_network_migration(engine, previous_site, previous_compose, state):
         raise DeploymentError('unexpected previous project networks; refusing migration')
     atomic_json(engine.root / 'state/network-migration.json', {'status': 'pending',
         'instance': engine.site['instance'], 'root': str(engine.root), 'previous_site': previous_site,
-        'previous_compose': previous_compose, 'previous_deployment': state, 'time': time.time()})
+        'previous_compose': previous_compose, 'previous_deployment': state,
+        'target_release_sha256': target_release_sha256, 'time': time.time()})
 
 
 def finish_network_migration(root, status='completed'):
@@ -365,6 +366,22 @@ def recover_network(site):
         if old_site['data_dir'] != str(root) or old_site['instance'] != site['instance']:
             raise DeploymentError('network recovery ownership mismatch')
         previous = journal['previous_deployment']
+        if (root / 'state/deployment.json').exists():
+            current = installed(site)
+            if current['release_sha256'] == journal.get('target_release_sha256'):
+                # State committed after acceptance, but journal completion was interrupted.
+                from .core import load_site
+                committed_site = load_site(root / 'config/site.json')
+                verify_release(current['release_root'], root / 'config/publisher.pem', current['publisher'])
+                current_engine = Engine(committed_site)
+                if json.loads(current_engine.file.read_text()) != render_compose(committed_site, current['images'], current['uid'], current['gid']):
+                    raise DeploymentError('committed deployment recipe differs; refusing transaction finalization')
+                current_engine.maintenance(True)
+                start_stack(current_engine)
+                verify(committed_site)
+                finish_network_migration(root)
+                print('Validated committed target and completed interrupted network transaction; submissions remain paused.')
+                return
         if previous:
             current = installed(site)
             if current['release_sha256'] != previous['release_sha256']:
