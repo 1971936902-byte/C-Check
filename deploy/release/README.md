@@ -8,6 +8,30 @@ environment paths. See [baselines/README.md](baselines/README.md) for provenance
 licensing and reproducibility limits. Recipient installation is documented in
 `INSTALL-RTX5880.md`; building a release and installing it are separate workflows.
 
+## Scheme Two: lightweight online delivery
+
+Scheme Two is maintained alongside the original offline release pipeline below.
+It ships a small signed bootstrap and downloads fixed-version components during
+deployment instead of bundling all image archives and model weights.
+
+- [Design, version management and deployment guide (Chinese)](../../docs/方案二_轻量在线发布部署与版本管理.md)
+- [Online release builder](build_online_release.py)
+- [Recipient installation template](ONLINE-INSTALL.template.md)
+- [External site configuration example](site-online.example.json)
+- [Download planning, resumable cache and component verification](cli/ccheck/delivery.py)
+- [Delivery regression tests](tests/test_delivery.py)
+
+Use `ccheck download-plan` to inspect required downloads, `ccheck prepare-assets`
+to prefetch verified components, and `ccheck install` to deploy with the reviewed
+site configuration. See the guide for complete commands and trust verification.
+Image digests, Python dependency locks and model file hashes are bound to the
+signed release. Python dependencies run inside the fixed images, not in the host's
+Python environment. A smaller release download does not reduce the disk space or
+network traffic needed for uncached images and models on first installation.
+
+The original offline releases remain supported and are not removed or replaced
+by this delivery option. Signing keys and site secrets must never enter Git.
+
 ## Release pipeline
 
 1. Export an approved committed source snapshot with `pack_source.py`.
