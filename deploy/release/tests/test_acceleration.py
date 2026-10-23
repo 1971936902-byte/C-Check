@@ -83,6 +83,11 @@ class AccelerationTests(unittest.TestCase):
                     for name in ['qwen_gpu.py', 'embedding_gpu.py']}}
         acceleration.validate_release(self.site, manifest)
 
+    def test_40gb_profile_cannot_silently_enable_48gb_shared_recipe(self):
+        self.site['profile'] = 'a100-40g-fp8'
+        with self.assertRaisesRegex(DeploymentError, '40GB'):
+            acceleration.settings(self.site)
+
     def test_qwen_reservation_precedes_jina_loading(self):
         engine = MagicMock()
         engine.site = self.site

@@ -20,6 +20,8 @@ def settings(site):
     result = dict(defaults, **value)
     if result['embedding_device'] not in {'cuda', 'cpu'}:
         raise DeploymentError('embedding_device must be cuda or cpu')
+    if result['embedding_device'] == 'cuda' and site.get('profile') != 'ada-48g-fp8':
+        raise DeploymentError('shared GPU embedding currently requires the validated-recipe target ada-48g-fp8; 40GB profiles are not supported')
     fraction = result['qwen_gpu_memory_utilization']
     if type(fraction) not in {float, int} or not 0.75 <= fraction <= 0.90:
         raise DeploymentError('Qwen GPU fraction must be between 0.75 and 0.90')

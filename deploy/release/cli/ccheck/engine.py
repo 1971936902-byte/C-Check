@@ -73,7 +73,12 @@ def preflight(site, release=None):
         available = run(['nvidia-ctk', 'cdi', 'list'])
         if cdi_device(site) not in {line.strip() for line in available.splitlines()}:
             raise DeploymentError('selected GPU is absent from CDI specifications; no driver/daemon changes were attempted')
-    run(["nvidia-smi", "-i", str(site["gpu"]), "--query-gpu=uuid,memory.total,driver_version", "--format=csv,noheader"])
+    gpu_details = run(["nvidia-smi", "-i", str(site["gpu"]), "--query-gpu=uuid,memory.total,driver_version", "--format=csv,noheader"])
+    if acceleration.gpu_embedding(site):
+        import csv
+        rows = list(csv.reader(gpu_details.strip().splitlines()))
+        if len(rows) != 1 or len(rows[0]) != 3 or float(rows[0][1].strip().split()[0]) < 46 * 1024:
+            raise DeploymentError('shared GPU embedding requires a single 48GB-class GPU; no models were stopped')
     probe = Path(site["data_dir"])
     while not probe.exists():
         probe = probe.parent
