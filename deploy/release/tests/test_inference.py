@@ -12,6 +12,7 @@ from ccheck.core import DeploymentError
 from ccheck.engine import render_compose
 from ccheck.image_identity import identity, locate
 from ccheck.models import prepare_models
+from ccheck.gpu import cuda_probe_program
 import hashlib
 
 
@@ -95,6 +96,18 @@ class InferenceTests(unittest.TestCase):
     def test_qwen3_requires_validated_image_not_legacy_runtime_build(self):
         with self.assertRaisesRegex(DeploymentError, 'pinned runtime image'):
             inference.configure(dict(self.site, runtime_source='build'), self.release(inference.QWEN3, 'b'))
+
+    def test_cuda_preflight_keeps_exact_version_checks_for_each_model(self):
+        legacy = cuda_probe_program(self.site)
+        self.assertIn("=='2.6.0'", legacy)
+        self.assertIn("=='0.8.5.post1'", legacy)
+        self.assertIn("=='12.4'", legacy)
+        current = cuda_probe_program(dict(self.site, review_model=inference.QWEN3))
+        self.assertIn("=='2.8.0'", current)
+        self.assertIn("=='0.10.2'", current)
+        self.assertIn("=='12.8'", current)
+        self.assertIn("=='4.55.2'", current)
+        self.assertIn('len(accessible)==1', current)
 
     def test_prefetch_new_revision_preserves_legacy_and_active_audit(self):
         root = Path(self.site['data_dir'])

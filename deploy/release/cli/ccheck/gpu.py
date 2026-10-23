@@ -101,13 +101,26 @@ CUDA_PROBE = NVML_PROBE + (
     "print('CUDA_OK',torch.__version__,torch.cuda.get_device_name(0),flush=True)"
 )
 
+QWEN3_CUDA_PROBE = NVML_PROBE + (
+    "import torch,vllm,transformers; assert torch.cuda.is_available() and torch.cuda.device_count()==1;"
+    "assert torch.__version__.split('+')[0]=='2.8.0' and torch.version.cuda=='12.8';"
+    "assert vllm.__version__=='0.10.2' and transformers.__version__=='4.55.2';"
+    "x=torch.ones(1,device='cuda'); assert x.item()==1; torch.cuda.synchronize();"
+    "print('CUDA_OK',torch.__version__,torch.cuda.get_device_name(0),flush=True)"
+)
+
+
+def cuda_probe_program(site):
+    from .inference import QWEN3, served_name
+    return QWEN3_CUDA_PROBE if served_name(site) == QWEN3 else CUDA_PROBE
+
 
 def probe(site, image, *, cuda=False, uid=10001, gid=10001):
     output = run(['docker', 'run', '--rm', *docker_arguments(site), '--network', 'none',
                   '--user', f'{uid}:{gid}', '--read-only', '--cap-drop', 'ALL',
                   '--security-opt', 'no-new-privileges:true', '--tmpfs', '/tmp:rw,exec,mode=1777',
                   '-e', 'HOME=/tmp', '--entrypoint', 'python', image, '-c',
-                  CUDA_PROBE if cuda else NVML_PROBE], timeout=180)
+                  cuda_probe_program(site) if cuda else NVML_PROBE], timeout=180)
     return check_identity(site, output, cuda=cuda)
 
 
