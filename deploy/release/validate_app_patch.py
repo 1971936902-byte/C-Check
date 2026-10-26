@@ -27,6 +27,10 @@ def main(args):
     old_backend, old_frontend = (locate(base['images'][name]) for name in ('backend', 'frontend'))
     if not old_backend or not old_frontend:
         raise RuntimeError('signed rc16 baseline images must already be imported')
+    base_tags = {}
+    for name, image in [('backend', old_backend), ('frontend', old_frontend)]:
+        base_tags[name] = 'c-check-rc18-base-' + name + ':' + image.split(':')[-1][:16]
+        subprocess.run(['docker', 'tag', image, base_tags[name]], check=True)
 
     def run(command, name, **kwargs):
         print('RUN', name, flush=True)
@@ -42,7 +46,7 @@ def main(args):
     shutil.copyfile(source / 'backend/alembic.ini', context / 'backend/alembic.ini')
     shutil.copyfile(source / 'deploy/release/core-policy.json', context / 'core-policy.json')
     images = {'backend': 'c-check-backend:0.1.0-rc.18', 'frontend': 'c-check-frontend:0.1.0-rc.18'}
-    run(['docker', 'build', '--network', 'none', '--build-arg', 'BASE_IMAGE=' + old_backend,
+    run(['docker', 'build', '--network', 'none', '--provenance=false', '--sbom=false', '--build-arg', 'BASE_IMAGE=' + base_tags['backend'],
          '--build-arg', 'RELEASE_VERSION=' + VERSION, '--build-arg', 'SOURCE_SHA=' + frozen['git_sha'],
          '-f', str(source / 'deploy/release/Dockerfile.backend-app-patch'), '-t', images['backend'], str(context)], 'backend-build')
     common = ['docker', 'run', '--rm', '--network', 'none', '--user', '0:0', '--memory', '3g', '--cpus', '2',
@@ -79,7 +83,7 @@ def main(args):
          '-ec', 'mkdir /tmp/frontend; cp -a /input/. /tmp/frontend/; ln -s /source/node_modules /tmp/frontend/node_modules; '
          'cd /tmp/frontend; npm test; npm run build; cp -a dist /output/'], 'frontend-tests-build')
     shutil.copyfile(source / 'frontend/nginx.conf', front / 'nginx.conf')
-    run(['docker', 'build', '--network', 'none', '--build-arg', 'BASE_IMAGE=' + old_frontend,
+    run(['docker', 'build', '--network', 'none', '--provenance=false', '--sbom=false', '--build-arg', 'BASE_IMAGE=' + base_tags['frontend'],
          '--build-arg', 'RELEASE_VERSION=' + VERSION, '--build-arg', 'SOURCE_SHA=' + frozen['git_sha'],
          '-f', str(source / 'deploy/release/Dockerfile.frontend-app-patch'), '-t', images['frontend'], str(front)], 'frontend-build')
     private = {frozen['files']['backend/' + name.replace('.', '/') + '.py'] for name in policy['compiled_modules']}
