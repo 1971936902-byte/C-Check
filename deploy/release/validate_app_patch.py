@@ -118,7 +118,8 @@ def mysql_migration(base, new_backend, old_backend, run):
                    env=env, check=True, stdout=subprocess.DEVNULL)
     try:
         for _ in range(90):
-            probe = subprocess.run(['docker', 'exec', name, 'mysqladmin', 'ping', '--silent'], capture_output=True)
+            probe = subprocess.run(['docker', 'exec', name, 'mysqladmin', '--protocol=tcp',
+                                    '--host=127.0.0.1', 'ping', '--silent'], capture_output=True)
             if probe.returncode == 0:
                 break
             time.sleep(2)
