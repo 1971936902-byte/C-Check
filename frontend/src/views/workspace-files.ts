@@ -1,6 +1,6 @@
 export function isCSourceFile(file: File) {
-  const name = (file.webkitRelativePath || file.name).toLowerCase()
-  return name.endsWith('.c') || name.endsWith('.h')
+  const name = (file.webkitRelativePath || file.name).split('/').pop() || ''
+  return /^(?:.+\.[ch]|.+_[ch]\.txt)$/i.test(name)
 }
 
 export function formatBytes(value: number) {

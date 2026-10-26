@@ -19,19 +19,16 @@ export function highlightCLine(line: string) {
     return `<span class="code-token-preprocessor">${escapeHtml(line)}</span>`
   }
 
-  const commentIndex = line.indexOf('//')
-  const codePart = commentIndex >= 0 ? line.slice(0, commentIndex) : line
-  const commentPart = commentIndex >= 0 ? line.slice(commentIndex) : ''
-  const highlighted = codePart.replace(
-    /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b([A-Za-z_][A-Za-z0-9_]*)\b|\b(\d+(?:\.\d+)?)\b/g,
-    (match, stringToken, wordToken, numberToken) => {
+  return line.replace(
+    /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\/\/.*$)|\b([A-Za-z_][A-Za-z0-9_]*)\b|\b(\d+(?:\.\d+)?)\b|[\s\S]/g,
+    (match, stringToken, commentToken, wordToken, numberToken) => {
       if (stringToken) return `<span class="code-token-string">${escapeHtml(stringToken)}</span>`
+      if (commentToken) return `<span class="code-token-comment">${escapeHtml(commentToken)}</span>`
       if (numberToken) return `<span class="code-token-number">${escapeHtml(numberToken)}</span>`
       if (C_KEYWORDS.has(wordToken)) return `<span class="code-token-keyword">${escapeHtml(wordToken)}</span>`
       return escapeHtml(match)
     },
   )
-  return highlighted + (commentPart ? `<span class="code-token-comment">${escapeHtml(commentPart)}</span>` : '')
 }
 
 export function renderHighlightedCSource(sourceText: string) {

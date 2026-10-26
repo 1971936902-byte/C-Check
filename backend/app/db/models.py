@@ -143,6 +143,9 @@ class ReviewTask(TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     model_log: Mapped[str | None] = mapped_column(Text)
     candidate_jsonl: Mapped[str | None] = mapped_column(Text().with_variant(mysql.LONGTEXT(), "mysql"))
+    graph_build_status: Mapped[str] = mapped_column(String(16), default="idle", server_default="idle", nullable=False)
+    graph_build_id: Mapped[str | None] = mapped_column(String(36))
+    graph_build_error: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     file_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     finding_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -164,6 +167,10 @@ class ReviewTask(TimestampMixin, Base):
     @property
     def tester_name(self) -> str:
         return self.owner.username
+
+    @property
+    def model_display_name(self) -> str:
+        return self.model_node.display_name
 
     @property
     def queued_ahead_count(self) -> int | None:

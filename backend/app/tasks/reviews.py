@@ -367,29 +367,6 @@ def run_review_task(task_id: str) -> None:
                 if task is None:
                     return
                 result = _postprocess_review_result(task, result)
-                try:
-                    from app.services.code_index.context_builder import build_rag_context
-
-                    supplemental_started = monotonic()
-                    supplemental_settings = settings.model_copy(
-                        update={"rag_retrieval_profile": "balanced", "rag_on_demand_enabled": False}
-                    )
-                    supplemental = build_rag_context(
-                        db,
-                        task,
-                        list(task.files),
-                        settings=supplemental_settings,
-                        persist=settings.rag_supplemental_persist_enabled,
-                        purpose="default",
-                    )
-                    persist_label = "persisted" if settings.rag_supplemental_persist_enabled else "built without persistence"
-                    task.model_log = _append_model_log(
-                        task.model_log,
-                        f"RAG supplemental context {persist_label}; chars={len(supplemental)}; "
-                        f"elapsed_s={monotonic() - supplemental_started:.4f}.",
-                    )
-                except Exception as exc:
-                    task.model_log = _append_model_log(task.model_log, f"RAG supplemental context skipped: {exc}")
                 existing_report = db.scalar(select(Report).where(Report.task_id == task.id))
                 report = populate_report(existing_report or Report(task=task), task, result)
                 db.add(report)

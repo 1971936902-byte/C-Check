@@ -2,10 +2,21 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CirclePlus, Connection, Download, Refresh } from '@element-plus/icons-vue'
-import { adminApi, codeIndexApi, errorMessage } from '../api/client'
+import { adminApi, codeIndexApi, errorMessage, reviewApi } from '../api/client'
+import type { GraphBuildState } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
-import type { AdminTask, AdminUser, CodeIndexEdge, CodeIndexObservability, CodeIndexSymbol, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, ResourceSnapshot, TaskStatus } from '../types'
+import type { AdminTask, AdminUser, CodeIndexEdge, CodeIndexFile, CodeIndexObservability, CodeIndexSymbol, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, ResourceSnapshot, ReviewTask, TaskStatus } from '../types'
 import { validateModel, validateNewUser, validatePrompt } from './form-validation'
+import { createLatestRequest } from './latest-request'
+import { graphTarget } from './graph-files'
+import { modelFormPayload, modelFormValues } from './model-form'
+
+const mainRequest = createLatestRequest()
+const tasksRequest = createLatestRequest()
+const graphRequest = createLatestRequest()
+const optionsRequest = createLatestRequest()
+let disposed = false
+let resourceInFlight = false
 
 const active = ref('dashboard')
 const dashboard = ref<Dashboard>()
@@ -16,11 +27,24 @@ const modelCatalog = ref<ModelCatalogItem[]>([])
 const modelDeployments = ref<ModelDeployment[]>([])
 const prompts = ref<Prompt[]>([])
 const tasks = ref<AdminTask[]>([])
+const taskPage = ref(1)
+const taskTotal = ref(0)
+const taskLoading = ref(false)
+const ragTaskOptions = ref<ReviewTask[]>([])
+const ragKeyword = ref('')
+const ragOffset = ref(0)
+const ragTotal = ref(0)
+const ragOptionsLoading = ref(false)
 const ragTaskId = ref('')
+const ragFiles = ref<CodeIndexFile[]>([])
 const ragSymbols = ref<CodeIndexSymbol[]>([])
 const ragEdges = ref<CodeIndexEdge[]>([])
 const ragObservability = ref<CodeIndexObservability>()
 const ragLoading = ref(false)
+const graphBuildState = ref<GraphBuildState>()
+const graphSubmitting = ref(false)
+const graphBuilding = computed(() => ['queued', 'running'].includes(graphBuildState.value?.status || ''))
+let graphTimer: number | undefined
 const selectedGraphNodeId = ref('')
 const resourceSamples = ref<ResourceSnapshot[]>([])
 const taskStatus = ref<TaskStatus | ''>('')
@@ -38,7 +62,8 @@ const promptDialog = ref(false)
 const editingModel = ref<string>()
 const editingPrompt = ref<string>()
 const userForm = reactive({ username: '', password: '', role: 'user' })
-const modelForm = reactive({ display_name: '', model_identifier: '', base_url: '', api_key: '', timeout_seconds: 120, is_enabled: true, description: '' })
+const modelForm = reactive(modelFormValues())
+const clearModelApiKey = ref(false)
 const deploymentForm = reactive({ catalog_key: '', source: 'modelscope', base_url: '', auto_base_url: true, served_model_name: '', api_key: '', port: 8101, timeout_seconds: 180, auto_register: true })
 const promptBody = ref('')
 let resourceTimer: number | undefined
@@ -156,8 +181,8 @@ const succeededDeploymentNodeIds = computed(() => new Set(
 const deployedModelNodes = computed(() => models.value
   .filter((model) => model.is_enabled && (model.is_default || succeededDeploymentNodeIds.value.has(model.id)))
   .sort((a, b) => Number(b.is_default) - Number(a.is_default) || a.display_name.localeCompare(b.display_name)))
-const indexedTasks = computed(() => tasks.value.filter((task) => ['completed', 'running', 'failed'].includes(task.status)))
-const selectedRagTask = computed(() => tasks.value.find((task) => task.id === ragTaskId.value))
+const indexedTasks = computed(() => ragTaskOptions.value.filter((task) => ['completed', 'running', 'failed'].includes(task.status)))
+const selectedRagTask = computed(() => ragTaskOptions.value.find((task) => task.id === ragTaskId.value))
 const selectedGraphNode = computed(() => graphNodes.value.find((node) => node.id === selectedGraphNodeId.value))
 const ragStats = computed(() => {
   const stats = ragObservability.value?.stats || {}
@@ -187,7 +212,11 @@ const visibleSymbols = computed(() => {
     .slice(0, RAG_GRAPH_SYMBOL_LIMIT)
 })
 const visibleSymbolIds = computed(() => new Set(visibleSymbols.value.map((symbol) => symbol.id)))
-const visibleFiles = computed(() => [...new Set(visibleSymbols.value.map((symbol) => symbol.file_path))].slice(0, RAG_GRAPH_FILE_LIMIT))
+const visibleFiles = computed(() => {
+  const paths = new Set(visibleSymbols.value.map((symbol) => symbol.file_path))
+  return [...ragFiles.value].sort((a, b) => Number(paths.has(b.file_path)) - Number(paths.has(a.file_path))).slice(0, RAG_GRAPH_FILE_LIMIT)
+})
+const graphHeight = computed(() => Math.max(520, unresolvedExternalEdges.value.length * 28 + 84))
 const unresolvedExternalEdges = computed(() => {
   const names = new Set<string>()
   const edges: CodeIndexEdge[] = []
@@ -218,7 +247,7 @@ const graphNodes = computed(() => {
       const rowsInColumn = Math.min(fileRows, filePaths.length - column * fileRows)
       const x = 70 + column * Math.max(62, (fileAreaWidth - 90) / Math.max(1, columnCount - 1))
       const y = 42 + row * ((height - 84) / Math.max(1, rowsInColumn - 1))
-      nodes.push({ id: `file:${file}`, label: compactPath(file), kind: 'file', file_path: file, x, y })
+      nodes.push({ id: file.id, label: compactPath(file.file_path), kind: 'file', file_path: file.file_path, x, y })
     })
   }
   symbols.forEach((symbol, index) => {
@@ -232,7 +261,7 @@ const graphNodes = computed(() => {
     const externalEdges = unresolvedExternalEdges.value
     externalEdges.forEach((edge, index) => {
       const count = Math.max(1, externalEdges.length)
-      const y = 42 + index * ((height - 84) / Math.max(1, count - 1))
+      const y = 42 + index * ((graphHeight.value - 84) / Math.max(1, count - 1))
       nodes.push({
         id: externalNodeId(edge),
         label: externalEdgeName(edge),
@@ -249,16 +278,11 @@ const graphNodes = computed(() => {
 const graphNodeIds = computed(() => new Set(graphNodes.value.map((node) => node.id)))
 const graphLinks = computed(() => {
   const links: GraphLink[] = []
-  if (graphMode.value !== 'semantic') {
-    for (const symbol of visibleSymbols.value) {
-      const fileId = `file:${symbol.file_path}`
-      if (graphNodeIds.value.has(fileId)) links.push({ id: `file-edge:${symbol.id}`, source: fileId, target: symbol.id, edge_type: 'FILE_CONTAINS_SYMBOL' })
-    }
-  }
   for (const edge of ragEdges.value) {
     if (!shouldDisplayEdge(edge)) continue
-    if (edge.target_id && graphNodeIds.value.has(edge.source_id) && graphNodeIds.value.has(edge.target_id)) {
-      links.push({ id: edge.id, source: edge.source_id, target: edge.target_id, edge_type: edge.edge_type, line: edge.line })
+    const target = graphTarget(edge, ragFiles.value)
+    if (target && graphNodeIds.value.has(edge.source_id) && graphNodeIds.value.has(target)) {
+      links.push({ id: edge.id, source: edge.source_id, target, edge_type: edge.edge_type, line: edge.line })
       continue
     }
     if (isExternalCallableEdge(edge) && graphNodeIds.value.has(edge.source_id) && graphNodeIds.value.has(externalNodeId(edge))) {
@@ -410,17 +434,21 @@ const withSingleDefault = (items: ModelNode[], defaultId?: string) => {
 }
 
 async function load() {
+  if (disposed) return
+  const isCurrent = mainRequest.begin()
   loading.value = true
   try {
-    const [d, u, m, c, md, p, t] = await Promise.all([
+    const [d, u, m, c, md, p] = await Promise.all([
       adminApi.dashboard(),
       adminApi.users(),
       adminApi.models(),
       adminApi.modelCatalog(),
       adminApi.modelDeployments(),
       adminApi.prompts(),
-      adminApi.tasks(taskStatus.value),
+      loadTasks(),
+      loadRagTasks(true),
     ])
+    if (!isCurrent()) return
     dashboard.value = d.data
     users.value = u.data
     models.value = withSingleDefault(m.data)
@@ -428,58 +456,150 @@ async function load() {
     modelDeployments.value = md.data
     modelTableKey.value += 1
     prompts.value = p.data
-    tasks.value = t.data
-    if (!ragTaskId.value && t.data.length) ragTaskId.value = t.data.find((task) => task.status === 'completed')?.id || t.data[0].id
   } catch (e) {
-    ElMessage.error(errorMessage(e))
+    if (isCurrent()) ElMessage.error(errorMessage(e))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
+async function loadTasks() {
+  if (disposed) return
+  const isCurrent = tasksRequest.begin()
+  taskLoading.value = true
+  try {
+    const { data } = await reviewApi.list({ status: taskStatus.value || undefined, offset: (taskPage.value - 1) * 20, limit: 20 })
+    if (!isCurrent()) return
+    if (taskPage.value > 1 && (taskPage.value - 1) * 20 >= data.total) {
+      taskPage.value = Math.max(1, Math.ceil(data.total / 20))
+      await loadTasks()
+      return
+    }
+    tasks.value = data.items
+    taskTotal.value = data.total
+  } catch (e) {
+    if (isCurrent()) ElMessage.error(errorMessage(e))
+  } finally { if (isCurrent()) taskLoading.value = false }
+}
+
+function filterTasks() { taskPage.value = 1; void loadTasks() }
+
+async function loadRagTasks(reset = false) {
+  if (disposed) return
+  const isCurrent = optionsRequest.begin()
+  const offset = reset ? 0 : ragOffset.value
+  ragOptionsLoading.value = true
+  try {
+    const { data } = await reviewApi.list({ keyword: ragKeyword.value.trim() || undefined, offset, limit: 50 })
+    if (!isCurrent()) return
+    const selected = selectedRagTask.value
+    const entries = reset ? (selected ? [selected] : []) : ragTaskOptions.value
+    ragTaskOptions.value = [...new Map([...entries, ...data.items].map((item) => [item.id, item])).values()]
+    ragOffset.value = offset + data.items.length
+    ragTotal.value = data.total
+    if (!ragTaskId.value) ragTaskId.value = indexedTasks.value[0]?.id || ''
+  } catch (e) {
+    if (isCurrent()) ElMessage.error(errorMessage(e))
+  } finally { if (isCurrent()) ragOptionsLoading.value = false }
+}
+
+function searchRagTasks(keyword: string) { ragKeyword.value = keyword; void loadRagTasks(true) }
+
+async function refreshActive() {
+  if (active.value === 'resources') return loadResources()
+  if (active.value === 'rag-graph') {
+    await loadRagTasks(true)
+    return loadRagGraph()
+  }
+  if (active.value === 'tasks') return loadTasks()
+  return load()
+}
+
 async function loadResources(silent = false) {
+  if (disposed || resourceInFlight) return
+  resourceInFlight = true
   if (!silent) resourceLoading.value = true
   try {
     const snapshot = (await adminApi.resources()).data
+    if (disposed) return
     resources.value = snapshot
     const cutoff = Date.now() - 30 * 60 * 1000
     resourceSamples.value = [...resourceSamples.value, snapshot]
       .filter((item) => new Date(item.captured_at).getTime() >= cutoff)
       .slice(-360)
   } catch (e) {
-    if (!silent) ElMessage.error(errorMessage(e))
+    if (!silent && !disposed) ElMessage.error(errorMessage(e))
   } finally {
+    resourceInFlight = false
     resourceLoading.value = false
   }
 }
 
 async function loadRagGraph() {
+  if (disposed) return
+  if (graphTimer) window.clearTimeout(graphTimer)
+  const isCurrent = graphRequest.begin()
+  graphBuildState.value = undefined
+  ragFiles.value = []
+  ragSymbols.value = []
+  ragEdges.value = []
+  ragObservability.value = undefined
+  selectedGraphNodeId.value = ''
   if (!ragTaskId.value) {
     ragSymbols.value = []
     ragEdges.value = []
     ragObservability.value = undefined
     selectedGraphNodeId.value = ''
+    ragLoading.value = false
     return
   }
   ragLoading.value = true
   try {
-    const [symbols, graph, observability] = await Promise.all([
+    const state = (await codeIndexApi.buildStatus(ragTaskId.value)).data
+    if (!isCurrent()) return
+    graphBuildState.value = state
+    if (graphBuilding.value) {
+      graphTimer = window.setTimeout(() => {
+        if (!disposed && active.value === 'rag-graph') void loadRagGraph()
+      }, 3000)
+      return
+    }
+    if (!state.project_id) return
+    const [symbols, graph, observability, files] = await Promise.all([
       codeIndexApi.symbols(ragTaskId.value),
       codeIndexApi.graph(ragTaskId.value),
       codeIndexApi.observability(ragTaskId.value),
+      codeIndexApi.files(ragTaskId.value),
     ])
+    if (!isCurrent()) return
+    ragFiles.value = files.data
     ragSymbols.value = symbols.data
     ragEdges.value = graph.data
     ragObservability.value = observability.data
     selectedGraphNodeId.value = graphNodes.value[0]?.id || ''
   } catch (e) {
+    if (!isCurrent()) return
     ragSymbols.value = []
     ragEdges.value = []
     ragObservability.value = undefined
     selectedGraphNodeId.value = ''
     ElMessage.error(errorMessage(e))
   } finally {
-    ragLoading.value = false
+    if (isCurrent()) ragLoading.value = false
+  }
+}
+
+async function generateRagGraph() {
+  if (!ragTaskId.value || graphSubmitting.value || graphBuilding.value) return
+  const taskId = ragTaskId.value
+  graphSubmitting.value = true
+  try {
+    await codeIndexApi.build(taskId)
+    if (!disposed && ragTaskId.value === taskId && active.value === 'rag-graph') await loadRagGraph()
+  } catch (e) {
+    if (!disposed) ElMessage.error(errorMessage(e))
+  } finally {
+    graphSubmitting.value = false
   }
 }
 
@@ -493,12 +613,12 @@ async function loadDeployments(silent = false) {
 
 function startResourceTimer() {
   if (resourceTimer) window.clearInterval(resourceTimer)
-  if (autoRefresh.value) resourceTimer = window.setInterval(() => loadResources(true), 5000)
+  if (!disposed && autoRefresh.value && active.value === 'resources') resourceTimer = window.setInterval(() => loadResources(true), 5000)
 }
 
 function startDeploymentTimer() {
   if (deploymentTimer) window.clearInterval(deploymentTimer)
-  if (active.value === 'deployments') deploymentTimer = window.setInterval(() => loadDeployments(true), 5000)
+  if (!disposed && active.value === 'deployments') deploymentTimer = window.setInterval(() => loadDeployments(true), 5000)
 }
 
 async function createUser() {
@@ -527,7 +647,8 @@ async function resetPassword(row: AdminUser) {
 
 function openModel(row?: ModelNode) {
   editingModel.value = row?.id
-  Object.assign(modelForm, row ? { ...row, api_key: row.api_key || '' } : { display_name: '', model_identifier: '', base_url: '', api_key: '', timeout_seconds: 120, is_enabled: true, description: '' })
+  Object.assign(modelForm, modelFormValues(row))
+  clearModelApiKey.value = false
   modelDialog.value = true
 }
 
@@ -535,7 +656,7 @@ async function saveModel() {
   const message = validateModel(modelForm)
   if (message) return ElMessage.warning(message)
   try {
-    await adminApi.saveModel({ ...modelForm, api_key: modelForm.api_key || undefined }, editingModel.value)
+    await adminApi.saveModel(modelFormPayload(modelForm, clearModelApiKey.value), editingModel.value)
     modelDialog.value = false
     await load()
     ElMessage.success('模型配置已保存')
@@ -679,12 +800,18 @@ async function removePrompt(row: Prompt) {
 }
 
 watch(active, (value) => {
+  if (graphTimer) window.clearTimeout(graphTimer)
+  if (value !== 'rag-graph') {
+    graphRequest.begin()
+    ragLoading.value = false
+  }
   if (value === 'deployments') {
     active.value = 'models'
     return
   }
   if (value === 'resources') loadResources(true)
   if (value === 'rag-graph') loadRagGraph()
+  startResourceTimer()
   startDeploymentTimer()
 })
 watch(ragTaskId, () => {
@@ -693,8 +820,14 @@ watch(ragTaskId, () => {
 watch(autoRefresh, startResourceTimer)
 onMounted(async () => { await Promise.all([load(), loadResources(true)]); startResourceTimer(); startDeploymentTimer() })
 onUnmounted(() => {
+  disposed = true
+  mainRequest.dispose()
+  tasksRequest.dispose()
+  graphRequest.dispose()
+  optionsRequest.dispose()
   if (resourceTimer) window.clearInterval(resourceTimer)
   if (deploymentTimer) window.clearInterval(deploymentTimer)
+  if (graphTimer) window.clearTimeout(graphTimer)
 })
 </script>
 
@@ -705,7 +838,7 @@ onUnmounted(() => {
         <h1>后台管理</h1>
         <p>集中管理用户、模型节点、提示词版本、审查任务与服务器运行资源。</p>
       </div>
-      <el-button class="refresh-action" :loading="loading || resourceLoading" :icon="Refresh" @click="active === 'resources' ? loadResources() : load()">刷新</el-button>
+      <el-button class="refresh-action" :loading="loading || resourceLoading || ragLoading || taskLoading" :icon="Refresh" @click="refreshActive">刷新</el-button>
     </header>
 
     <div class="panel glass admin-panel">
@@ -933,15 +1066,22 @@ onUnmounted(() => {
         <el-tab-pane label="RAG 图谱" name="rag-graph">
           <div class="table-tools rag-graph-tools">
             <div>
-              <span>选择已创建索引的审查任务</span>
-              <el-select v-model="ragTaskId" filterable placeholder="请选择任务">
+              <span>选择审查任务</span>
+              <el-select v-model="ragTaskId" filterable remote :remote-method="searchRagTasks" :loading="ragOptionsLoading" placeholder="搜索任务名称">
                 <el-option v-for="task in indexedTasks" :key="task.id" :label="`${task.display_name} · ${task.status}`" :value="task.id" />
               </el-select>
+              <el-button v-if="ragOffset < ragTotal" link :loading="ragOptionsLoading" @click="loadRagTasks(false)">加载更多</el-button>
             </div>
-            <el-button :icon="Refresh" :loading="ragLoading" :disabled="!ragTaskId" @click="loadRagGraph">刷新图谱</el-button>
+            <div>
+              <el-button type="primary" :icon="Connection" :loading="graphSubmitting || graphBuilding" :disabled="ragLoading || !selectedRagTask || !['completed', 'failed'].includes(selectedRagTask.status) || graphBuildState?.status === 'completed'" @click="generateRagGraph">{{ graphBuildState?.status === 'failed' ? '重试生成' : '生成图谱' }}</el-button>
+              <el-button :icon="Refresh" :loading="ragLoading" :disabled="!ragTaskId" @click="loadRagGraph">刷新图谱</el-button>
+            </div>
           </div>
 
           <el-empty v-if="!ragTaskId" description="暂无可查看的审查任务" />
+          <el-alert v-else-if="graphBuilding" :title="graphBuildState?.status === 'queued' ? '图谱任务排队中' : '正在生成图谱'" type="info" :closable="false" />
+          <el-alert v-else-if="graphBuildState?.status === 'failed'" :title="graphBuildState.error || '图谱生成失败'" type="error" :closable="false" />
+          <el-empty v-else-if="!ragLoading && !graphBuildState?.project_id" description="尚未生成图谱" />
           <el-alert v-else-if="ragObservability && !ragObservability.enabled" title="RAG 可观测性未启用" type="warning" :closable="false" />
           <div v-else v-loading="ragLoading" class="rag-graph-view">
             <section class="rag-summary-grid">
@@ -966,7 +1106,8 @@ onUnmounted(() => {
                     ]"
                   />
                 </div>
-                <svg class="rag-graph-canvas" viewBox="0 0 1100 520" role="img" aria-label="RAG 索引图结构">
+                <div class="rag-graph-scroll">
+                <svg class="rag-graph-canvas" :viewBox="`0 0 1100 ${graphHeight}`" width="1100" :height="graphHeight" role="img" aria-label="RAG 索引图结构">
                   <defs>
                     <marker id="rag-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
                       <path d="M 0 0 L 10 5 L 0 10 z" fill="#8d9fb1" />
@@ -996,10 +1137,11 @@ onUnmounted(() => {
                       @click="selectedGraphNodeId = node.id"
                     >
                       <circle :r="node.kind === 'file' ? 15 : 10" />
-                      <text :x="node.kind === 'file' ? 20 : 14" y="4">{{ node.label }}</text>
+                      <text :x="node.kind === 'external' ? -14 : node.kind === 'file' ? 20 : 14" :text-anchor="node.kind === 'external' ? 'end' : 'start'" y="4">{{ node.label }}</text>
                     </g>
                   </g>
                 </svg>
+                </div>
               </article>
 
               <aside class="rag-side-panel">
@@ -1045,8 +1187,8 @@ onUnmounted(() => {
         </el-tab-pane>
 
         <el-tab-pane label="任务监控" name="tasks">
-          <div class="table-tools"><span>全局审查任务状态</span><el-select v-model="taskStatus" clearable placeholder="全部状态" @change="load"><el-option label="排队中" value="queued" /><el-option label="审查中" value="running" /><el-option label="已完成" value="completed" /><el-option label="失败" value="failed" /></el-select></div>
-          <el-table :data="tasks">
+          <div class="table-tools"><span>全局审查任务状态</span><el-select v-model="taskStatus" clearable placeholder="全部状态" @change="filterTasks"><el-option label="排队中" value="queued" /><el-option label="审查中" value="running" /><el-option label="已完成" value="completed" /><el-option label="失败" value="failed" /></el-select></div>
+          <el-table :data="tasks" v-loading="taskLoading">
             <el-table-column prop="display_name" label="任务" />
             <el-table-column prop="owner_id" label="用户 ID" min-width="170" />
             <el-table-column label="状态" width="110"><template #default="{ row }"><StatusBadge :status="row.status" /></template></el-table-column>
@@ -1071,6 +1213,7 @@ onUnmounted(() => {
               </template>
             </el-table-column>
           </el-table>
+          <el-pagination v-model:current-page="taskPage" :page-size="20" :total="taskTotal" layout="total, prev, pager, next" @current-change="loadTasks" />
         </el-tab-pane>
       </el-tabs>
     </div>
@@ -1080,6 +1223,7 @@ onUnmounted(() => {
       <template #footer><el-button @click="userDialog = false">取消</el-button><el-button type="primary" @click="createUser">创建</el-button></template>
     </el-dialog>
     <el-dialog v-model="modelDialog" :title="editingModel ? '编辑模型' : '新增模型'" width="580">
+      <el-checkbox v-if="editingModel" v-model="clearModelApiKey">清除已保存的 API Key</el-checkbox>
       <el-form label-position="top"><el-form-item label="展示名称"><el-input v-model="modelForm.display_name" /></el-form-item><el-form-item label="模型标识"><el-input v-model="modelForm.model_identifier" /></el-form-item><el-form-item label="VLLM 服务地址"><el-input v-model="modelForm.base_url" /></el-form-item><el-form-item label="API Key（可选）"><el-input v-model="modelForm.api_key" type="password" show-password /></el-form-item><el-form-item label="超时时间（秒）"><el-input-number v-model="modelForm.timeout_seconds" :min="1" :max="3600" /></el-form-item><el-form-item label="说明"><el-input v-model="modelForm.description" type="textarea" /></el-form-item></el-form>
       <template #footer><el-button @click="modelDialog = false">取消</el-button><el-button type="primary" @click="saveModel">保存</el-button></template>
     </el-dialog>

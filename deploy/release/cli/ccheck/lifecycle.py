@@ -284,8 +284,13 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
     root = Path(site['data_dir'])
     trusted_key = trusted_key or root / 'config/publisher.pem'
     release = verify_release(release_root, trusted_key, state['publisher'])
-    if release['schema_epoch'] != state['schema_epoch']:
-        raise DeploymentError('schema compatibility is not proven; use an approved migration/backup restore, not blind image rollback')
+    changing_schema = release['schema_epoch'] != state['schema_epoch']
+    if changing_schema:
+        previous = verify_release(state['release_root'], trusted_key, state['publisher'])
+        if previous['_sha256'] != state['release_sha256'] or previous['schema_epoch'] != state['schema_epoch']:
+            raise DeploymentError('installed release differs from recorded schema migration source')
+        from .schema_migration import validate
+        validate(previous, release, rollback=rollback)
     changing_model = release['files']['models/model-manifest.json'] != state['model_manifest_sha256']
     if changing_model:
         if not model_migration:
@@ -361,6 +366,11 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
             result = acceptance(site, release, engine, fresh=True)
         except Exception:
             engine.maintenance(True)
+            if changing_schema:
+                engine.compose('stop', '--timeout', '120', 'api', 'worker')
+                raise DeploymentError('schema upgrade acceptance failed; submissions remain paused. '
+                                      'Restore the encrypted pre-upgrade backup with its matching rc16 release; '
+                                      'do not start old images against the migrated database.')
             if migrating:
                 networks.teardown(engine)
             (root / 'config/site.json').write_bytes(previous_site)
@@ -376,6 +386,7 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
             raise
         new = dict(state)
         new.update(version=release['version'], tag=release['tag'], source=release['source'],
+                   schema_epoch=release['schema_epoch'],
                    release_root=release['_root'], release_sha256=release['_sha256'], images=images,
                    model_manifest_sha256=release['files']['models/model-manifest.json'], acceptance=result,
                    site_sha256=digest(root / 'config/site.json'),

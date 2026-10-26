@@ -17,4 +17,17 @@ describe('C source highlighting', () => {
   it('renders an empty-state placeholder when no preview source is available', () => {
     expect(renderHighlightedCSource('')).toContain('暂无可预览内容')
   })
+
+  it('escapes unmatched markup and operators in the actual rendered preview', () => {
+    const html = renderHighlightedCSource('/* <img src=x onerror=alert()> */\nif (a < b && b > c) {}')
+    expect(html).not.toContain('<img')
+    expect(html).toContain('&lt;img')
+    expect(html).toContain('&amp;&amp;')
+  })
+
+  it('does not treat URL slashes inside a string as a comment', () => {
+    const html = highlightCLine('const char *url = "https://example.test"; // comment')
+    expect(html).toContain('<span class="code-token-string">&quot;https://example.test&quot;</span>')
+    expect(html).toContain('<span class="code-token-comment">// comment</span>')
+  })
 })

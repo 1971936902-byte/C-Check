@@ -8,7 +8,7 @@ celery_app = Celery(
     "c_check",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.reviews"],
+    include=["app.tasks.reviews", "app.tasks.code_index"],
 )
 celery_app.conf.update(
     task_serializer="json",

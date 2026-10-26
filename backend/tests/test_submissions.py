@@ -85,7 +85,7 @@ def test_collect_text_rejects_oversized_input():
         collect_text_submission("12345", settings)
 
 
-@pytest.mark.parametrize("filename", ["main.cpp", "README", "main.c.exe"])
+@pytest.mark.parametrize("filename", ["main.cpp", "README", "main.c.exe", "README.txt", "_c.txt", "main_c.txt.exe"])
 def test_collect_single_file_rejects_non_c_extension(filename):
     from app.services.submissions import SubmissionError, collect_file_submission
 
@@ -100,6 +100,74 @@ def test_collect_single_file_rejects_oversized_file():
 
     with pytest.raises(SubmissionError, match="size limit"):
         collect_file_submission("main.c", b"12345", settings)
+
+
+@pytest.mark.parametrize("filename,expected", [("main_c.txt", "main.c"), ("main_h.txt", "main.h"), ("MAIN_C.TXT", "MAIN.c")])
+def test_collect_renamed_single_source(filename, expected):
+    from app.services.submissions import collect_file_submission
+
+    content = b'#include "main.h"\r\nint main(void) { return 0; }\r\n'
+    submission = collect_file_submission(filename, content, Settings(_env_file=None))
+
+    assert submission.display_name == filename
+    assert submission.files[0].relative_path == expected
+    assert submission.files[0].source_text == content.decode("utf-8")
+    assert submission.files[0].size_bytes == len(content)
+
+
+@pytest.mark.parametrize("mode", ["archive", "folder"])
+def test_collect_renamed_project_sources(mode):
+    from app.services.submissions import collect_archive_submission, collect_folder_submission
+
+    entries = [
+        ("project/src/main_c.txt", b'#include "main.h"\nint main(void) { return 0; }'),
+        ("project/include/main_h.txt", b"int main(void);"),
+        ("project/other.c", b"int other(void);"),
+        ("project/README.txt", b"not a source file"),
+    ]
+    settings = Settings(_env_file=None)
+    if mode == "archive":
+        submission = collect_archive_submission("project.zip", make_zip([(name, content, None) for name, content in entries]), settings)
+    else:
+        submission = collect_folder_submission(entries, settings)
+
+    assert [file.relative_path for file in submission.files] == [
+        "project/src/main.c", "project/include/main.h", "project/other.c",
+    ]
+    assert submission.files[0].source_text == entries[0][1].decode("utf-8")
+
+
+@pytest.mark.parametrize("mode", ["archive", "folder"])
+@pytest.mark.parametrize("names", [("main.c", "main_c.txt"), ("main_h.txt", "main.h")])
+def test_collect_renamed_sources_rejects_canonical_path_collision(mode, names):
+    from app.services.submissions import SubmissionError, collect_archive_submission, collect_folder_submission
+
+    entries = [(name, b"int value;") for name in names]
+    settings = Settings(_env_file=None)
+    with pytest.raises(SubmissionError, match="duplicate paths"):
+        if mode == "archive":
+            collect_archive_submission("project.zip", make_zip([(name, content, None) for name, content in entries]), settings)
+        else:
+            collect_folder_submission(entries, settings)
+
+
+@pytest.mark.parametrize("mode", ["archive", "folder"])
+def test_collect_renamed_sources_preserves_path_validation(mode):
+    from app.services.submissions import SubmissionError, collect_archive_submission, collect_folder_submission
+
+    settings = Settings(_env_file=None)
+    with pytest.raises(SubmissionError, match="unsafe path"):
+        if mode == "archive":
+            collect_archive_submission("project.zip", make_zip([("../main_c.txt", b"int value;", None)]), settings)
+        else:
+            collect_folder_submission([("../main_c.txt", b"int value;")], settings)
+
+
+def test_collect_renamed_source_preserves_size_limit():
+    from app.services.submissions import SubmissionError, collect_file_submission
+
+    with pytest.raises(SubmissionError, match="size limit"):
+        collect_file_submission("main_c.txt", b"12345", Settings(_env_file=None, upload_max_file_bytes=4))
 
 
 @pytest.mark.parametrize(

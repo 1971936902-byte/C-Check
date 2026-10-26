@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { codeIndexApi, errorMessage, reportApi } from '../api/client'
+import { errorMessage, reportApi } from '../api/client'
 import ReportChart from '../components/ReportChart.vue'
-import type { CodeLine, FindingGroup, Report, ReviewEvidence, Severity } from '../types'
+import type { CodeLine, FindingGroup, Report, Severity } from '../types'
 import { scoreTone } from './report-metrics'
+import { createLatestRequest } from './latest-request'
 
 const severityTabs: Array<{ key: Severity; label: string; empty: string }> = [
   { key: 'high', label: '高危', empty: '暂无高危问题' },
@@ -24,9 +25,10 @@ const severityLabels: Record<Severity, string> = {
 const route = useRoute()
 const report = ref<Report>()
 const loading = ref(true)
-const evidence = ref<ReviewEvidence[]>([])
 const activeSeverity = ref<Severity>('high')
 const pageSize = ref(15)
+const reportRequest = createLatestRequest()
+onUnmounted(() => reportRequest.dispose())
 const pages = reactive<Record<Severity, number>>({
   high: 1,
   medium: 1,
@@ -63,27 +65,39 @@ const visibleFindings = computed(() => {
 })
 const activeTotal = computed(() => findingsBySeverity.value[activeSeverity.value].length)
 
-onMounted(async () => {
+watch(() => route.params.id, async (id) => {
+  const isCurrent = reportRequest.begin()
+  loading.value = true
+  report.value = undefined
+  Object.assign(pages, { high: 1, medium: 1, low: 1, suggestion: 1 })
+  activeSeverity.value = 'high'
   try {
-    report.value = (await reportApi.get(String(route.params.id))).data
-    evidence.value = (await codeIndexApi.evidence(report.value.task_id)).data
+    const result = (await reportApi.get(String(id))).data
+    if (!isCurrent()) return
+    report.value = result
+    activeSeverity.value = severityTabs.find((tab) => findingsBySeverity.value[tab.key].length)?.key || 'high'
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    if (isCurrent()) ElMessage.error(errorMessage(error))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
-})
+}, { immediate: true })
+
+watch(pageSize, () => Object.assign(pages, { high: 1, medium: 1, low: 1, suggestion: 1 }))
 
 async function download(format: 'markdown' | 'pdf' | 'text') {
   if (!report.value) return
   try {
-    const { data } = await reportApi.download(report.value.id, format)
+    const reportId = report.value.id
+    const { data } = await reportApi.download(reportId, format)
     const url = URL.createObjectURL(data)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `report-${report.value.id}.${format === 'markdown' ? 'md' : format === 'text' ? 'txt' : 'pdf'}`
+    anchor.download = `report-${reportId}.${format === 'markdown' ? 'md' : format === 'text' ? 'txt' : 'pdf'}`
+    document.body.append(anchor)
     anchor.click()
-    URL.revokeObjectURL(url)
+    anchor.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -157,18 +171,6 @@ function lineTooltip(line: CodeLine) {
           <article class="panel glass">
             <h2>问题分类</h2>
             <ReportChart :counts="report.category_counts" mode="category" />
-          </article>
-          <article class="panel glass supplemental-info">
-            <h2>审查补充信息</h2>
-            <p>RAG 检索到的相关定义、调用关系和跨文件上下文，仅用于辅助理解。</p>
-            <el-empty v-if="!evidence.length" description="暂无补充信息" :image-size="56" />
-            <ul v-else>
-              <li v-for="item in evidence" :key="item.evidence_key">
-                <strong>{{ item.evidence_key }} · {{ item.symbol_name || '文件上下文' }}</strong>
-                <code>{{ item.file_path }}:{{ item.start_line }}-{{ item.end_line }}</code>
-                <small>{{ item.reason }} · 相关度 {{ item.score.toFixed(2) }}</small>
-              </li>
-            </ul>
           </article>
         </aside>
 
@@ -295,9 +297,14 @@ function lineTooltip(line: CodeLine) {
 
 .report-sidebar {
   display: grid;
+  min-width: 0;
   gap: 20px;
   align-content: start;
 }
+
+.report-sidebar > article { min-width: 0; }
+.page-header > div:last-child { display: flex; flex-wrap: wrap; gap: 8px; }
+.page-header .el-button + .el-button { margin-left: 0; }
 
 .findings-column {
   min-width: 0;
@@ -482,15 +489,10 @@ function lineTooltip(line: CodeLine) {
   padding-top: 16px;
 }
 
-.supplemental-info p { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
-.supplemental-info ul { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
-.supplemental-info li { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; }
-.supplemental-info code { overflow-wrap: anywhere; font-size: 12px; }
-.supplemental-info small { color: var(--text-secondary); }
 
-@media (max-width: 720px) {
+@media (max-width: 1180px) {
   .report-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .finding-pagination {

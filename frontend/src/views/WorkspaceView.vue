@@ -9,6 +9,7 @@ import type { ModelNode, ReviewTask } from '../types'
 import { useAuthStore } from '../stores/auth'
 import { activeUpload, canSubmitReview, hasReviewInput, type InputMode } from './workspace-input'
 import { renderHighlightedCSource } from './c-highlight'
+import { decodeSourceBytes } from './source-decoding'
 import { displayNameFromFolder, formatBytes, isCSourceFile, modelDescriptionText } from './workspace-files'
 import { ALL_CHECK_TYPES, deriveReviewProgressSummary, taskDisplayName, taskSubmissionCountLabel } from './task-progress'
 
@@ -33,11 +34,16 @@ const sourcePreviewVisible = ref(false)
 const sourcePreviewLoading = ref(false)
 const sourcePreviewName = ref('')
 const sourcePreviewText = ref('')
+const sourcePreviewBytes = ref<ArrayBuffer>()
+const sourcePreviewEncoding = ref('auto')
+const logTaskId = ref('')
+const logTask = computed(() => tasks.value.find((item) => item.id === logTaskId.value))
 const router = useRouter()
 const auth = useAuthStore()
 const checkTypes = ref<string[]>(ALL_CHECK_TYPES.map((item) => item.value))
 let timer: number | undefined
 let syncInFlight = false
+let disposed = false
 const WORKSPACE_TASK_IDS_KEY = 'c-check-workspace-task-ids'
 const WORKSPACE_SYNC_INTERVAL_MS = 1400
 
@@ -63,7 +69,7 @@ const submitBlockReason = computed(() => {
   if (!checkTypes.value.length) return '请至少选择一种检查类型'
   if (!hasReviewInput(mode.value, source.value, singleFile.value, archiveFile.value, folderSourceFiles.value)) {
     if (mode.value === 'text') return '请粘贴待审查代码'
-    if (mode.value === 'folder') return '请选择包含 .c / .h 文件的项目文件夹'
+    if (mode.value === 'folder') return '请选择包含 .c / .h / _c.txt / _h.txt 文件的项目文件夹'
     return '请先选择或拖入文件'
   }
   return ''
@@ -71,10 +77,9 @@ const submitBlockReason = computed(() => {
 const selectedModelInfo = computed(() => models.value.find((model) => model.id === selectedModel.value))
 const allChecksSelected = computed(() => checkTypes.value.length === ALL_CHECK_TYPES.length)
 const task = computed(() => tasks.value.find((item) => item.id === selectedTaskId.value) || tasks.value[0])
-const progressSummary = computed(() => task.value ? deriveReviewProgressSummary(task.value) : undefined)
-const runningTask = computed(() => tasks.value.find((item) => item.status === 'running'))
+const runningTask = computed(() => task.value?.status === 'running' ? task.value : tasks.value.find((item) => item.status === 'running'))
 const runningProgressSummary = computed(() => runningTask.value ? deriveReviewProgressSummary(runningTask.value) : undefined)
-const taskListItems = computed(() => tasks.value.filter((item) => item.status !== 'running'))
+const taskListItems = computed(() => tasks.value.filter((item) => item.id !== runningTask.value?.id))
 const completedTaskCount = computed(() => tasks.value.filter((item) => item.status === 'completed').length)
 const unfinishedTaskCount = computed(() => tasks.value.filter((item) => item.status !== 'completed').length)
 const topPinnedQueuedTaskId = computed(() => {
@@ -92,7 +97,7 @@ onMounted(async () => {
     ElMessage.error(errorMessage(e))
   }
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => { disposed = true; clearInterval(timer) })
 
 async function loadModels() {
   models.value = (await reviewApi.models()).data
@@ -164,7 +169,7 @@ async function loadWorkspaceTasks() {
 }
 
 async function syncWorkspaceTasks(showError = false) {
-  if (syncInFlight) return
+  if (disposed || syncInFlight) return
   syncInFlight = true
   try {
     const rememberedIds = readRememberedTaskIds()
@@ -177,7 +182,7 @@ async function syncWorkspaceTasks(showError = false) {
     const rememberedTasks = remembered
       .filter((result): result is PromiseFulfilledResult<{ data: ReviewTask }> => result.status === 'fulfilled')
       .map((result) => result.value.data)
-    setTasks([...recent.data.items, ...queued.data.items, ...running.data.items, ...rememberedTasks])
+    if (!disposed) setTasks([...recent.data.items, ...queued.data.items, ...running.data.items, ...rememberedTasks])
   } catch (e) {
     if (showError) ElMessage.error(errorMessage(e))
     else console.warn(errorMessage(e))
@@ -188,6 +193,7 @@ async function syncWorkspaceTasks(showError = false) {
 
 function ensurePolling() {
   clearInterval(timer)
+  if (disposed) return
   timer = window.setInterval(() => {
     void syncWorkspaceTasks()
   }, WORKSPACE_SYNC_INTERVAL_MS)
@@ -238,8 +244,8 @@ function setDroppedFile(target: 'file' | 'archive', event: DragEvent) {
 }
 function setSelectedFile(target: 'file' | 'archive', selected: File) {
   const name = selected.name.toLowerCase()
-  if (target === 'file' && !name.endsWith('.c') && !name.endsWith('.h')) {
-    ElMessage.warning('请选择 .c / .h 文件')
+  if (target === 'file' && !isCSourceFile(selected)) {
+    ElMessage.warning('请选择 .c / .h / _c.txt / _h.txt 文件')
     return
   }
   if (target === 'archive' && !name.endsWith('.zip')) {
@@ -279,7 +285,7 @@ function chooseFolder() { folderInput.value?.click() }
 function setFolderFiles(event: Event) {
   const input = event.target as HTMLInputElement
   folderFiles.value = Array.from(input.files || []).filter(isCSourceFile)
-  if (!folderFiles.value.length) ElMessage.warning('所选文件夹中未找到 .c / .h 文件')
+  if (!folderFiles.value.length) ElMessage.warning('所选文件夹中未找到 .c / .h / _c.txt / _h.txt 文件')
   if (folderFiles.value.length) {
     mode.value = 'folder'
     singleFile.value = undefined
@@ -291,18 +297,28 @@ function setFolderFiles(event: Event) {
 function clearFolder() { folderFiles.value = [] }
 
 async function previewSingleFile() {
-  if (!singleFile.value) return ElMessage.warning('请先选择单个 .c / .h 文件')
+  if (!singleFile.value) return ElMessage.warning('请先选择单个 .c / .h / _c.txt / _h.txt 文件')
   sourcePreviewLoading.value = true
   sourcePreviewName.value = singleFile.value.name
   sourcePreviewVisible.value = true
+  sourcePreviewBytes.value = undefined
+  sourcePreviewText.value = ''
+  sourcePreviewEncoding.value = 'auto'
   try {
-    sourcePreviewText.value = await singleFile.value.text()
+    sourcePreviewBytes.value = await singleFile.value.arrayBuffer()
+    updateSourcePreview()
   } catch {
     sourcePreviewText.value = ''
     ElMessage.error('文件内容读取失败，请确认文件可访问')
   } finally {
     sourcePreviewLoading.value = false
   }
+}
+
+function updateSourcePreview() {
+  if (!sourcePreviewBytes.value) return
+  try { sourcePreviewText.value = decodeSourceBytes(sourcePreviewBytes.value, sourcePreviewEncoding.value) }
+  catch { sourcePreviewText.value = ''; ElMessage.error('无法按当前编码读取，请选择文件编码') }
 }
 
 async function submit() {
@@ -349,7 +365,12 @@ function openReport() {
 }
 
 function openRunningLog() {
-  if (runningTask.value?.model_log) logVisible.value = true
+  if (runningTask.value) openTaskLog(runningTask.value)
+}
+
+function openTaskLog(target: ReviewTask) {
+  logTaskId.value = target.id
+  logVisible.value = true
 }
 
 async function removeTask(target: ReviewTask) {
@@ -464,12 +485,12 @@ async function pinTask(target: ReviewTask) {
               ref="singleFileInput"
               class="folder-native-input"
               type="file"
-              accept=".c,.h"
+              accept=".c,.h,.txt"
               @change="setNativeFile('file', $event)"
             />
             <button type="button" class="folder-picker" @dragover.prevent @drop.prevent="setDroppedFile('file', $event)" @click="chooseSingleFile">
               <el-icon><UploadFilled /></el-icon>
-              <strong>拖入或点击选择单个 .c / .h 文件</strong>
+              <strong>拖入或点击选择单个 .c / .h / _c.txt / _h.txt 文件</strong>
               <span>选择后可继续提交为新的排队任务</span>
             </button>
             <div v-if="singleFile" class="file-preview-row">
@@ -513,7 +534,7 @@ async function pinTask(target: ReviewTask) {
             <button type="button" class="folder-picker" @click="chooseFolder">
               <el-icon><FolderOpened /></el-icon>
               <strong>选择项目文件夹</strong>
-              <span>自动递归收集 .c / .h 文件并保留子目录路径</span>
+              <span>自动递归收集 .c / .h / _c.txt / _h.txt 文件并保留子目录路径</span>
             </button>
             <div v-if="folderSourceFiles.length" class="folder-summary">
               <div>
@@ -601,8 +622,8 @@ async function pinTask(target: ReviewTask) {
               </div>
             </div>
             <div class="task-focus-remaining">
-              <small>剩余文件</small>
-              <strong>{{ runningProgressSummary.remainingCount }}</strong>
+              <small>提交文件</small>
+              <strong>{{ runningTask.file_count }}</strong>
             </div>
           </div>
           <el-alert v-if="runningTask.error_message" :title="runningTask.error_message" type="error" :closable="false" show-icon />
@@ -613,13 +634,16 @@ async function pinTask(target: ReviewTask) {
         </section>
 
         <div v-if="taskPanelExpanded && taskListItems.length" class="task-list">
-          <button
+          <div
             v-for="item in taskListItems"
             :key="item.id"
-            type="button"
+            role="button"
+            tabindex="0"
             class="task-list-item"
             :class="{ 'task-list-item-active': item.id === selectedTaskId }"
             @click="selectedTaskId = item.id"
+            @keydown.enter.self="selectedTaskId = item.id"
+            @keydown.space.self.prevent="selectedTaskId = item.id"
           >
             <span class="task-list-title">
               <strong>{{ taskDisplayName(item) }}</strong>
@@ -647,17 +671,34 @@ async function pinTask(target: ReviewTask) {
                 置顶
               </el-button>
             </small>
-          </button>
+          </div>
         </div>
+        <section v-if="taskPanelExpanded && task && task.status !== 'running'" class="task-current">
+          <strong>{{ taskDisplayName(task) }}</strong>
+          <el-alert v-if="task.error_message" :title="task.error_message" type="error" :closable="false" />
+          <div class="task-detail-actions">
+            <el-button v-if="task.report_id" :icon="Document" @click="openReport">查看报告</el-button>
+            <el-button v-if="task.model_log" :icon="View" @click="openTaskLog(task)">模型日志</el-button>
+            <el-button type="danger" plain @click="removeTask(task)">{{ task.status === 'queued' ? '停止并删除' : '删除任务' }}</el-button>
+          </div>
+        </section>
       </aside>
     </div>
 
-    <el-dialog v-model="logVisible" :title="`模型日志 · ${runningTask?.display_name || task?.display_name || ''}`" width="820px">
-      <div class="markdown-preview"><pre>{{ runningTask?.model_log || task?.model_log || '暂无模型日志' }}</pre></div>
+    <el-dialog v-model="logVisible" :title="`模型日志 · ${logTask?.display_name || ''}`" width="820px">
+      <div class="markdown-preview"><pre>{{ logTask?.model_log || '暂无模型日志' }}</pre></div>
       <template #footer><el-button @click="logVisible = false">关闭</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="sourcePreviewVisible" :title="`代码预览 · ${sourcePreviewName}`" width="860px">
+      <el-select v-model="sourcePreviewEncoding" aria-label="文件编码" @change="updateSourcePreview">
+        <el-option label="自动识别" value="auto" />
+        <el-option label="UTF-8" value="utf-8" />
+        <el-option label="GBK / GB18030" value="gb18030" />
+        <el-option label="Big5" value="big5" />
+        <el-option label="UTF-16 LE" value="utf-16le" />
+        <el-option label="UTF-16 BE" value="utf-16be" />
+      </el-select>
       <div v-loading="sourcePreviewLoading" class="code-preview" v-html="highlightedSourcePreview"></div>
       <template #footer><el-button @click="sourcePreviewVisible = false">关闭</el-button></template>
     </el-dialog>

@@ -566,7 +566,7 @@ export const mockApi = {
       tasks = [...tasks].sort((left, right) => String(value(left)).localeCompare(String(value(right)), 'zh-CN', { numeric: true }) * sortDir)
       const total = tasks.length
       const offset = Number(params?.offset || 0), limit = Number(params?.limit || 20)
-      return response({ items: tasks.slice(offset, offset + limit).map((task) => ({ ...task, tester_name: testerName(task) })), total })
+      return response({ items: tasks.slice(offset, offset + limit).map((task) => ({ ...task, tester_name: testerName(task), model_display_name: modelName(task) })), total })
     },
     get: async (taskId: string) => {
       const state = load()

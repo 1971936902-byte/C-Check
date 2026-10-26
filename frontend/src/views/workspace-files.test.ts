@@ -20,6 +20,15 @@ describe('workspace file helpers', () => {
     expect(formatBytes(2 * 1024 * 1024)).toBe('2.0 MB')
   })
 
+  it('accepts renamed C files but not arbitrary text files', () => {
+    expect(isCSourceFile(file('ServiceProtocol_c.txt'))).toBe(true)
+    expect(isCSourceFile(file('ServiceProtocol_h.txt', 'project/include/ServiceProtocol_h.txt'))).toBe(true)
+    expect(isCSourceFile(file('MODULE_C.TXT'))).toBe(true)
+    expect(isCSourceFile(file('README.txt'))).toBe(false)
+    expect(isCSourceFile(file('_c.txt'))).toBe(false)
+    expect(isCSourceFile(file('module_c.txt.exe'))).toBe(false)
+  })
+
   it('derives a stable folder display name from relative paths', () => {
     expect(displayNameFromFolder([file('main.c', 'demo/src/main.c')])).toBe('demo')
     expect(displayNameFromFolder([file('main.c')])).toBe('项目文件夹审查')

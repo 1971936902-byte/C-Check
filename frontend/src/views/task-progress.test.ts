@@ -28,10 +28,10 @@ const task = (
 })
 
 describe('deriveReviewProgressSummary', () => {
-  it('shows the current archive file and only the files remaining after it', () => {
+  it('does not infer a file position from overall batch progress', () => {
     expect(deriveReviewProgressSummary(task(52))).toEqual({
-      currentLabel: 'src/config.c',
-      remainingCount: 1,
+      currentLabel: 'gateway.zip',
+      remainingCount: null,
       state: 'analyzing',
       stateLabel: '正在检查',
     })
@@ -39,14 +39,18 @@ describe('deriveReviewProgressSummary', () => {
 
   it('uses a human-readable label for pasted code instead of a fake filename', () => {
     const pastedCodeTask = task(35, 'running', 'text')
-    expect(taskDisplayName(pastedCodeTask)).toBe('粘贴代码片段')
+    expect(taskDisplayName(pastedCodeTask)).toBe('snippet.c')
     expect(taskSubmissionCountLabel(pastedCodeTask)).toBe('1 个代码片段')
     expect(deriveReviewProgressSummary(pastedCodeTask)).toEqual({
-      currentLabel: '粘贴代码片段',
-      remainingCount: 0,
+      currentLabel: 'snippet.c',
+      remainingCount: null,
       state: 'analyzing',
       stateLabel: '正在检查',
     })
+  })
+
+  it('preserves a user-supplied name for pasted code', () => {
+    expect(taskDisplayName({ ...task(0, 'queued', 'text'), display_name: '协议回归检查' })).toBe('协议回归检查')
   })
 
   it('shows an explicit completed state with no remaining files', () => {

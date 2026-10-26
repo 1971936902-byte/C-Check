@@ -1,0 +1,9 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG RELEASE_VERSION
+ARG SOURCE_SHA
+LABEL org.opencontainers.image.version=${RELEASE_VERSION} org.opencontainers.image.revision=${SOURCE_SHA}
+USER 0:0
+COPY backend /app/backend
+COPY core-policy.json /opt/release/core-policy.json
+USER 10001:10001

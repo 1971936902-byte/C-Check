@@ -26,6 +26,15 @@ TEXT_BOMS: tuple[tuple[bytes, str], ...] = (
 )
 
 
+def _source_path(filename: str) -> str:
+    # Restore logical C paths so includes and parsers keep their original behavior.
+    path = PurePosixPath(filename)
+    for suffix, extension in (("_c.txt", ".c"), ("_h.txt", ".h")):
+        if path.name.lower().endswith(suffix) and len(path.name) > len(suffix):
+            return path.with_name(path.name[:-len(suffix)] + extension).as_posix()
+    return filename
+
+
 class SubmissionError(ValueError):
     """Raised when submitted source code does not meet upload rules."""
 
@@ -54,11 +63,13 @@ class _SourceCollection:
     has_source_content: bool = False
 
     def remember_path(self, relative_path: str) -> None:
+        relative_path = _source_path(relative_path)
         if relative_path in self.seen_paths:
             raise SubmissionError(f"{self.label} contains duplicate paths")
         self.seen_paths.add(relative_path)
 
     def add_source_file(self, relative_path: str, content: bytes, declared_size: int | None = None) -> None:
+        relative_path = _source_path(relative_path)
         if PurePosixPath(relative_path).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
             return
 
@@ -231,8 +242,8 @@ def _decode_source(content: bytes) -> str:
 
 
 def _require_source_extension(filename: str) -> None:
-    if PurePosixPath(filename).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
-        raise SubmissionError("only .c and .h source file extensions are allowed")
+    if PurePosixPath(_source_path(filename)).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
+        raise SubmissionError("only .c, .h, _c.txt and _h.txt source file extensions are allowed")
 
 
 def _require_size_limit(size_bytes: int, settings: Settings) -> None:
@@ -287,7 +298,7 @@ def collect_file_submission(filename: str, content: bytes, settings: Settings) -
     return Submission(
         input_mode="file",
         display_name=safe_name,
-        files=[SubmittedFile(relative_path=safe_name, source_text=source_text, size_bytes=len(content))],
+        files=[SubmittedFile(relative_path=_source_path(safe_name), source_text=source_text, size_bytes=len(content))],
     )
 
 
@@ -309,7 +320,7 @@ def collect_archive_submission(filename: str, content: bytes, settings: Settings
                 if info.is_dir():
                     continue
                 collection.remember_path(relative_path)
-                if PurePosixPath(relative_path).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
+                if PurePosixPath(_source_path(relative_path)).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
                     continue
                 extracted = archive.read(info)
                 collection.add_source_file(relative_path, extracted, declared_size=info.file_size)
@@ -339,7 +350,7 @@ def collect_folder_submission(files: list[tuple[str, bytes]], settings: Settings
             raise SubmissionError("folder contains too many entries")
         relative_path = _safe_archive_path(filename, settings)
         collection.remember_path(relative_path)
-        if PurePosixPath(relative_path).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
+        if PurePosixPath(_source_path(relative_path)).suffix.lower() not in ALLOWED_SOURCE_EXTENSIONS:
             continue
         if "/" in relative_path:
             root_name = relative_path.split("/", 1)[0] or root_name

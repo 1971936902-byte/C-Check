@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from 'vitest'
-import { reportApi, reviewApi } from './client'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { api, codeIndexApi, reportApi, reviewApi } from './client'
 import { mockApi, resetMockState } from './mock'
 
 class MemoryStorage implements Storage {
@@ -15,6 +15,13 @@ class MemoryStorage implements Storage {
 Object.defineProperty(globalThis, 'localStorage', { value: new MemoryStorage() })
 
 describe('mockApi', () => {
+  it('keeps graph and evidence requests offline in mock mode', async () => {
+    const get = vi.spyOn(api, 'get')
+    try {
+      await Promise.all([codeIndexApi.files('demo'), codeIndexApi.symbols('demo'), codeIndexApi.graph('demo'), codeIndexApi.observability('demo'), codeIndexApi.evidence('demo')])
+      expect(get).not.toHaveBeenCalled()
+    } finally { get.mockRestore() }
+  })
   beforeEach(async () => {
     resetMockState()
     await mockApi.auth.login('admin', 'admin12345678')

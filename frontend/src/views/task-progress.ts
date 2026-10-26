@@ -12,13 +12,13 @@ export const ALL_CHECK_TYPES = [
 export type FileProgressStatus = 'pending' | 'analyzing' | 'completed'
 export type ReviewProgressSummary = {
   currentLabel: string
-  remainingCount: number
+  remainingCount: number | null
   state: FileProgressStatus | 'failed'
   stateLabel: string
 }
 
 export function taskDisplayName(task: ReviewTask) {
-  return task.input_mode === 'text' ? '粘贴代码片段' : task.display_name
+  return task.display_name || (task.input_mode === 'text' ? '粘贴代码片段' : '未命名任务')
 }
 
 export function taskSubmissionCountLabel(task: ReviewTask) {
@@ -32,18 +32,13 @@ export function deriveReviewProgressSummary(task: ReviewTask): ReviewProgressSum
 
   const files = task.files || []
   const total = Math.max(task.file_count, files.length, task.input_mode === 'text' ? 1 : 0)
-  const completed = task.status === 'running'
-    ? Math.min(Math.floor((task.progress / 100) * total), Math.max(0, total - 1))
-    : 0
-  const currentLabel = task.input_mode === 'text'
-    ? '粘贴代码片段'
-    : files[completed]?.relative_path || task.display_name
+  const currentLabel = taskDisplayName(task)
 
   if (task.status === 'failed') {
-    return { currentLabel, remainingCount: Math.max(0, total - completed), state: 'failed', stateLabel: '检查中断' }
+    return { currentLabel, remainingCount: null, state: 'failed', stateLabel: '检查中断' }
   }
   if (task.status === 'queued') {
     return { currentLabel, remainingCount: total, state: 'pending', stateLabel: '等待开始' }
   }
-  return { currentLabel, remainingCount: Math.max(0, total - completed - 1), state: 'analyzing', stateLabel: '正在检查' }
+  return { currentLabel, remainingCount: null, state: 'analyzing', stateLabel: '正在检查' }
 }

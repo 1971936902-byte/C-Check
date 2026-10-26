@@ -1,4 +1,13 @@
 :root { font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; color: #25364b; background: #edf3f8; font-synthesis: none; --primary:#2f6f9f; --border:rgba(125,151,176,.24); --muted:#74859a; --surface:rgba(255,255,255,.82); --surface-strong:rgba(248,251,253,.92); }
+.task-detail-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.sidebar nav{min-width:0}
+@media(max-width:520px){.sidebar nav{flex:1;gap:2px}.sidebar nav a{font-size:0;gap:0;justify-content:center;min-width:0;flex:1;padding:9px 4px}.sidebar nav a .el-icon{font-size:20px}}
+.rag-graph-scroll{max-height:520px;overflow:auto}
+.rag-graph-scroll .rag-graph-canvas{display:block;width:100%;min-width:600px;max-width:none;height:auto}
+.finding-title{min-width:0;flex-wrap:wrap;line-height:1.5;padding-top:8px;padding-bottom:8px}
+.finding-title strong,.finding-title code{min-width:0;overflow-wrap:anywhere}
+.findings .el-collapse-item__header{height:auto;min-height:48px}
+@media(max-width:900px){.page-header{flex-wrap:wrap}.page-header>div:last-child{max-width:100%}.rag-graph-tools>div{flex-wrap:wrap;max-width:100%}}
 * { box-sizing: border-box; } body { margin:0; min-width:1180px; min-height:100vh; background:linear-gradient(135deg,#f7f9fb 0%,#edf3f7 48%,#eef5f0 100%); } button,input,textarea { font:inherit; }
 .glass { background:var(--surface); border:1px solid rgba(255,255,255,.75); box-shadow:0 14px 38px rgba(80,109,137,.1); backdrop-filter:blur(20px); }
 .app-shell { display:flex; min-height:100vh; }.sidebar { position:fixed; inset:18px auto 18px 18px; width:230px; border-radius:24px; padding:20px 14px; display:flex; flex-direction:column; z-index:2; }

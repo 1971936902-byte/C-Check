@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import get_settings
-from app.db.models import CodeEdge, CodeProject, CodeSymbol, ReviewEvidence, ReviewTask, User
+from app.db.models import CodeEdge, CodeProject, CodeSymbol, ReviewEvidence, ReviewTask, TaskStatus, User
 from app.db.session import get_db
 from app.services.code_index.context_builder import build_rag_context
 from app.services.code_index.evaluator import evaluate_retrieval
-from app.services.code_index.indexer import build_code_index
 from app.services.code_index.planner import plan_review_units
-from app.services.code_index.retriever import retrieve_context_diagnostics, retrieve_context_for_files
+from app.services.code_index.retriever import retrieve_context_for_files
 
 
 router = APIRouter(prefix="/code-index", tags=["code-index"])
@@ -22,8 +23,9 @@ review_context_router = APIRouter(prefix="/reviews", tags=["code-index"])
 
 
 class CodeIndexBuildResponse(BaseModel):
-    project_id: str
-    stats: dict
+    status: str
+    project_id: str | None = None
+    error: str | None = None
 
 
 class CodeSymbolResponse(BaseModel):
@@ -35,6 +37,11 @@ class CodeSymbolResponse(BaseModel):
     end_line: int
     confidence: float
     source_tool: str
+
+
+class CodeFileResponse(BaseModel):
+    id: str
+    file_path: str
 
 
 class CodeEdgeResponse(BaseModel):
@@ -101,16 +108,56 @@ def _owned_task(db: Session, task_id: str, current_user: User) -> ReviewTask:
     return task
 
 
-@router.post("/{task_id}/build", response_model=CodeIndexBuildResponse)
+def _build_state(task: ReviewTask) -> CodeIndexBuildResponse:
+    return CodeIndexBuildResponse(
+        status=task.graph_build_status,
+        project_id=task.code_project.id if task.code_project else None,
+        error=task.graph_build_error,
+    )
+
+
+@router.get("/{task_id}/build", response_model=CodeIndexBuildResponse)
+def build_status(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> CodeIndexBuildResponse:
+    return _build_state(_owned_task(db, task_id, current_user))
+
+
+@router.post("/{task_id}/build", response_model=CodeIndexBuildResponse, status_code=202)
 def build_index(
     task_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> CodeIndexBuildResponse:
     task = _owned_task(db, task_id, current_user)
-    project = build_code_index(db, task, settings=get_settings())
+    maintenance = get_settings().deployment_maintenance_file
+    if maintenance is not None and maintenance.exists():
+        raise HTTPException(status_code=503, detail="deployment maintenance: graph builds are temporarily disabled")
+    if task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+        raise HTTPException(status_code=409, detail="请等待审查结束后再生成图谱")
+    if task.graph_build_status in {"queued", "running", "completed"}:
+        return _build_state(task)
+    build_id = str(uuid4())
+    claimed = db.execute(update(ReviewTask).where(
+        ReviewTask.id == task.id,
+        ReviewTask.graph_build_status.in_(["idle", "failed"]),
+    ).values(graph_build_status="queued", graph_build_id=build_id, graph_build_error=None))
     db.commit()
-    return CodeIndexBuildResponse(project_id=project.id, stats=project.stats_json)
+    if claimed.rowcount:
+        from app.tasks.code_index import dispatch_graph_build
+        try:
+            dispatch_graph_build.delay(task.id, build_id)
+        except Exception:
+            db.execute(update(ReviewTask).where(
+                ReviewTask.id == task.id, ReviewTask.graph_build_id == build_id,
+                ReviewTask.graph_build_status == "queued",
+            ).values(graph_build_status="failed", graph_build_error="图谱任务提交失败，请检查 worker 和消息队列后重试。"))
+            db.commit()
+            raise HTTPException(status_code=503, detail="图谱任务提交失败")
+    db.refresh(task)
+    return _build_state(task)
 
 
 @router.get("/{task_id}/symbols", response_model=list[CodeSymbolResponse])
@@ -134,6 +181,16 @@ def list_symbols(
         )
         for symbol in project.symbols
     ]
+
+
+@router.get("/{task_id}/files", response_model=list[CodeFileResponse])
+def list_files(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[CodeFileResponse]:
+    project = _project_or_404(_owned_task(db, task_id, current_user))
+    return [CodeFileResponse(id=file.id, file_path=file.relative_path) for file in project.files]
 
 
 @router.get("/{task_id}/graph", response_model=list[CodeEdgeResponse])
@@ -193,8 +250,14 @@ def observability(
     task = _owned_task(db, task_id, current_user)
     if not get_settings().rag_observability_enabled:
         return CodeIndexObservabilityResponse(enabled=False)
-    diagnostics = retrieve_context_diagnostics(db, task, task.files, settings=get_settings())
-    return CodeIndexObservabilityResponse(**diagnostics)
+    project = task.code_project
+    if project is None:
+        return CodeIndexObservabilityResponse(enabled=True)
+    stats = dict(project.stats_json or {})
+    diagnostics = stats.pop("observability", {})
+    return CodeIndexObservabilityResponse(**{
+        "enabled": True, **diagnostics, "project_id": project.id, "stats": stats,
+    })
 
 
 @review_context_router.post("/{task_id}/contexts/preview", response_model=ContextPreviewResponse)

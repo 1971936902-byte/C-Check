@@ -7,6 +7,7 @@ export interface ReviewFile { id: string; relative_path: string; size_bytes: num
 export interface ReviewTask {
   id: string; owner_id: string; model_node_id: string; input_mode: string; display_name: string
   tester_name?: string
+  model_display_name?: string
   status: TaskStatus; progress: number; queue_priority?: number; queued_ahead_count?: number | null; error_message?: string | null; duration_ms?: number | null
   model_log?: string | null
   file_count: number; finding_count: number; started_at?: string | null; completed_at?: string | null
@@ -38,6 +39,7 @@ export interface AdminTask { id: string; owner_id: string; model_node_id: string
 export interface CodeIndexSymbol {
   id: string; kind: string; name: string; file_path: string; start_line: number; end_line: number; confidence: number; source_tool: string
 }
+export interface CodeIndexFile { id: string; file_path: string }
 export interface CodeIndexEdge {
   id: string; edge_type: string; source_id: string; target_id?: string | null; line?: number | null; confidence: number; metadata: Record<string, unknown>
 }

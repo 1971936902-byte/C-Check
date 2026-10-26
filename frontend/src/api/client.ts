@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AdminTask, AdminUser, CodeIndexEdge, CodeIndexObservability, CodeIndexSymbol, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, Report, ResourceSnapshot, ReviewEvidence, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
+import type { AdminTask, AdminUser, CodeIndexEdge, CodeIndexFile, CodeIndexObservability, CodeIndexSymbol, Dashboard, ModelCatalogItem, ModelDeployment, ModelNode, Prompt, Report, ResourceSnapshot, ReviewEvidence, ReviewTask, ReviewTaskPage, TaskStatus, User } from '../types'
 import { mockApi } from './mock'
 
 export const TOKEN_KEY = 'c-check-token'
@@ -82,11 +82,20 @@ export const reportApi = {
   get: (id: string) => MOCK_API_ENABLED ? mockApi.reports.get(id) : api.get<Report>(`/reports/${id}`),
   download: (id: string, format: 'markdown' | 'pdf' | 'text') => MOCK_API_ENABLED ? mockApi.reports.download(id, format === 'text' ? 'markdown' : format) : api.get(`/reports/${id}/${format}`, { responseType: 'blob' }),
 }
+export interface GraphBuildState {
+  status: 'idle' | 'queued' | 'running' | 'completed' | 'failed'
+  project_id: string | null
+  error: string | null
+}
+
 export const codeIndexApi = {
-  symbols: (taskId: string) => api.get<CodeIndexSymbol[]>(`/code-index/${taskId}/symbols`),
-  graph: (taskId: string) => api.get<CodeIndexEdge[]>(`/code-index/${taskId}/graph`),
-  observability: (taskId: string) => api.get<CodeIndexObservability>(`/code-index/${taskId}/observability`),
-  evidence: (taskId: string) => api.get<ReviewEvidence[]>(`/reviews/${taskId}/evidence/all`),
+  buildStatus: (taskId: string) => MOCK_API_ENABLED ? Promise.resolve({ data: { status: 'idle', project_id: null, error: null } as GraphBuildState }) : api.get<GraphBuildState>(`/code-index/${taskId}/build`),
+  build: (taskId: string) => MOCK_API_ENABLED ? Promise.reject(new Error('演示模式不支持生成图谱')) : api.post<GraphBuildState>(`/code-index/${taskId}/build`),
+  files: (taskId: string) => MOCK_API_ENABLED ? Promise.resolve({ data: [] as CodeIndexFile[] }) : api.get<CodeIndexFile[]>(`/code-index/${taskId}/files`),
+  symbols: (taskId: string) => MOCK_API_ENABLED ? Promise.resolve({ data: [] as CodeIndexSymbol[] }) : api.get<CodeIndexSymbol[]>(`/code-index/${taskId}/symbols`),
+  graph: (taskId: string) => MOCK_API_ENABLED ? Promise.resolve({ data: [] as CodeIndexEdge[] }) : api.get<CodeIndexEdge[]>(`/code-index/${taskId}/graph`),
+  observability: (taskId: string) => MOCK_API_ENABLED ? Promise.resolve({ data: { enabled: false, stats: {}, target_files: [], raw_candidate_count: 0, selected_count: 0, rejected_count: 0, bucket_counts: {}, selected: [], rejected: [], budget: {} } as CodeIndexObservability }) : api.get<CodeIndexObservability>(`/code-index/${taskId}/observability`),
+  evidence: (taskId: string) => MOCK_API_ENABLED ? Promise.resolve({ data: [] as ReviewEvidence[] }) : api.get<ReviewEvidence[]>(`/reviews/${taskId}/evidence/all`),
 }
 export const adminApi = {
   dashboard: () => MOCK_API_ENABLED ? mockApi.admin.dashboard() : api.get<Dashboard>('/admin/dashboard'),

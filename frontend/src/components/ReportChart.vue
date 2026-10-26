@@ -3,6 +3,8 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 const props = defineProps<{ counts: Record<string, number>; mode?: 'severity' | 'category' }>()
 const el = ref<HTMLDivElement>(); let chart: echarts.ECharts | undefined
+let disposed = false
+let observer: ResizeObserver | undefined
 const names: Record<string, string> = {
   high: '高危',
   medium: '中危',
@@ -28,6 +30,7 @@ const colors = ['#ec6a72', '#f0a35e', '#e9c25d', '#62a7d4', '#7392ce', '#82b59a'
 async function render() {
   if (!el.value) return
   await nextTick()
+  if (disposed || !el.value) return
   chart ||= echarts.init(el.value)
   chart.resize()
   const data = Object.entries(props.counts).map(([key, value]) => ({ name: names[key] || key, value }))
@@ -46,8 +49,12 @@ async function render() {
     }],
   })
 }
-onMounted(() => { render(); addEventListener('resize', render) })
+onMounted(() => {
+  void render()
+  observer = new ResizeObserver(() => { if (!disposed) chart?.resize() })
+  if (el.value) observer.observe(el.value)
+})
 watch(() => props.counts, render, { deep: true })
-onBeforeUnmount(() => { removeEventListener('resize', render); chart?.dispose() })
+onBeforeUnmount(() => { disposed = true; observer?.disconnect(); chart?.dispose() })
 </script>
 <template><div ref="el" class="report-chart" /></template>

@@ -17,6 +17,15 @@ from ccheck.core import DeploymentError
 
 
 class PublisherTests(unittest.TestCase):
+    def test_core_policy_covers_all_backend_modules(self):
+        release = Path(publisher.__file__).parent
+        backend = release.parents[1] / 'backend'
+        policy = json.loads((release / 'core-policy.json').read_text(encoding='utf-8'))
+        compiled = {name.replace('.', '/') + '.py' for name in policy['compiled_modules']}
+        known = compiled | set(policy['plaintext_allowlist'])
+        actual = {path.relative_to(backend).as_posix() for path in (backend / 'app').rglob('*.py')}
+        self.assertEqual(known, actual)
+
     def test_installation_guide_uses_actual_version_and_publisher(self):
         template = (Path(publisher.__file__).parent / 'INSTALL-RTX5880.template.md').read_text(encoding='utf-8')
         result = render_install_guide(template, 'v1.2.3', 'a' * 64)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import func, inspect, or_, select, text
 
 from app.core.config import get_settings
 from app.db.models import CodeProject, ModelNode, ReviewTask, TaskStatus
@@ -70,7 +70,8 @@ def register_model():
 def pending():
     with SessionLocal() as db:
         count = db.scalar(select(func.count()).select_from(ReviewTask).where(
-            ReviewTask.status.in_([TaskStatus.RUNNING, TaskStatus.QUEUED])))
+            or_(ReviewTask.status.in_([TaskStatus.RUNNING, TaskStatus.QUEUED]),
+                ReviewTask.graph_build_status.in_(["queued", "running"]))))
         print(json.dumps({"pending": count}))
 
 

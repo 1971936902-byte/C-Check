@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Delete, Download, Refresh, Search, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { errorMessage, reportApi, reviewApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge.vue'
 import type { ModelNode, ReviewTask } from '../types'
+import { createLatestRequest } from './latest-request'
+
+const listRequest = createLatestRequest()
+const previewRequest = createLatestRequest()
+onUnmounted(() => { listRequest.dispose(); previewRequest.dispose() })
 
 const filters = reactive({ keyword: '', tester_name: '' })
 const tasks = ref<ReviewTask[]>([])
@@ -30,6 +35,7 @@ const modelName = (id: string) => models.value.find((model) => model.id === id)?
 const optionalText = (value: string) => value.trim() || undefined
 
 async function load() {
+  const isCurrent = listRequest.begin()
   loading.value = true
   try {
     const { data } = await reviewApi.list({
@@ -40,12 +46,18 @@ async function load() {
       sort_by: sortBy.value,
       sort_dir: sortDir.value,
     })
+    if (!isCurrent()) return
+    if (page.value > 1 && (page.value - 1) * pageSize.value >= data.total) {
+      page.value = Math.max(1, Math.ceil(data.total / pageSize.value))
+      await load()
+      return
+    }
     tasks.value = data.items
     total.value = data.total
   } catch (e) {
-    ElMessage.error(errorMessage(e))
+    if (isCurrent()) ElMessage.error(errorMessage(e))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -93,17 +105,20 @@ async function downloadMarkdown(task: ReviewTask) {
 
 async function previewMarkdown(task: ReviewTask) {
   if (!task.report_id) return
+  const isCurrent = previewRequest.begin()
   markdownVisible.value = true
   markdownLoading.value = true
   markdownTask.value = task
   markdownContent.value = ''
   try {
-    markdownContent.value = await (await reportApi.download(task.report_id, 'markdown')).data.text()
+    const content = await (await reportApi.download(task.report_id, 'markdown')).data.text()
+    if (isCurrent()) markdownContent.value = content
   } catch (e) {
+    if (!isCurrent()) return
     markdownVisible.value = false
     ElMessage.error(errorMessage(e))
   } finally {
-    markdownLoading.value = false
+    if (isCurrent()) markdownLoading.value = false
   }
 }
 
@@ -156,7 +171,7 @@ onMounted(async () => {
         <el-table-column prop="display_name" label="任务名称" min-width="180" sortable="custom" />
         <el-table-column prop="tester_name" label="测试人员" width="110" sortable="custom" />
         <el-table-column prop="model" label="模型" min-width="160" sortable="custom">
-          <template #default="{ row }">{{ modelName(row.model_node_id) }}</template>
+          <template #default="{ row }">{{ row.model_display_name || modelName(row.model_node_id) }}</template>
         </el-table-column>
         <el-table-column prop="created_at" label="测试日期时间" width="175" sortable="custom">
           <template #default="{ row }">{{ date(row.created_at) }}</template>
