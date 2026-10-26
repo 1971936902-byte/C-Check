@@ -20,4 +20,5 @@ USER 0:0
 COPY backend /app/backend
 COPY --from=compiler /artifacts/backend /app/backend
 COPY core-policy.json /opt/release/core-policy.json
+RUN chmod -R a+rX /app/backend /opt/release/core-policy.json
 USER 10001:10001

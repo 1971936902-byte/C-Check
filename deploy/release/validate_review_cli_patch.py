@@ -67,6 +67,10 @@ def main(args):
               '-e', 'RAG_QDRANT_URL=', '-e', 'RAG_PARSER_REQUIRE_TREE_SITTER=false', '-e', 'RAG_PARSER_REQUIRE_LIBCLANG=false',
               '-e', 'LD_LIBRARY_PATH=/usr/lib/llvm-14/lib', '-e', 'PYTHONDONTWRITEBYTECODE=1',
               '-v', str(output)+':/results', '-v', str(source/'tools')+':/app/tools:ro', '-w', '/app/backend']
+    nonroot = common.copy()
+    nonroot[nonroot.index('--user')+1] = '10001:10001'
+    run(nonroot+['--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+                 '--tmpfs', '/tmp:rw,mode=1777', image, '-m', 'app.deployment', 'audit-core'], 'nonroot-readonly')
 
     def backend_tests(kind):
         mount = source/('backend' if kind == 'source' else 'backend/tests')
@@ -100,7 +104,7 @@ def main(args):
     migration = mysql_migration(base, image, old_backend, run, scan_progress=True)
     report = {'passed': True, 'source_tree': frozen['tree_sha256'], 'git_sha': frozen['git_sha'], 'base_sha256': base['_sha256'],
         'backend': {'passed': True, 'cases': len(source_cases), 'image_identity': identity(inspect_image(image)),
-                    'native_sha256': actual, 'recompiled_modules': sorted(changed)},
+                    'native_sha256': actual, 'recompiled_modules': sorted(changed), 'nonroot_readonly': True},
         'frontend': {'passed': True, 'reused_signed_baseline': base['_sha256']},
         'tool_tests': {'passed': True}, 'review_cli': {'passed': True, 'version': '0.2.1'},
         'security': {'passed': True, 'backend_layers': audit}, 'migration': migration,
