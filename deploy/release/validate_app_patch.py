@@ -1,5 +1,6 @@
 """Build and validate the rc16-based application patch without a GPU or model downloads."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+from html.parser import HTMLParser
 
 from build_application_patch import VERSION, validate_sources
 from repack_deployment import verify_source, read_json, write_json
@@ -54,11 +56,16 @@ def main(args):
               '-e', 'RAG_QDRANT_URL=', '-e', 'RAG_PARSER_REQUIRE_TREE_SITTER=false', '-e', 'RAG_PARSER_REQUIRE_LIBCLANG=false',
               '-e', 'LD_LIBRARY_PATH=/usr/lib/llvm-14/lib', '-e', 'PYTHONDONTWRITEBYTECODE=1',
               '-v', str(output) + ':/results', '-w', '/app/backend']
-    for kind, image in [('source', old_backend), ('compiled', images['backend'])]:
+    def backend_tests(kind, image):
         mount = source / ('backend' if kind == 'source' else 'backend/tests')
         target = '/app/backend' if kind == 'source' else '/app/backend/tests'
         run(common + ['-v', str(mount) + ':' + target + ':ro', image, '-m', 'pytest', '/app/backend/tests',
                       '-q', '-p', 'no:cacheprovider', '--junitxml=/results/' + kind + '.xml'], kind + '-tests')
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = [pool.submit(backend_tests, kind, image) for kind, image in
+                [('source', old_backend), ('compiled', images['backend'])]]
+        for job in jobs:
+            job.result()
     source_cases, native_cases = cases(output / 'source.xml'), cases(output / 'compiled.xml')
     if not source_cases or source_cases != native_cases:
         raise RuntimeError('source/native test inventory or outcome mismatch')
@@ -82,10 +89,10 @@ def main(args):
          '-v', str(source / 'frontend') + ':/input:ro', '-v', str(front) + ':/output', args.frontend_tools,
          '-ec', 'mkdir /tmp/frontend; cp -a /input/. /tmp/frontend/; ln -s /source/node_modules /tmp/frontend/node_modules; '
          'cd /tmp/frontend; npm test; npm run build; cp -a dist /output/'], 'frontend-tests-build')
-    shutil.copyfile(source / 'frontend/nginx.conf', front / 'nginx.conf')
     run(['docker', 'build', '--network', 'none', '--provenance=false', '--sbom=false', '--build-arg', 'BASE_IMAGE=' + base_tags['frontend'],
          '--build-arg', 'RELEASE_VERSION=' + VERSION, '--build-arg', 'SOURCE_SHA=' + frozen['git_sha'],
          '-f', str(source / 'deploy/release/Dockerfile.frontend-app-patch'), '-t', images['frontend'], str(front)], 'frontend-build')
+    frontend_smoke(images['frontend'], front / 'dist')
     private = {frozen['files']['backend/' + name.replace('.', '/') + '.py'] for name in policy['compiled_modules']}
     audits = {name: inspect_layers(image, policy, private) for name, image in images.items()}
     if set(audits['backend']['native_modules']) != set(policy['compiled_modules']):
@@ -95,7 +102,8 @@ def main(args):
     report = {'passed': True, 'source_tree': frozen['tree_sha256'], 'git_sha': frozen['git_sha'],
               'backend': {'passed': True, 'compiled_core_unchanged': True, 'cases': len(source_cases),
                           'image_identity': identity(inspect_image(images['backend'])), 'native_sha256': actual},
-              'frontend': {'passed': True, 'image_identity': identity(inspect_image(images['frontend']))},
+              'frontend': {'passed': True, 'readonly_nonroot_http': True,
+                           'image_identity': identity(inspect_image(images['frontend']))},
               'tool_tests': {'passed': True}, 'security': {'passed': True, 'audits': audits},
               'migration': migration, 'gpu_tested': False, 'model_runtime': 'unchanged from signed rc16'}
     if verify_source(source, committed=True) != frozen:
@@ -103,6 +111,44 @@ def main(args):
     write_json(output / 'images.json', images)
     write_json(output / 'build-gates.json', report)
     print('APPLICATION_GATES_PASSED', json.dumps(report), flush=True)
+
+
+def frontend_smoke(image, dist):
+    name = 'ccheck-rc18-front-' + secrets.token_hex(5)
+    subprocess.run(['docker', 'run', '-d', '--name', name, '--network', 'none', '--add-host', 'api:127.0.0.1',
+                    '--user', '101:101', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+                    '--tmpfs', '/tmp:size=16777216,mode=1777', '--tmpfs', '/var/cache/nginx:size=16777216,uid=101,gid=101',
+                    '--tmpfs', '/var/run:size=1048576,uid=101,gid=101', '--memory', '256m', '--cpus', '1', image],
+                   check=True, stdout=subprocess.DEVNULL)
+    try:
+        command = ['docker', 'exec', name, 'wget', '-qO-', 'http://127.0.0.1:8080']
+        for _ in range(30):
+            result = subprocess.run(command[:-1] + [command[-1] + '/reports/route-check'], capture_output=True)
+            if result.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError('nonroot frontend HTTP startup failed')
+        if result.stdout != (dist / 'index.html').read_bytes():
+            raise RuntimeError('SPA fallback did not serve the new frontend')
+        class Assets(HTMLParser):
+            paths = []
+            def handle_starttag(self, tag, attrs):
+                values = dict(attrs)
+                path = values.get('src' if tag == 'script' else 'href')
+                if tag in {'script', 'link'} and path and path.startswith('/assets/'):
+                    self.paths.append(path)
+        parser = Assets()
+        parser.feed(result.stdout.decode())
+        if not parser.paths:
+            raise RuntimeError('frontend assets missing')
+        for path in parser.paths:
+            actual = subprocess.check_output(command[:-1] + [command[-1] + path])
+            if actual != (dist / path.lstrip('/')).read_bytes():
+                raise RuntimeError('HTTP asset differs from tested build')
+        print('FRONTEND_READONLY_NONROOT_HTTP_OK', flush=True)
+    finally:
+        subprocess.run(['docker', 'rm', '-f', '-v', name], check=True, stdout=subprocess.DEVNULL)
 
 
 def mysql_migration(base, new_backend, old_backend, run):
