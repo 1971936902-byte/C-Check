@@ -36,7 +36,37 @@ TRUST=/home/lyh/c-check-trust/publisher.pem
 SITE=/home/lyh/c-check-site.json
 BACKUP_KEY=/home/lyh/c-check-secrets/backup.key
 
-sudo "$OLD/ccheck" fetch \
+BOOT="$DEST/rc18-bootstrap"
+URL=https://github.com/1971936902-byte/C-Check/releases/download/release-@@VERSION@@
+umask 077
+mkdir -p "$BOOT"
+for name in release.json release.sig bootstrap.tar.gz; do
+  curl --fail --location --proto '=https' --proto-redir '=https' \
+    "$URL/$name" -o "$BOOT/$name" || exit 1
+done
+sudo openssl pkeyutl -verify -pubin -inkey "$TRUST" -rawin \
+  -in "$BOOT/release.json" -sigfile "$BOOT/release.sig" || exit 1
+
+python3 - "$BOOT" <<'PY'
+import hashlib, json, sys, tarfile
+from pathlib import Path
+root = Path(sys.argv[1])
+release = json.loads((root / 'release.json').read_text())
+assert release['version'] == '@@VERSION@@'
+archive = root / 'bootstrap.tar.gz'
+assert archive.stat().st_size == release['bootstrap']['size']
+assert hashlib.sha256(archive.read_bytes()).hexdigest() == release['bootstrap']['sha256']
+with tarfile.open(archive, 'r:gz') as source:
+    member = source.getmember('cli/ccheck.pyz')
+    assert member.isfile() and member.size == release['artifact_sizes']['cli/ccheck.pyz']
+    data = source.extractfile(member).read()
+assert hashlib.sha256(data).hexdigest() == release['files']['cli/ccheck.pyz']
+(root / 'ccheck.pyz').write_bytes(data)
+print('VERIFIED_BOOTSTRAP_CLI')
+PY
+test "$?" -eq 0 || exit 1
+
+sudo python3 "$BOOT/ccheck.pyz" fetch \
   --version @@VERSION@@ \
   --base-url https://github.com/1971936902-byte/C-Check/releases/download \
   --destination "$DEST" --trusted-key "$TRUST" --reuse-release "$OLD"
@@ -44,7 +74,9 @@ sudo "$OLD/ccheck" fetch \
 sudo "$NEW/ccheck" package-verify --release "$NEW" --trusted-key "$TRUST"
 ```
 
-fetch 验证签名及逐文件哈希，复用旧包中未变化的镜像分片，只下载新引导包和 backend/frontend 分片。
+rc.16 CLI 尚不支持 `--reuse-release`，因此先下载并验签小型引导包，提取已验证的新 CLI。
+不要使用旧 CLI 运行上面的 fetch，也不要跳过验签、哈希检查或使用 `curl | bash`。
+新 fetch 验证签名及逐文件哈希，复用旧包中未变化的镜像分片，只下载新引导包和 backend/frontend 分片。
 没有完整旧包时仍可下载，但缺失的复用分片会从原 Release 获取，流量和磁盘占用更大。
 不下载模型权重。不要修改新包内任何签名文件，不要用重新 docker save 的文件冒充旧分片。
 
