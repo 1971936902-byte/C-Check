@@ -1,0 +1,23 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS compiler
+USER 0:0
+RUN apt-get -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update \
+    && apt-get install -y --no-install-recommends gcc g++ binutils \
+    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=wheelhouse/compiler,target=/wheels \
+    --mount=type=bind,source=locks/compiler.lock,target=/tmp/compiler.lock \
+    pip install --no-index --find-links=/wheels --require-hashes -r /tmp/compiler.lock
+COPY native-source /src/backend
+COPY native-policy.json /policy/core-policy.json
+COPY compile_core.py /builder/compile_core.py
+RUN python /builder/compile_core.py
+
+FROM ${BASE_IMAGE} AS runtime
+ARG RELEASE_VERSION
+ARG SOURCE_SHA
+LABEL org.opencontainers.image.version=${RELEASE_VERSION} org.opencontainers.image.revision=${SOURCE_SHA}
+USER 0:0
+COPY backend /app/backend
+COPY --from=compiler /artifacts/backend /app/backend
+COPY core-policy.json /opt/release/core-policy.json
+USER 10001:10001

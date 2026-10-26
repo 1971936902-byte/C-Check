@@ -151,7 +151,7 @@ def frontend_smoke(image, dist):
         subprocess.run(['docker', 'rm', '-f', '-v', name], check=True, stdout=subprocess.DEVNULL)
 
 
-def mysql_migration(base, new_backend, old_backend, run):
+def mysql_migration(base, new_backend, old_backend, run, *, scan_progress=False):
     image = locate(base['images']['mysql'])
     if not image:
         raise RuntimeError('signed MySQL image must be imported for migration test')
@@ -191,9 +191,14 @@ def mysql_migration(base, new_backend, old_backend, run):
                   'assert t.owner.password_hash=="keep-existing-hash";'
                   'assert t.model_node.model_identifier=="qwen2.5-coder-32b-instruct-fp8";'
                   'print("MYSQL_MIGRATION_PRESERVED")')
+        if scan_progress:
+            verify += (';assert t.scan_file_total is None and t.scan_file_completed is None and t.scan_file_remaining is None;'
+                       't.scan_file_total=4;t.scan_file_completed=2;s.commit();s.expire_all();'
+                       'assert s.get(ReviewTask,"rc18-sentinel").scan_file_remaining==2;print("SCAN_COUNTERS_PERSISTED")')
         run(common + [new_backend, '-c', verify], 'mysql-preservation', env=env)
         run(common + [new_backend, '-m', 'app.deployment', 'migrate'], 'mysql-repeat', env=env)
-        return {'passed': True, 'mysql': True, 'repeatable': True, 'existing_rows_and_password_preserved': True}
+        return {'passed': True, 'mysql': True, 'repeatable': True, 'existing_rows_and_password_preserved': True,
+                'scan_progress': scan_progress}
     finally:
         subprocess.run(['docker', 'rm', '-f', '-v', name], check=True, stdout=subprocess.DEVNULL)
 

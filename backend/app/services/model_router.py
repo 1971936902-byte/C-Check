@@ -857,6 +857,7 @@ async def _invoke_chunked_review(
     retry_instruction: str | None = None,
     chunk_max_chars: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    file_progress_callback: Callable[[int, int], None] | None = None,
     batch_prompt_builder: BatchPromptBuilder | None = None,
     response_contract: str = FINAL_RESPONSE_CONTRACT,
     response_schema: type[BaseModel] | None = CompactModelReviewResponse,
@@ -885,6 +886,14 @@ async def _invoke_chunked_review(
                 ),
             )
         indexed_results: list[tuple[int, ModelReviewResponse]] = []
+        # A file is finished only after ALL of its batches succeed, in any order.
+        file_batches: dict[str, set[int]] = {}
+        for batch_index, batch in enumerate(batches, start=1):
+            for source in batch:
+                file_batches.setdefault(source.relative_path, set()).add(batch_index)
+        completed_batches: set[int] = set()
+        if file_progress_callback is not None:
+            file_progress_callback(0, len(file_batches))
         pool_nodes = tuple(dispatch_pool.nodes) if dispatch_pool is not None else (node,)
         if not pool_nodes:
             pool_nodes = (node,)
@@ -962,9 +971,15 @@ async def _invoke_chunked_review(
         ]
         try:
             for completed_count, task in enumerate(asyncio.as_completed(pending), start=1):
-                indexed_results.append(await task)
+                result = await task
+                indexed_results.append(result)
+                completed_batches.add(result[0])
                 if progress_callback is not None:
                     progress_callback(completed_count, len(batches))
+                if file_progress_callback is not None:
+                    file_progress_callback(
+                        sum(indices <= completed_batches for indices in file_batches.values()), len(file_batches)
+                    )
         except ModelInvocationError as exc:
             for task in pending:
                 task.cancel()
@@ -2938,7 +2953,11 @@ async def _invoke_candidate_review(
     prompt: str,
     settings: Settings,
     retry_instruction: str | None,
+    file_progress_callback: Callable[[int, int], None] | None = None,
 ) -> ModelReviewResponse:
+    scan_total = len({source.relative_path for source in files})
+    if file_progress_callback is not None:
+        file_progress_callback(0, scan_total)
     candidate_settings = _candidate_stage_settings(settings, files)
     discovery_started = perf_counter()
     rag_started = perf_counter()
@@ -3028,6 +3047,8 @@ async def _invoke_candidate_review(
     )
     if hasattr(task, "model_log"):
         task.model_log = discovery_timing_log
+    if file_progress_callback is not None:
+        file_progress_callback(scan_total, scan_total)
     return await _finalize_candidate_review(
         db=db,
         task=task,
@@ -3220,6 +3241,9 @@ async def invoke_selected_model(
     task = db.get(ReviewTask, task_id)
     if task is None:
         raise ModelInvocationError("review task does not exist")
+    task.scan_file_total = None
+    task.scan_file_completed = None
+    db.commit()
     prompt = get_active_prompt(db)
     settings = get_settings()
     candidate_settings = _candidate_stage_settings(settings, task.files)
@@ -3248,6 +3272,11 @@ async def invoke_selected_model(
             return
         chunk_progress = 10 + int((completed_chunks / total_chunks) * 85)
         current_task.progress = max(current_task.progress, min(95, chunk_progress))
+        # The accompanying file callback commits both progress measurements.
+
+    def update_file_progress(completed_files: int, total_files: int) -> None:
+        task.scan_file_total = total_files
+        task.scan_file_completed = completed_files
         db.commit()
 
     should_chunk = _should_chunk(
@@ -3265,6 +3294,7 @@ async def invoke_selected_model(
             prompt=base_prompt,
             settings=settings,
             retry_instruction=retry_instruction,
+            file_progress_callback=update_file_progress,
         )
 
     if should_chunk:
@@ -3277,6 +3307,7 @@ async def invoke_selected_model(
             retry_instruction=retry_instruction,
             settings=candidate_settings if settings.rag_candidate_scan_enabled else settings,
             progress_callback=update_chunk_progress,
+            file_progress_callback=update_file_progress,
             batch_prompt_builder=rag_batch_prompt,
             response_contract=CANDIDATE_RESPONSE_CONTRACT if settings.rag_candidate_scan_enabled else FINAL_RESPONSE_CONTRACT,
             response_schema=None if settings.rag_candidate_scan_enabled else CompactModelReviewResponse,
@@ -3293,8 +3324,10 @@ async def invoke_selected_model(
             )
         return candidate_result
     try:
+        scan_total = len({source.relative_path for source in task.files})
+        update_file_progress(0, scan_total)
         rag_context = _rag_context(db, task, settings, files=task.files, purpose="default")
-        return await invoke_model(
+        result = await invoke_model(
             node=task.model_node,
             files=task.files,
             prompt=base_prompt,
@@ -3303,6 +3336,8 @@ async def invoke_selected_model(
             retry_instruction=retry_instruction,
             settings=settings,
         )
+        update_file_progress(scan_total, scan_total)
+        return result
     except ModelInvocationError as exc:
         if "context window is too small" not in str(exc):
             raise
@@ -3315,6 +3350,7 @@ async def invoke_selected_model(
             settings=settings,
             chunk_max_chars=max(1000, settings.model_chunk_max_chars // 2),
             progress_callback=update_chunk_progress,
+            file_progress_callback=update_file_progress,
             batch_prompt_builder=rag_batch_prompt,
         )
 

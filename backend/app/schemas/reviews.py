@@ -38,6 +38,9 @@ class ReviewTaskSummaryResponse(BaseModel):
     model_log: str | None
     duration_ms: int | None
     file_count: int
+    scan_file_total: int | None = None
+    scan_file_completed: int | None = None
+    scan_file_remaining: int | None = None
     finding_count: int
     check_types: list[str]
     report_id: str | None

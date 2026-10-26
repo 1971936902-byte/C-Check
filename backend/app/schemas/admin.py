@@ -203,6 +203,11 @@ class ModelRuntimeMetricResponse(BaseModel):
     error: str | None = None
 
 
+class GpuSnapshotResponse(BaseModel):
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    gpus: list[GpuDeviceResponse] = Field(default_factory=list)
+
+
 class ResourceSnapshotResponse(BaseModel):
     captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     system: SystemResourceResponse

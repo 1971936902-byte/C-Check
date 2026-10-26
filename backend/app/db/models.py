@@ -148,6 +148,8 @@ class ReviewTask(TimestampMixin, Base):
     graph_build_error: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     file_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    scan_file_total: Mapped[int | None] = mapped_column(Integer)
+    scan_file_completed: Mapped[int | None] = mapped_column(Integer)
     finding_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     check_types: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -163,6 +165,12 @@ class ReviewTask(TimestampMixin, Base):
     @property
     def report_id(self) -> str | None:
         return self.report.id if self.report is not None else None
+
+    @property
+    def scan_file_remaining(self) -> int | None:
+        if self.scan_file_total is None or self.scan_file_completed is None:
+            return None
+        return max(0, self.scan_file_total - self.scan_file_completed)
 
     @property
     def tester_name(self) -> str:

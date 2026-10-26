@@ -12,10 +12,13 @@ from .models import obtain_file
 def asset_prefix(manifest, name, base_url):
     version = manifest['version']
     distribution = manifest.get('distribution') or {}
+    origins = distribution.get('asset_versions', {})
+    if not isinstance(origins, dict) or set(origins) - set(distribution.get('reused_files', [])):
+        raise DeploymentError('invalid signed patch asset version map')
     if name in distribution.get('reused_files', []):
-        previous = distribution.get('base_version', '')
+        previous = origins.get(name, distribution.get('base_version', ''))
         if (distribution.get('kind') != 'deployment-patch' or not name.startswith('images/')
-                or not re.fullmatch(r'v\d+\.\d+\.\d+(?:-rc\.\d+)?', previous)
+                or not isinstance(previous, str) or not re.fullmatch(r'v\d+\.\d+\.\d+(?:-rc\.\d+)?', previous)
                 or previous == version):
             raise DeploymentError('invalid signed patch artifact source')
         version = previous
@@ -85,7 +88,7 @@ def fetch_release(base_url, version, destination, trusted_key, *, reuse_release=
             with archive.extractfile(member) as source, path.open('wb') as output:
                 import shutil
                 shutil.copyfileobj(source, output)
-            path.chmod(0o755 if member.name in {'ccheck', 'install.sh', 'ccheckctl'} else 0o600)
+            path.chmod(0o755 if member.name in {'ccheck', 'install.sh', 'ccheckctl', 'ccheck-review'} else 0o600)
     for name, checksum in manifest['files'].items():
         target = checked_path(root, name)
         obtain_file({'size': manifest['artifact_sizes'][name], 'sha256': checksum,

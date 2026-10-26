@@ -15,6 +15,7 @@ from app.schemas.admin import (
     AdminTaskResponse,
     AdminUserResponse,
     DashboardResponse,
+    GpuSnapshotResponse,
     ModelCatalogItemResponse,
     ModelDeploymentCreateRequest,
     ModelDeploymentResponse,
@@ -35,7 +36,7 @@ from app.services.model_deployments import (
     start_model_deployment,
 )
 from app.services.prompts import activate_prompt, create_prompt_version
-from app.services.resources import collect_resource_snapshot
+from app.services.resources import collect_resource_snapshot, collect_gpu_snapshot
 from app.services.review_queue import attach_queue_positions
 
 
@@ -73,6 +74,11 @@ def resources(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ResourceSnapshotResponse:
     return collect_resource_snapshot(db, settings)
+
+
+@router.get("/resources/gpus", response_model=GpuSnapshotResponse)
+def gpu_resources() -> GpuSnapshotResponse:
+    return collect_gpu_snapshot()
 
 
 @router.get("/users", response_model=list[AdminUserResponse])

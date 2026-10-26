@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccheck-review"
+version = "0.2.1"
+description = "Standalone API client for C-Check code reviews"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+ccheck-review = "ccheck_review:main"
+
+[tool.setuptools]
+py-modules = ["ccheck_review"]

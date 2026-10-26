@@ -18,6 +18,7 @@ from app.db.models import ModelNode, ReviewTask, TaskStatus, User
 from app.schemas.admin import (
     DashboardResponse,
     GpuDeviceResponse,
+    GpuSnapshotResponse,
     ModelRuntimeMetricResponse,
     ResourceSnapshotResponse,
     SystemResourceResponse,
@@ -294,6 +295,11 @@ def _dashboard(db: Session) -> DashboardResponse:
         completed_tasks=statuses.get(TaskStatus.COMPLETED, 0),
         failed_tasks=statuses.get(TaskStatus.FAILED, 0),
     )
+
+
+def collect_gpu_snapshot() -> GpuSnapshotResponse:
+    # CLI polling needs device telemetry only, not serial calls to every model endpoint.
+    return GpuSnapshotResponse(gpus=_gpu_devices())
 
 
 def collect_resource_snapshot(db: Session, settings: Settings) -> ResourceSnapshotResponse:
