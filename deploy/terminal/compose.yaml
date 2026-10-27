@@ -1,0 +1,113 @@
+name: ccheck-terminal
+services:
+  database:
+    image: ${POSTGRES_IMAGE:?Run terminal.py init first}
+    user: postgres
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    environment:
+      POSTGRES_DB: guacamole
+      POSTGRES_USER: guacamole
+      POSTGRES_PASSWORD_FILE: /run/secrets/database-password
+    volumes:
+      - database:/var/lib/postgresql/data
+      - ./state/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - ./state/database-password:/run/secrets/database-password:ro
+    networks: [data]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U guacamole -d guacamole']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: &logging
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  guacd:
+    image: ${GUACD_IMAGE:?Run terminal.py init first}
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    environment:
+      XDG_CACHE_HOME: /tmp
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,size=128m']
+    networks: [ssh]
+    extra_hosts: [host.docker.internal:host-gateway]
+    healthcheck:
+      test: [CMD-SHELL, 'nc -z 127.0.0.1 4822']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
+  guacamole:
+    image: ${GUACAMOLE_IMAGE:?Run terminal.py init first}
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 256
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,size=512m']
+    environment:
+      GUACD_HOSTNAME: guacd
+      POSTGRESQL_ENABLED: 'true'
+      POSTGRESQL_HOSTNAME: database
+      POSTGRESQL_DATABASE: guacamole
+      POSTGRESQL_USERNAME: guacamole
+      POSTGRESQL_PASSWORD_FILE: /run/secrets/database-password
+      REMOTE_IP_VALVE_ENABLED: 'true'
+      BAN_ENABLED: 'true'
+      JAVA_OPTS: '-Xms128m -Xmx384m'
+      API_SESSION_TIMEOUT: '15'
+      POSTGRESQL_ABSOLUTE_MAX_CONNECTIONS: '10'
+      POSTGRESQL_USER_PASSWORD_MIN_LENGTH: '12'
+    volumes:
+      - ./state/database-password:/run/secrets/database-password:ro
+    networks: [data, ssh, web]
+    depends_on:
+      database: {condition: service_healthy}
+      guacd: {condition: service_started}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
+  gateway:
+    image: ${NGINX_IMAGE:?Run terminal.py init first}
+    user: '101:101'
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    entrypoint: [nginx, -g, 'daemon off;']
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,size=64m']
+    ports: ['${TERMINAL_BIND:-127.0.0.1}:${TERMINAL_PORT:-8803}:8443']
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./state/tls.crt:/etc/nginx/tls.crt:ro
+      - ./state/tls.key:/etc/nginx/tls.key:ro
+    networks: [web]
+    depends_on: [guacamole]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
+networks:
+  data:
+    internal: true
+    ipam:
+      config: [{subnet: '${TERMINAL_DATA_SUBNET:-172.31.240.0/26}'}]
+  ssh:
+    ipam:
+      config: [{subnet: '${TERMINAL_SSH_SUBNET:-172.31.240.64/26}'}]
+  web:
+    # Docker 29 does not publish host ports from an internal-only bridge.
+    # Only the TLS gateway has a loopback port binding; app/database remain unpublished.
+    ipam:
+      config: [{subnet: '${TERMINAL_WEB_SUBNET:-172.31.240.128/26}'}]
+volumes:
+  database:

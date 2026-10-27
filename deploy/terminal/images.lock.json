@@ -1,0 +1,26 @@
+{
+  "GUACAMOLE_IMAGE": {
+    "source": "guacamole/guacamole:1.6.0",
+    "image": "guacamole/guacamole@sha256:f344085e618bb05e22b964b0208dbd06d3468275bac70206f93805245e067b40",
+    "id": "sha256:f344085e618bb05e22b964b0208dbd06d3468275bac70206f93805245e067b40",
+    "architecture": "amd64"
+  },
+  "GUACD_IMAGE": {
+    "source": "guacamole/guacd:1.6.0",
+    "image": "guacamole/guacd@sha256:8974eaa9ba32f713daf311e7cc8cd7e4cdfba1edea39eed75524e78ef4b08f4f",
+    "id": "sha256:8974eaa9ba32f713daf311e7cc8cd7e4cdfba1edea39eed75524e78ef4b08f4f",
+    "architecture": "amd64"
+  },
+  "POSTGRES_IMAGE": {
+    "source": "postgres:17-alpine",
+    "image": "postgres@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b",
+    "id": "sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b",
+    "architecture": "amd64"
+  },
+  "NGINX_IMAGE": {
+    "source": "public.ecr.aws/docker/library/nginx:1.28-alpine",
+    "image": "public.ecr.aws/docker/library/nginx@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236",
+    "id": "sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236",
+    "architecture": "amd64"
+  }
+}

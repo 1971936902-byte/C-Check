@@ -86,12 +86,15 @@ def main():
                 site = saved
             elif args.command == 'update':
                 delivery = site.get('delivery')
+                terminal_config = site.get('web', {}).get('terminal_config')
                 model_options = {key: site[key] for key in ('model_paths', 'model_cache', 'model_download_policy')
                                  if key in site} if args.model_migration else {}
                 site = saved
                 site.update(model_options)
                 if delivery is not None:
                     site['delivery'] = delivery
+                if terminal_config is not None:
+                    site['web'] = dict(site['web'], terminal_config=terminal_config)
             elif args.command == 'install' and args.runtime_source is None:
                 site['runtime_source'] = saved.get('runtime_source', 'image')
         if args.command in {'install', 'update'} and args.performance_profile:

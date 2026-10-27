@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import tarfile
 
-PREFIXES = ['backend', 'frontend', 'deploy/models', 'deploy/release', 'tools/review-cli']
+PREFIXES = ['backend', 'frontend', 'deploy/models', 'deploy/release', 'deploy/terminal', 'tools/review-cli']
 EXCLUDED = {'__pycache__', '.pytest_cache', '.venv', 'node_modules', 'dist', 'wheelhouse', 'release-input', 'built-image-records'}
 
 

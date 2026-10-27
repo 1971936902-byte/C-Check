@@ -180,8 +180,11 @@ def load_site(path):
     if not re.fullmatch(r"\d+|GPU-[a-fA-F0-9-]+", str(site.get("gpu", ""))):
         raise DeploymentError("select exactly one GPU index or UUID")
     web = site["web"]
-    if set(web) - {"bind", "port", "public_url", "exposure"}:
+    if set(web) - {"bind", "port", "public_url", "exposure", "terminal_config"}:
         raise DeploymentError("unknown web configuration keys")
+    if 'terminal_config' in web:
+        from .terminal_config import validate_file
+        validate_file(web['terminal_config'])
     import ipaddress
     address = ipaddress.ip_address(web["bind"])
     if address.version != 4 or type(web.get('port')) is not int or not 1024 <= web["port"] <= 65535:

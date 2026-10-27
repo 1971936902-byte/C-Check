@@ -1,0 +1,24 @@
+# Optional mock frontend for CPU-only navigation tests. No backend or models.
+name: ccheck-terminal-preview
+services:
+  preview:
+    image: ${NGINX_IMAGE:?Initialize terminal first}
+    user: '101:101'
+    entrypoint: [nginx, -g, 'daemon off;']
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,size=32m']
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports: ['127.0.0.1:8804:8443']
+    volumes:
+      - ./nginx.preview.conf:/etc/nginx/nginx.conf:ro
+      - ./state/preview:/usr/share/nginx/html:ro
+      - ./state/tls.crt:/etc/nginx/tls.crt:ro
+      - ./state/tls.key:/etc/nginx/tls.key:ro
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

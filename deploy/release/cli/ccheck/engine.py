@@ -357,6 +357,8 @@ def render_compose(site, images, uid, gid):
                 NVIDIA_DRIVER_CAPABILITIES='compute,utility', PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True')
             configure(embedding, site)
     frontend = service("frontend", "256m", 1, ["edge"], user=False)
+    if 'terminal_config' in site['web']:
+        frontend['volumes'] = [bind(site['web']['terminal_config'], '/usr/share/nginx/html/terminal-config.json', True)]
     frontend.update(user="101:101", ports=[f"{site['web']['bind']}:{site['web']['port']}:8080"],
                     tmpfs=["/tmp:size=16777216,mode=1777", "/var/cache/nginx:size=16777216,uid=101,gid=101", "/var/run:size=1048576,uid=101,gid=101"],
                     healthcheck=health(["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]))
