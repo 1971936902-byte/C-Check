@@ -77,10 +77,9 @@ def build(args):
     context = gates / 'frontend-context'
     context.mkdir()
     run(['docker', 'run', '--rm', '--network', 'none', '--memory', '4g', '--cpus', '2', '--entrypoint', 'sh',
-         '-e', 'VITE_USE_MOCK_API=false', '-e', 'VITE_API_BASE_URL=/api',
          '-v', str(root/'frontend')+':/input:ro', '-v', str(context)+':/output', args.frontend_tools,
          '-ec', 'mkdir /tmp/frontend; cp -a /input/. /tmp/frontend/; ln -s /source/node_modules /tmp/frontend/node_modules; '
-         'cd /tmp/frontend; npm test; npm run build; cp -a dist /output/'], 'frontend-tests-build')
+         'cd /tmp/frontend; VITE_USE_MOCK_API=true npm test; VITE_USE_MOCK_API=false npm run build; cp -a dist /output/'], 'frontend-tests-build')
     dist = context / 'dist'
     if json.loads((dist/'terminal-config.json').read_text()) != {'url': ''}:
         raise RuntimeError('production terminal link must be disabled by default')
