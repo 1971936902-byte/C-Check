@@ -151,7 +151,7 @@ def frontend_smoke(image, dist):
         subprocess.run(['docker', 'rm', '-f', '-v', name], check=True, stdout=subprocess.DEVNULL)
 
 
-def mysql_migration(base, new_backend, old_backend, run, *, scan_progress=False):
+def mysql_migration(base, new_backend, old_backend, run, *, scan_progress=False, assistant_state=False):
     image = locate(base['images']['mysql'])
     if not image:
         raise RuntimeError('signed MySQL image must be imported for migration test')
@@ -195,10 +195,20 @@ def mysql_migration(base, new_backend, old_backend, run, *, scan_progress=False)
             verify += (';assert t.scan_file_total is None and t.scan_file_completed is None and t.scan_file_remaining is None;'
                        't.scan_file_total=4;t.scan_file_completed=2;s.commit();s.expire_all();'
                        'assert s.get(ReviewTask,"rc18-sentinel").scan_file_remaining==2;print("SCAN_COUNTERS_PERSISTED")')
+        if assistant_state:
+            verify += (';from app.db.models import AssistantComputeGate,AssistantConversation,AssistantDocument;'
+                       'g=s.get(AssistantComputeGate,1);assert g is not None and g.generation==0;'
+                       'assert g.owner_token is None and g.control_token is None and g.control_epoch is None;'
+                       'c=AssistantConversation(owner_id=t.owner_id,title="migration conversation",rag_enabled=True,status="ready");'
+                       'd=AssistantDocument(owner_id=t.owner_id,filename="keep.txt",size_bytes=13,sha256="a"*64,'
+                       'status="ready",locations=["fixture/location"]);s.add_all([c,d]);s.commit();'
+                       's.expire_all();assert s.get(AssistantConversation,c.id).title=="migration conversation";'
+                       'assert s.get(AssistantDocument,d.id).locations==["fixture/location"];'
+                       'print("ASSISTANT_TABLES_GATE_CHECKPOINTS_AND_DOCUMENTS_PERSISTED")')
         run(common + [new_backend, '-c', verify], 'mysql-preservation', env=env)
         run(common + [new_backend, '-m', 'app.deployment', 'migrate'], 'mysql-repeat', env=env)
         return {'passed': True, 'mysql': True, 'repeatable': True, 'existing_rows_and_password_preserved': True,
-                'scan_progress': scan_progress}
+                'scan_progress': scan_progress, 'assistant_state': assistant_state}
     finally:
         subprocess.run(['docker', 'rm', '-f', '-v', name], check=True, stdout=subprocess.DEVNULL)
 

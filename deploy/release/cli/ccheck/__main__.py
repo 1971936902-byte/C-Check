@@ -15,10 +15,11 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ['doctor', 'install', 'status', 'version', 'start', 'stop', 'model-start', 'model-stop', 'verify',
                  'logs', 'backup', 'restore', 'update', 'rollback', 'publish', 'uninstall', 'network-plan', 'network-recover',
-                 'download-plan', 'prepare-assets']:
+                 'download-plan', 'prepare-assets', 'assistant-recover', 'terminal-install', 'terminal-start',
+                 'terminal-stop', 'terminal-status', 'terminal-check', 'terminal-logs', 'terminal-configure']:
         command = sub.add_parser(name)
         command.add_argument('--config', required=True, type=Path, help='site YAML/JSON configuration')
-        if name in {'install', 'update', 'rollback', 'download-plan', 'prepare-assets'}:
+        if name in {'install', 'update', 'rollback', 'download-plan', 'prepare-assets', 'terminal-install'}:
             command.add_argument('--release', type=Path, default=Path(sys.argv[0]).resolve().parent.parent)
             command.add_argument('--version')
             command.add_argument('--trusted-key', type=Path)
@@ -43,7 +44,8 @@ def main():
             command.add_argument('--backup', type=Path, required=True)
             command.add_argument('--confirm-instance', required=True)
         if name == 'logs':
-            command.add_argument('service', choices=['api', 'worker', 'qwen', 'embedding', 'mysql', 'redis', 'qdrant', 'frontend'])
+            command.add_argument('service', choices=['api', 'worker', 'qwen', 'embedding', 'mysql', 'redis', 'qdrant', 'frontend',
+                'assistant-gateway', 'assistant-worker', 'anythingllm'])
             command.add_argument('--tail', type=int, default=100)
         if name == 'verify':
             command.add_argument('--fresh', action='store_true')
@@ -82,11 +84,14 @@ def main():
             saved = load_site(root / 'config/site.json')
             if saved['instance'] != site['instance']:
                 raise DeploymentError('configuration does not match installed instance')
-            if args.command not in {'install', 'download-plan', 'prepare-assets', 'update'}:
+            if (args.command not in {'install', 'download-plan', 'prepare-assets', 'update'}
+                    and not args.command.startswith('terminal-')):
                 site = saved
             elif args.command == 'update':
                 delivery = site.get('delivery')
                 terminal_config = site.get('web', {}).get('terminal_config')
+                assistant_config = site.get('assistant')
+                managed_terminal = site.get('terminal')
                 model_options = {key: site[key] for key in ('model_paths', 'model_cache', 'model_download_policy')
                                  if key in site} if args.model_migration else {}
                 site = saved
@@ -95,6 +100,10 @@ def main():
                     site['delivery'] = delivery
                 if terminal_config is not None:
                     site['web'] = dict(site['web'], terminal_config=terminal_config)
+                if assistant_config is not None:
+                    site['assistant'] = assistant_config
+                if managed_terminal is not None:
+                    site['terminal'] = managed_terminal
             elif args.command == 'install' and args.runtime_source is None:
                 site['runtime_source'] = saved.get('runtime_source', 'image')
         if args.command in {'install', 'update'} and args.performance_profile:
@@ -102,7 +111,19 @@ def main():
                 site['performance'] = {}
             else:
                 site.pop('performance', None)
-        if args.command in {'download-plan', 'prepare-assets'}:
+        if args.command.startswith('terminal-'):
+            from .remote_terminal import command
+            action = args.command.removeprefix('terminal-')
+            if action == 'install':
+                if args.version:
+                    metadata = json.loads((args.release / 'release.json').read_text())
+                    if metadata.get('version') != args.version:
+                        raise DeploymentError('terminal release version does not match requested version')
+                command(site, action, release_root=args.release,
+                        trusted_key=args.trusted_key or root / 'config/publisher.pem')
+            else:
+                command(site, action)
+        elif args.command in {'download-plan', 'prepare-assets'}:
             from .core import verify_release
             from .delivery import plan, prepare_assets
             trusted = args.trusted_key or root / 'config/publisher.pem'
@@ -127,6 +148,9 @@ def main():
             print(json.dumps(network_preflight(site), indent=2))
         elif args.command == 'network-recover':
             lifecycle.recover_network(site)
+        elif args.command == 'assistant-recover':
+            from .assistant_recovery import recover
+            recover(site)
         elif args.command in {'update', 'rollback'}:
             if args.command == 'update' and args.gpu_access_mode:
                 site['gpu_access_mode'] = args.gpu_access_mode

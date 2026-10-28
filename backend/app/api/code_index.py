@@ -140,6 +140,9 @@ def build_index(
     if task.graph_build_status in {"queued", "running", "completed"}:
         return _build_state(task)
     build_id = str(uuid4())
+    if get_settings().assistant_enabled:
+        from app.services.assistant_gate import request_preemption
+        request_preemption(db)
     claimed = db.execute(update(ReviewTask).where(
         ReviewTask.id == task.id,
         ReviewTask.graph_build_status.in_(["idle", "failed"]),

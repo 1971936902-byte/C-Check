@@ -1,0 +1,33 @@
+diff --git a/server/utils/chats/apiChatHandler.js b/server/utils/chats/apiChatHandler.js
+--- a/server/utils/chats/apiChatHandler.js
++++ b/server/utils/chats/apiChatHandler.js
+@@ -176,6 +176,8 @@ async function chatSync({
+   // Process slash commands
+   // Since preset commands are not supported in API calls, we can just process the message here
+-  const processedMessage = await grepAllSlashCommands(message);
++  const processedMessage = process.env.CCHECK_ASSISTANT_MODE === "true"
++    ? message
++    : await grepAllSlashCommands(message);
+   message = processedMessage;
+ 
+   // Document attachments are parsed to text up front so agent and normal chats
+@@ -187,3 +189,4 @@ async function chatSync({
+   if (
++    process.env.CCHECK_ASSISTANT_MODE !== "true" &&
+     await EphemeralAgentHandler.isAgentInvocation({
+       message,
+@@ -555,6 +558,8 @@ async function streamChat({
+   // Check for and process slash commands
+   // Since preset commands are not supported in API calls, we can just process the message here
+-  const processedMessage = await grepAllSlashCommands(message);
++  const processedMessage = process.env.CCHECK_ASSISTANT_MODE === "true"
++    ? message
++    : await grepAllSlashCommands(message);
+   message = processedMessage;
+ 
+   // Document attachments are parsed to text up front so agent and normal chats
+@@ -566,3 +571,4 @@ async function streamChat({
+   if (
++    process.env.CCHECK_ASSISTANT_MODE !== "true" &&
+     await EphemeralAgentHandler.isAgentInvocation({
+       message,

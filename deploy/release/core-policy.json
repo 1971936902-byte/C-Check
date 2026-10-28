@@ -6,13 +6,15 @@
     "app.services.code_index.retriever", "app.services.code_index.context_builder", "app.services.code_index.planner"
   ],
   "plaintext_allowlist": [
-    "app/__init__.py", "app/main.py", "app/worker.py", "app/deployment.py", "app/backup.py",
+    "app/__init__.py", "app/main.py", "app/worker.py", "app/deployment.py", "app/backup.py", "app/assistant_gateway.py",
     "app/api/__init__.py", "app/api/admin.py", "app/api/auth.py", "app/api/code_index.py", "app/api/deps.py",
-    "app/api/models.py", "app/api/reports.py", "app/api/reviews.py",
+    "app/api/models.py", "app/api/reports.py", "app/api/reviews.py", "app/api/assistant.py", "app/api/assistant_documents.py",
     "app/core/__init__.py", "app/core/bootstrap.py", "app/core/config.py", "app/core/security.py",
     "app/db/__init__.py", "app/db/base.py", "app/db/models.py", "app/db/session.py",
     "app/schemas/__init__.py", "app/schemas/admin.py", "app/schemas/auth.py", "app/schemas/model_response.py", "app/schemas/reviews.py",
-    "app/tasks/__init__.py", "app/tasks/reviews.py", "app/tasks/code_index.py", "app/services/__init__.py",
+    "app/tasks/__init__.py", "app/tasks/reviews.py", "app/tasks/code_index.py", "app/tasks/assistant_documents.py", "app/services/__init__.py",
+    "app/services/anythingllm.py", "app/services/assistant_chat.py", "app/services/assistant_documents.py",
+    "app/services/assistant_embedding.py", "app/services/assistant_gate.py", "app/services/assistant_recovery.py",
     "app/services/model_deployments.py", "app/services/reports.py", "app/services/resources.py",
     "app/services/review_queue.py", "app/services/submissions.py", "app/services/code_index/__init__.py",
     "app/services/code_index/clang_static_analyzer.py", "app/services/code_index/clangd.py",

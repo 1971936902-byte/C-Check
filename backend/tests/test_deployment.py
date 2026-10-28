@@ -73,3 +73,27 @@ def test_backup_paths_do_not_allow_escape_or_model_copies():
     assert not permitted('/data/uploads/file.c')
     assert not permitted('models/qwen/model.safetensors')
     assert not permitted('data/uploads\\..\\etc/passwd')
+    assert permitted('data/assistant/storage/anythingllm.db')
+
+
+def test_maintenance_pending_cancels_chat_and_counts_document_writers(db_session_factory, monkeypatch, capsys):
+    import json
+    from app import deployment
+    from app.db.models import AssistantComputeGate, AssistantDocument, User
+    from app.services import assistant_gate
+    monkeypatch.setenv('ASSISTANT_ENABLED', 'true')
+    monkeypatch.setattr(deployment, 'SessionLocal', db_session_factory)
+    with db_session_factory() as db:
+        db.add(AssistantComputeGate(id=1, generation=0, cancel_requested=False))
+        user = User(username='backup-user', password_hash='unused')
+        db.add(user)
+        db.flush()
+        for status in ('queued', 'processing', 'ready', 'paused'):
+            db.add(AssistantDocument(owner_id=user.id, filename=status + '.txt', size_bytes=1,
+                sha256='a' * 64, status=status))
+        assistant_gate.claim(db, 'chat')
+        db.commit()
+    deployment.pending()
+    assert json.loads(capsys.readouterr().out)['pending'] == 3
+    with db_session_factory() as db:
+        assert db.get(AssistantComputeGate, 1).cancel_requested

@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/Mintplex-Labs/anything-llm.git",
+  "commit": "9b1fcab141000eaba9f78ed131151de04904454b",
+  "license": "MIT",
+  "license_sha256": "782d2dc18a1ed9028ca992520f42b2e0b6187807da0d14455b8ae608e2e5692e",
+  "patches": ["anythingllm-gateway.patch", "anythingllm-no-agents.patch", "anythingllm-embedding-format.patch"],
+  "models": {
+    "chat": "qwen2.5-coder-32b-instruct-fp8",
+    "embedding": "jina-code-embeddings-1.5b"
+  },
+  "network_policy": "AnythingLLM must reach models only through assistant-gateway; never attach it to the inference network."
+}

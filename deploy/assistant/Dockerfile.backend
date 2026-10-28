@@ -1,0 +1,14 @@
+# Development validation image. Reuse the existing, verified runtime dependencies.
+ARG BACKEND_BASE
+FROM ${BACKEND_BASE}
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/c-check-assistant/backend
+WORKDIR /opt/c-check-assistant/backend
+# A separate source root prevents old compiled modules shadowing updated Python.
+COPY --chown=10001:10001 backend/app ./app
+COPY --chown=10001:10001 backend/alembic ./alembic
+COPY --chown=10001:10001 backend/alembic.ini ./alembic.ini
+COPY --chown=10001:10001 backend/pyproject.toml ./pyproject.toml
+USER 10001:10001
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

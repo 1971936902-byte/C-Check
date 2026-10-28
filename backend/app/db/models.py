@@ -38,6 +38,43 @@ class TimestampMixin:
     )
 
 
+class AssistantComputeGate(Base):
+    __tablename__ = "assistant_compute_gate"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    owner_token: Mapped[str | None] = mapped_column(String(64))
+    control_token: Mapped[str | None] = mapped_column(String(64))
+    control_epoch: Mapped[str | None] = mapped_column(String(64))
+    operation: Mapped[str | None] = mapped_column(String(16))
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    fault: Mapped[str | None] = mapped_column(String(255))
+
+
+class AssistantConversation(TimestampMixin, Base):
+    __tablename__ = "assistant_conversations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    rag_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="provisioning", nullable=False)
+
+
+class AssistantDocument(TimestampMixin, Base):
+    __tablename__ = "assistant_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False)
+    locations: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    error: Mapped[str | None] = mapped_column(String(255))
+
+
 class User(TimestampMixin, Base):
     __tablename__ = "users"
 

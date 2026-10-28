@@ -39,7 +39,20 @@ def main():
     root = Path(release['_root'])
     assets = [root / name for name in ['release.json', 'release.sig', 'checksums.sha256', 'bootstrap.tar.gz',
                                      'publisher.pem', 'INSTALL-RTX5880.md', 'site-rtx5880.example.json']]
-    assets.extend(root / name for name in release['files'] if name.startswith('images/'))
+    reused = set((release.get('distribution') or {}).get('reused_files', []))
+    assets.extend(root / name for name in release['files'] if name.startswith('images/') and name not in reused)
+    for name in ('ASSISTANT.md', 'REMOTE-SSH.md', 'CLI-REVIEW.md'):
+        if name in release['files']:
+            assets.append(root / name)
+    if (release.get('distribution') or {}).get('kind') == 'deployment-patch':
+        bundle = root.parent / ('release-' + release['version'] + '-patch.tar.gz')
+        checksum = bundle.with_name(bundle.name + '.sha256')
+        if not bundle.is_file() or not checksum.is_file():
+            raise RuntimeError('signed patch bundle and checksum must be assembled before publication')
+        from ccheck.core import digest
+        if checksum.read_text().strip() != digest(bundle) + '  ' + bundle.name:
+            raise RuntimeError('patch bundle checksum differs')
+        assets.extend((bundle, checksum))
     if len({path.name for path in assets}) != len(assets) or any(path.stat().st_size >= 2 * 1024**3 for path in assets):
         raise RuntimeError('GitHub asset naming/size limit exceeded')
     command = ['gh', 'release', 'create', release['tag'], '--repo', args.repository, '--verify-tag', '--draft',

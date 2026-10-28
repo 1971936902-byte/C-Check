@@ -153,6 +153,32 @@ const serviceActions = [
   },
 ]
 
+const terminalActions = [
+  {
+    name: '安装远程终端',
+    command: String.raw`cd /home/lyh/c-check-packages/release-v0.1.0-rc.21
+sudo ./ccheck terminal-install \
+  --config /home/lyh/c-check-site.json \
+  --release "$PWD" \
+  --trusted-key /home/lyh/c-check-instance/config/publisher.pem`,
+    description: '先按包内 REMOTE-SSH.md 在站点配置中启用 terminal，并配置独立目录、监听地址、端口、HTTPS URL 和 SSH 目标。使用经独立核实的发布者公钥，首次部署按锁定摘要下载缺少的组件镜像。',
+  },
+  {
+    name: '启动、查看与停止',
+    command: String.raw`sudo ./ccheck terminal-start --config /home/lyh/c-check-site.json
+sudo ./ccheck terminal-status --config /home/lyh/c-check-site.json
+sudo ./ccheck terminal-check --config /home/lyh/c-check-site.json
+sudo ./ccheck terminal-stop --config /home/lyh/c-check-site.json`,
+    description: '按需执行对应命令，无需依次全部执行。停止仅影响独立终端，不停止审查或模型容器，终端账号、数据库与连接授权保留。启动成功后刷新页面，管理员可从侧边栏进入远程终端。',
+  },
+  {
+    name: '更新地址与排查',
+    command: String.raw`sudo ./ccheck terminal-configure --config /home/lyh/c-check-site.json
+sudo ./ccheck terminal-logs --config /home/lyh/c-check-site.json`,
+    description: '修改监听 IP、端口、URL、证书或 SSH 连接后执行 terminal-configure。此操作会中断活动终端会话，请提前结束会话。仅排查时执行 terminal-logs；不要通过删除状态目录或数据库卷来重置账号。',
+  },
+]
+
 async function copyCommand(text: string, event: MouseEvent) {
   const code = (event.currentTarget as HTMLElement).closest('.help-command')?.querySelector('code')
   try {
@@ -245,6 +271,30 @@ async function copyCommand(text: string, event: MouseEvent) {
             </div>
           </div>
           <p>重启本项目时，先执行 stop，确认成功退出后再执行 start，最后执行 status。若任一步失败，先根据输出排查；不要把这三步不加判断地连续执行。</p>
+        </section>
+      </el-tab-pane>
+      <el-tab-pane label="远程终端" name="terminal">
+        <section class="help-section" aria-labelledby="terminal-management-title">
+          <h3 id="terminal-management-title">远程 SSH 终端（管理员）</h3>
+          <p>rc21 支持通过独立的 Apache Guacamole 服务连接 Linux 主机。无需 GPU，支持交互式 Linux 命令和回显。终端与审查系统分别登录，不共用平台密码。</p>
+          <p>默认仅监听 127.0.0.1:8803，使用 90 天自签名测试证书。跨机器访问需配置内网监听地址、实际 HTTPS URL 和匹配的 TLS 证书，或使用 SSH 本地转发。不要直接暴露至公网。</p>
+          <div v-for="action in terminalActions" :key="action.name" class="service-action">
+            <h4>{{ action.name }}</h4>
+            <p>{{ action.description }}</p>
+            <div class="help-command">
+              <div class="command-toolbar">
+                <span>Bash</span>
+                <el-tooltip content="复制命令" placement="top">
+                  <button type="button" class="command-copy" :aria-label="`复制${action.name}命令`" @click="copyCommand(action.command, $event)">
+                    <el-icon aria-hidden="true"><DocumentCopy /></el-icon>
+                  </button>
+                </el-tooltip>
+              </div>
+              <pre tabindex="0" :aria-label="`${action.name}命令`"><code>{{ action.command }}</code></pre>
+            </div>
+          </div>
+          <p>初始终端管理员为 terminal-admin，随机密码见安装器提示的私有凭据文件。首次登录后修改密码，不要分享凭据文件或截图。SSH 密码在连接时输入；目标主机公钥必须经可信渠道核实，不能关闭主机身份校验。</p>
+          <p>以上 ./ccheck 命令均在 rc21 发布目录下执行。使用其他路径时请改为本次发布包内 ccheck 的绝对路径，不要调用旧 rc16 工具。</p>
         </section>
       </el-tab-pane>
       <el-tab-pane label="Web 使用" name="web">

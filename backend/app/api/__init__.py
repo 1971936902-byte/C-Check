@@ -1,6 +1,8 @@
 from fastapi import APIRouter
 
 from app.api.admin import router as admin_router
+from app.api.assistant import router as assistant_router
+from app.api.assistant_documents import router as assistant_documents_router
 from app.api.auth import router as auth_router
 from app.api.code_index import review_context_router, router as code_index_router
 from app.api.models import router as models_router
@@ -10,6 +12,8 @@ from app.api.reviews import router as reviews_router
 
 router = APIRouter(prefix="/api")
 router.include_router(admin_router)
+router.include_router(assistant_router)
+router.include_router(assistant_documents_router)
 router.include_router(auth_router)
 router.include_router(code_index_router)
 router.include_router(models_router)

@@ -465,6 +465,9 @@ def create_review_task(
         )
         for source in submission.files
     )
+    if get_settings().assistant_enabled:
+        from app.services.assistant_gate import request_preemption
+        request_preemption(db)
     db.add(task)
     db.commit()
     db.refresh(task)

@@ -11,6 +11,7 @@ import time
 
 from .core import DeploymentError, atomic_json, checked_path, digest, installation_lock, run
 from .engine import Engine
+from . import assistant
 
 
 def key_material(path):
@@ -58,6 +59,8 @@ def prune_completed(engine, site, mac_key):
 
 
 def make_backup(site, state, key_file, *, locked=False, cold=False):
+    from .assistant_recovery import assert_no_pending
+    assert_no_pending(site)
     engine = Engine(site)
     key_file, mac_key = key_material(key_file)
     if key_file.is_relative_to(engine.root):
@@ -77,7 +80,10 @@ def make_backup(site, state, key_file, *, locked=False, cold=False):
     directory = Path(tempfile.mkdtemp(prefix=time.strftime('%Y%m%d-%H%M%S') + '-', dir=engine.root / 'backups'))
     encrypted = directory / 'snapshot.tar.enc'
     try:
-        engine.compose('stop', '--timeout', '120', 'api', 'worker', 'frontend', 'mysql', 'redis', 'qdrant')
+        writers = ['api', 'worker', 'frontend', 'mysql', 'redis', 'qdrant']
+        if assistant.enabled(site):
+            writers += list(assistant.SERVICES)
+        engine.compose('stop', '--timeout', '120', *writers)
         with encrypted.open('wb') as output, (directory / 'snapshot.log').open('wb') as log:
             source = subprocess.Popen(helper(engine, state, 'create'), stdout=subprocess.PIPE, stderr=log)
             try:
@@ -162,11 +168,15 @@ def restore_backup(site, state, directory, key_file, confirm):
                 if extract_status or decrypted_status:
                     raise DeploymentError('restore failed; services remain stopped, inspect owner-only restore log')
             # Secret files were restored; Compose mounts resolve them when containers are recreated.
+            assistant.prepare(site, state['uid'], state['gid'])
             engine.compose('up', '-d', '--force-recreate', 'mysql', 'redis', 'qdrant')
             engine.wait(['mysql', 'redis', 'qdrant'])
             engine.management('migrate')
             engine.compose('up', '-d', '--force-recreate', 'qwen', 'embedding', 'api', 'worker', 'frontend')
             engine.wait(['qwen', 'embedding', 'api', 'worker', 'frontend'])
+            if assistant.enabled(site):
+                engine.compose('up', '-d', '--force-recreate', *assistant.SERVICES)
+                engine.wait(list(assistant.SERVICES))
             engine.management('register-model')
             engine.maintenance(False)
             for marker in (engine.root / 'state').glob('acceptance-*.json'):

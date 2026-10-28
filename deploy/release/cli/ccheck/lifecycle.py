@@ -13,6 +13,7 @@ from .gpu import validate_inspection
 from . import networks
 from . import acceleration
 from . import inference
+from . import assistant
 
 
 def installed(site):
@@ -82,6 +83,7 @@ def start_stack(engine):
     wait_data_services(engine)
     engine.management('migrate')
     acceleration.verify(engine.site)
+    assistant.verify(engine.site)
     if acceleration.gpu_embedding(engine.site):
         # Stop only this project's models before re-budgeting the shared GPU.
         engine.compose('stop', '--timeout', '120', 'qwen', 'embedding')
@@ -95,6 +97,9 @@ def start_stack(engine):
     else:
         engine.compose('up', '-d', 'qwen', 'embedding')
         engine.wait(['qwen', 'embedding'])
+    if assistant.enabled(engine.site):
+        engine.compose('up', '-d', *assistant.SERVICES)
+        engine.wait(list(assistant.SERVICES))
     engine.compose('up', '-d', 'api', 'worker')
     engine.wait(['api', 'worker'])
     # Nginx resolves its static upstream on startup; API replacement can change IP.
@@ -186,13 +191,16 @@ def verify(site, *, fresh=False):
     release = verify_release(state['release_root'], root / 'config/publisher.pem', state['publisher'])
     inference.configure(site, release)
     acceleration.validate_release(site, release)
+    assistant.validate_release(site, release)
     engine = Engine(site)
-    engine.wait(['mysql', 'redis', 'qdrant', 'qwen', 'embedding', 'api', 'worker', 'frontend'], timeout=120)
+    engine.wait(['mysql', 'redis', 'qdrant', 'qwen', 'embedding', 'api', 'worker', 'frontend']
+                + (list(assistant.SERVICES) if assistant.enabled(site) else []), timeout=120)
     expected = state['images']
     if digest(root / 'config/site.json') != state['site_sha256']:
         raise DeploymentError('site configuration changed outside ccheck publish/update')
     canonical = render_compose(site, expected, state['uid'], state['gid'])
     acceleration.verify(site)
+    assistant.verify(site)
     if json.loads(engine.file.read_text()) != canonical:
         raise DeploymentError('managed Compose configuration deviates from the deployment recipe')
     for image, spec in release['images'].items():
@@ -204,7 +212,7 @@ def verify(site, *, fresh=False):
             raise DeploymentError('installation image identity differs from signed release: ' + image)
     rows = json.loads(engine.compose('config', '--format', 'json'))
     for service, specification in rows['services'].items():
-        image = 'backend' if service in {'api', 'worker', 'init'} else service
+        image = assistant.image_for_service(service)
         if service == 'embedding' and acceleration.gpu_embedding(site):
             image = 'qwen'
         if specification['image'] != expected[image]:
@@ -261,6 +269,7 @@ def start(site):
         assert_no_pending_network_migration(engine.root)
         release = verify_release(state['release_root'], engine.root / 'config/publisher.pem', state['publisher'])
         inference.configure(site, release)
+        assistant.validate_release(site, release)
         verify_models(release, site)
         start_stack(engine)
         engine.maintenance(False)
@@ -280,6 +289,8 @@ def stop(site, *, models_only=False):
 
 def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=None, cold_network=False,
            model_migration=False):
+    from .assistant_recovery import assert_no_pending
+    assert_no_pending(site)
     state = installed(site)
     root = Path(site['data_dir'])
     trusted_key = trusted_key or root / 'config/publisher.pem'
@@ -367,7 +378,8 @@ def update(site, release_root, trusted_key=None, *, rollback=False, backup_key=N
         except Exception:
             engine.maintenance(True)
             if changing_schema:
-                engine.compose('stop', '--timeout', '120', 'api', 'worker')
+                engine.compose('stop', '--timeout', '120', 'api', 'worker',
+                               *(assistant.SERVICES if assistant.enabled(site) else ()))
                 raise DeploymentError('schema upgrade acceptance failed; submissions remain paused. '
                                       'Restore the encrypted pre-upgrade backup with its matching rc16 release; '
                                       'do not start old images against the migrated database.')
@@ -412,7 +424,7 @@ def begin_network_migration(engine, previous_site, previous_compose, state, targ
         raise DeploymentError('previous site ownership differs; refusing network migration')
     if previous_compose.get('name') != project_name(engine.site):
         raise DeploymentError('previous Compose project identity differs; refusing network teardown')
-    if set(previous_compose.get('networks', {})) != set(networks.DEFAULT_SUBNETS):
+    if not set(networks.DEFAULT_SUBNETS) <= set(previous_compose.get('networks', {})) <= {*networks.DEFAULT_SUBNETS, 'assistant'}:
         raise DeploymentError('unexpected previous project networks; refusing migration')
     atomic_json(engine.root / 'state/network-migration.json', {'status': 'pending',
         'instance': engine.site['instance'], 'root': str(engine.root), 'previous_site': previous_site,

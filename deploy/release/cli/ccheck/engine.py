@@ -10,10 +10,11 @@ import time
 
 from .core import DeploymentError, atomic_json, checked_path, digest, gpu_memory_fraction, run
 from .gpu import access_mode, cdi_device, check_identity, configure, NVML_PROBE, probe, validate_inspection
-from .networks import specifications, subnets
+from .networks import DEFAULT_SUBNETS, specifications, subnets
 from . import acceleration
 from . import delivery
 from . import inference
+from . import assistant
 
 
 def project_name(site):
@@ -64,6 +65,7 @@ def gateway_snippet(site):
 def preflight(site, release=None):
     if release is not None:
         inference.configure(site, release)
+        assistant.validate_release(site, release)
         delivery.validate_release(release)
         if delivery.is_online(release):
             site.setdefault('delivery', {})
@@ -146,7 +148,7 @@ def preflight(site, release=None):
 
 
 def prepare_data(site, release):
-    site['network_subnets'] = subnets(site)
+    site['network_subnets'] = {name: cidr for name, cidr in subnets(site).items() if name in DEFAULT_SUBNETS}
     root = Path(site["data_dir"])
     owner = checked_path(root, "state/owner.json")
     expected = {"instance": site["instance"], "root": str(root)}
@@ -192,6 +194,9 @@ def prepare_data(site, release):
         raise DeploymentError('database URL secret must be a regular owner-only file')
     atomic_json(root / "config/site.json", site)
     acceleration.prepare(site)
+    assistant.prepare(site, uid, gid)
+    from .remote_terminal import prepare_public_config
+    prepare_public_config(site)
     return uid, gid
 
 
@@ -359,6 +364,9 @@ def render_compose(site, images, uid, gid):
     frontend = service("frontend", "256m", 1, ["edge"], user=False)
     if 'terminal_config' in site['web']:
         frontend['volumes'] = [bind(site['web']['terminal_config'], '/usr/share/nginx/html/terminal-config.json', True)]
+    elif 'terminal' in site:
+        from .remote_terminal import public_config_path
+        frontend['volumes'] = [bind(str(public_config_path(site)), '/usr/share/nginx/html/terminal-config.json', True)]
     frontend.update(user="101:101", ports=[f"{site['web']['bind']}:{site['web']['port']}:8080"],
                     tmpfs=["/tmp:size=16777216,mode=1777", "/var/cache/nginx:size=16777216,uid=101,gid=101", "/var/run:size=1048576,uid=101,gid=101"],
                     healthcheck=health(["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]))
@@ -367,10 +375,11 @@ def render_compose(site, images, uid, gid):
             continue
         isolated['runtime'] = 'runc'
         isolated['environment'] = dict(isolated.get('environment', {}), NVIDIA_VISIBLE_DEVICES='void')
-    return {"name": project_name(site), "services": {"mysql": mysql, "redis": redis, "qdrant": qdrant,
+    document = {"name": project_name(site), "services": {"mysql": mysql, "redis": redis, "qdrant": qdrant,
             "embedding": embedding, "qwen": qwen, "api": api, "worker": worker, "frontend": frontend, "init": init},
             "secrets": {name: {"file": str(root / "secrets" / name)} for name in secret_names},
             "networks": specifications(site)}
+    return assistant.render(site, document, images)
 
 
 class Engine:

@@ -1,0 +1,8 @@
+{
+  "sharp_version": "0.32.6",
+  "libvips_version": "8.14.5",
+  "filename": "libvips-8.14.5-linux-x64.tar.br",
+  "url": "https://github.com/lovell/sharp-libvips/releases/download/v8.14.5/libvips-8.14.5-linux-x64.tar.br",
+  "sha512": "4a5156ac84d25b95d55246853d03b24806921979e19062428fc5f6c06618b5af61939a62665750c8ca78cf0cb4cfa51e46ed6a2932ad66f9aadbc5b71a787dc4",
+  "integrity_source": "sharp@0.32.6 package.json config.integrity.linux-x64"
+}

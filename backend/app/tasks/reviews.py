@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.db.models import Report, ReviewTask, TaskStatus
 from app.db.session import SessionLocal
 from app.schemas.model_response import FindingCategory, FindingSeverity, ModelReviewResponse, ReviewFinding
+from app.services.assistant_gate import AssistantDrainPending, require_review_admission
 from app.services.model_router import ModelInvocationError, invoke_selected_model, truncate_model_log
 from app.services.reports import populate_report
 from app.worker import celery_app
@@ -344,6 +345,7 @@ def _invoke_with_retries(db, task_id: str, max_attempts: int) -> ModelReviewResp
 
 
 def run_review_task(task_id: str) -> None:
+    require_review_admission()
     started = monotonic()
     settings = get_settings()
     try:
@@ -400,6 +402,8 @@ def run_review_task(task_id: str) -> None:
             dispatch_next_review(db)
 
 
-@celery_app.task(name="app.tasks.reviews.dispatch_review")
+@celery_app.task(name="app.tasks.reviews.dispatch_review",
+                 autoretry_for=(AssistantDrainPending,), max_retries=None,
+                 default_retry_delay=2)
 def dispatch_review(task_id: str) -> None:
     run_review_task(task_id)

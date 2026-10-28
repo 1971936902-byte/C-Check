@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Clock, DataAnalysis, EditPen, Guide, HomeFilled, Setting, User, SwitchButton, Monitor } from '@element-plus/icons-vue'
+import { Clock, DataAnalysis, EditPen, Guide, HomeFilled, Setting, User, SwitchButton, Monitor, ChatDotRound } from '@element-plus/icons-vue'
 import { useAuthStore } from '../stores/auth'
 import { terminalUrl } from '../utils/terminal-config'
 const auth = useAuthStore(); const route = useRoute(); const router = useRouter()
@@ -23,6 +23,7 @@ const items = computed(() => [
   { path: '/dashboard', label: '工作台概览', icon: HomeFilled },
   { path: '/workspace', label: '代码审查', icon: EditPen },
   { path: '/history', label: '历史报告', icon: Clock },
+  { path: '/assistant', label: 'AI智能助手', icon: ChatDotRound },
   ...(auth.isAdmin ? [{ path: '/admin', label: '后台管理', icon: DataAnalysis }] : []),
   { path: '/profile', label: '个人中心', icon: User },
   { path: '/help', label: '使用帮助', icon: Guide },
@@ -50,6 +51,8 @@ function logout() { auth.logout(); router.push('/login') }
 .terminal-unavailable:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
 @media (max-width: 900px) { .terminal-unavailable { font-size: 12px; padding: 10px 8px; } }
 @media (max-width: 520px) {
+  .sidebar nav { overflow-x: auto; justify-content: flex-start; }
+  .sidebar nav a, .sidebar nav .terminal-unavailable { flex: 0 0 44px; min-height: 44px; }
   .terminal-unavailable { font-size: 0; gap: 0; justify-content: center; min-width: 0; flex: 1; padding: 9px 4px; }
   .terminal-unavailable .el-icon { font-size: 20px; }
 }

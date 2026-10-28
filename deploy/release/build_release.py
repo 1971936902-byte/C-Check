@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import urlopen
 import zipfile
 
@@ -24,6 +24,64 @@ from prepare_build import sha
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'cli'))
 from ccheck.image_identity import identity
 from ccheck.core import checked_path, verify_release
+
+
+def validate_assistant_gates(previous, images, gates):
+    if not previous or previous['version'] not in {'v0.1.0-rc.19', 'v0.1.0-rc.20'}:
+        raise RuntimeError('assistant release requires a verified Qwen2.5 rc19/rc20 baseline')
+    if 'anythingllm' not in images:
+        raise RuntimeError('assistant provider image is missing')
+    evidence = gates.get('assistant', {})
+    for name in ('passed', 'real_gpu', 'review_preemption', 'rag', 'owner_isolation',
+                 'recovery', 'source_native_parity'):
+        if evidence.get(name) is not True:
+            raise RuntimeError('missing assistant acceptance gate: ' + name)
+
+
+def bind_assistant_metadata(context, previous, release):
+    from ccheck import assistant
+    from ccheck.schema_migration import validate
+    resources = {name: sha(context / 'deploy/assistant' / name) for name in assistant.RESOURCES}
+    if resources != assistant.hashes():
+        raise RuntimeError('assistant source and publisher runtime differ')
+    release['assistant_runtime'] = resources
+    release['schema_migration'] = {
+        'kind': 'additive-assistant-state', 'from_release_sha256': previous['_sha256'],
+        'from_epoch': previous['schema_epoch'], 'to_epoch': release['schema_epoch'],
+        'migration_sha256': assistant.migration_hashes(), 'backup_required': True}
+    validate(previous, release)
+
+
+def assistant_notices(context, image, output):
+    lock = json.loads((context / 'deploy/assistant/anythingllm.lock.json').read_text())
+    license_text = subprocess.check_output(['docker', 'run', '--rm', '--network', 'none',
+        '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+        '--entrypoint', 'cat', image, '/usr/share/licenses/anythingllm/LICENSE'], timeout=30)
+    if lock['license'] != 'MIT' or hashlib.sha256(license_text).hexdigest() != lock['license_sha256']:
+        raise RuntimeError('provider image license does not match its lock')
+    (output / 'licenses/AnythingLLM-MIT.txt').write_bytes(license_text)
+    shutil.copy2(context / 'deploy/assistant/anythingllm.lock.json', output / 'licenses/anythingllm.lock.json')
+    shutil.copy2(context / 'deploy/assistant/README.md', output / 'ASSISTANT.md')
+
+
+def retain_assistant_baseline_interfaces(previous, output):
+    review_cli = previous.get('review_cli')
+    if review_cli is None or {key: review_cli.get(key) for key in ('file', 'wrapper', 'guide')} != {
+            'file': 'cli/ccheck-review.pyz', 'wrapper': 'ccheck-review', 'guide': 'CLI-REVIEW.md'}:
+        raise RuntimeError('assistant baseline must contain the approved review CLI interface')
+    names = {'cli/ccheck-review.pyz', 'ccheck-review', 'CLI-REVIEW.md'}
+    names.update(name for name in previous['files'] if name.startswith('terminal/'))
+    for name in sorted(names):
+        if name not in previous['files']:
+            raise RuntimeError('baseline interface file is missing: ' + name)
+        source = checked_path(previous['_root'], name)
+        target = checked_path(output, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        if sha(target) != previous['files'][name]:
+            raise RuntimeError('baseline interface changed during assembly: ' + name)
+    (output / 'ccheck-review').chmod(0o755)
+    return dict(review_cli)
 
 
 def render_install_guide(template, version, fingerprint):
@@ -132,7 +190,43 @@ def license_inventory(context, output):
         'Compiled first-party modules remain proprietary unless separately licensed.\n')
 
 
-def runtime_recipe(context, output, qwen_image):
+def reusable_wheel_provenance(previous, records):
+    recipe = previous.get('runtime_recipe') if previous else None
+    if not recipe:
+        return None
+    name = recipe['directory'] + '/wheels.json'
+    if name not in previous['files']:
+        return None
+    path = checked_path(previous['_root'], name)
+    if sha(path) != previous['files'][name]:
+        raise RuntimeError('signed runtime wheel provenance changed')
+    old = json.loads(path.read_text())
+    if not isinstance(old, list) or any(not isinstance(row, dict) or 'file' not in row for row in old):
+        raise RuntimeError('invalid signed runtime wheel provenance')
+    by_file = {row['file']: row for row in old}
+    if len(by_file) != len(old):
+        raise RuntimeError('duplicate signed runtime wheel provenance')
+    if len({row['file'] for row in records}) != len(records):
+        raise RuntimeError('duplicate current runtime wheel inventory')
+    if set(by_file) != {row['file'] for row in records}:
+        return None
+    result = []
+    for row in records:
+        saved = by_file[row['file']]
+        if ({key: value for key, value in saved.items() if key != 'url'} !=
+                {key: value for key, value in row.items() if key != 'url'}):
+            return None
+        address = urlsplit(saved.get('url', ''))
+        if (address.scheme != 'https' or not address.netloc or address.username or address.password
+                or address.query or address.fragment):
+            raise RuntimeError('insecure signed runtime wheel URL')
+        if row.get('url') is not None and row['url'] != saved['url']:
+            return None
+        result.append(dict(row, url=saved['url']))
+    return result
+
+
+def runtime_recipe(context, output, qwen_image, *, previous=None):
     directory = output / 'runtime/qwen'
     directory.mkdir(parents=True)
     shutil.copy2(context / 'locks/qwen.lock', directory / 'requirements.lock')
@@ -146,8 +240,13 @@ def runtime_recipe(context, output, qwen_image):
         if len(match) != 1:
             raise RuntimeError('wheel provenance cannot be pinned: ' + record['file'])
         return dict(record, url=match[0]['url'])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        records = list(pool.map(url, records))
+    cached = reusable_wheel_provenance(previous, records)
+    if cached is None:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            records = list(pool.map(url, records))
+    else:
+        records = cached
+        print('VERIFIED_RUNTIME_WHEEL_PROVENANCE_REUSED', flush=True)
     (directory / 'wheels.json').write_text(json.dumps(records, indent=2))
     packages = subprocess.check_output(['docker', 'run', '--rm', '--entrypoint', 'dpkg-query', qwen_image,
                                         '-W', '-f=${Package}=${Version}\n'], text=True).splitlines()
@@ -206,6 +305,37 @@ def core_wheel(context, image, output, version):
     return {'file': target.name, 'sha256': sha(target), 'modules': binaries, 'abi': 'cp312-linux-x86_64'}
 
 
+def bind_patch_distribution(previous, release):
+    from ccheck.fetch import asset_prefix
+    if not previous:
+        raise RuntimeError('deployment patch requires a verified baseline')
+    reused = []
+    for name in release.get('artifact_reuse', {}).get('images', []):
+        for part in release['images'][name].get('archive_parts', []):
+            if (not part.startswith('images/') or previous['files'].get(part) != release['files'].get(part)
+                    or previous.get('artifact_sizes', {}).get(part) != release['artifact_sizes'].get(part)):
+                raise RuntimeError('reused patch archive differs from the verified baseline: ' + part)
+            reused.append(part)
+    baseline = previous.get('distribution') or {}
+    release['distribution'] = {'kind': 'deployment-patch',
+        'base_version': baseline.get('base_version', previous['version']),
+        'base_release_sha256': baseline.get('base_release_sha256', previous['_sha256']),
+        'upgrade_from_version': previous['version'], 'upgrade_from_sha256': previous['_sha256'],
+        'reused_files': sorted(reused), 'asset_versions': {
+            name: asset_prefix(previous, name, 'https://example.invalid').rstrip('/').rsplit('/release-', 1)[1]
+            for name in reused}}
+
+
+def patch_bundle(output, release):
+    bundle = output.parent / ('release-' + release['version'] + '-patch.tar.gz')
+    reused = set(release['distribution']['reused_files'])
+    with bundle.open('xb') as stream, tarfile.open(fileobj=stream, mode='w:gz') as archive:
+        for name in sorted((set(release['files']) - reused) | {'release.json', 'release.sig'}):
+            archive.add(output / name, arcname=output.name + '/' + name, recursive=False)
+    bundle.with_name(bundle.name + '.sha256').write_text(sha(bundle) + '  ' + bundle.name + '\n')
+    return bundle
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('context', type=Path)
@@ -215,6 +345,12 @@ def main():
     parser.add_argument('--signing-key', required=True, type=Path)
     parser.add_argument('--yaml-package', required=True, type=Path)
     parser.add_argument('--allow-worktree-snapshot', action='store_true')
+    parser.add_argument('--with-assistant', action='store_true',
+                        help='include assistant runtime and approved additive schema transition')
+    parser.add_argument('--with-terminal', action='store_true',
+                        help='include the signed independently managed SSH terminal runtime')
+    parser.add_argument('--deployment-patch', action='store_true',
+                        help='publish a patch bundle excluding verified unchanged inference/service archives')
     parser.add_argument('--reuse-release', type=Path, help='reuse identical runtime archives from a verified prior release')
     parser.add_argument('--reuse-trusted-key', type=Path)
     args = parser.parse_args()
@@ -226,6 +362,8 @@ def main():
     if bool(args.reuse_release) != bool(args.reuse_trusted_key):
         raise RuntimeError('reusing artifacts requires both a prior release and an independently trusted public key')
     previous = verify_release(args.reuse_release, args.reuse_trusted_key) if args.reuse_release else None
+    if args.deployment_patch and not previous:
+        raise RuntimeError('deployment patch requires --reuse-release and --reuse-trusted-key')
     if output.exists():
         raise RuntimeError('release output must be new; published versions are immutable')
     if not re.fullmatch(r'v\d+\.\d+\.\d+(?:-rc\.\d+)?', args.version):
@@ -238,6 +376,23 @@ def main():
     gates = json.loads(args.gates.read_text())
     if not gates.get('passed') or gates['images'] != images or gates['source_tree'] != source['tree_sha256'] or gates['version'] != args.version:
         raise RuntimeError('passing gates must match the exact images, source snapshot and version')
+    if args.with_assistant:
+        validate_assistant_gates(previous, images, gates)
+        if source.get('worktree_snapshot'):
+            raise RuntimeError('assistant publication requires committed source, not a development snapshot')
+    elif 'anythingllm' in images:
+        raise RuntimeError('provider image requires explicit --with-assistant')
+    if args.with_terminal:
+        from ccheck import remote_terminal
+        evidence = gates.get('terminal', {})
+        for name in ('passed', 'real_ssh', 'tls', 'restart_preservation', 'configuration', 'isolation'):
+            if evidence.get(name) is not True:
+                raise RuntimeError('missing terminal acceptance gate: ' + name)
+        if source.get('worktree_snapshot'):
+            raise RuntimeError('terminal publication requires committed source')
+        terminal_resources = {name: sha(context / 'deploy/terminal' / name) for name in remote_terminal.RESOURCES}
+        if terminal_resources != remote_terminal.hashes():
+            raise RuntimeError('terminal source and publisher runtime differ')
     for path, checksum in source['files'].items():
         if sha(context / path) != checksum:
             raise RuntimeError('source changed after snapshot/gates: ' + path)
@@ -255,9 +410,14 @@ def main():
     for name in ('site-rtx5880.example.json',):
         shutil.copy2(context / 'deploy/release' / name, output / name)
     shutil.copy2(output / 'ccheck', output / 'ccheckctl')
+    review_cli = retain_assistant_baseline_interfaces(previous, output) if args.with_assistant else None
     subprocess.run([sys.executable, str(context / 'deploy/release/build_cli.py'), '--output', str(output / 'cli/ccheck.pyz'),
-                    '--yaml-package', str(args.yaml_package)], check=True)
+                    '--yaml-package', str(args.yaml_package)] +
+                   (['--with-assistant'] if args.with_assistant else []) +
+                   (['--with-terminal'] if args.with_terminal else []), check=True)
     subprocess.run(['openssl', 'pkey', '-in', str(key), '-pubout', '-out', str(output / 'publisher.pem')], check=True)
+    if args.with_assistant and sha(output / 'publisher.pem') != previous['_publisher']:
+        raise RuntimeError('assistant upgrade must retain the installed publisher identity')
     template = (context / 'deploy/release/INSTALL-RTX5880.template.md').read_text(encoding='utf-8')
     (output / 'INSTALL-RTX5880.md').write_text(render_install_guide(template, args.version,
                                                                  sha(output / 'publisher.pem')), encoding='utf-8')
@@ -273,6 +433,16 @@ def main():
                                 'reference': metadata['RepoDigests'][0],
                                 'archive_parts': image_archives(image, metadata, output, name, previous, reused)}
     license_inventory(context, output)
+    if args.with_assistant:
+        assistant_notices(context, images['anythingllm'], output)
+    if args.with_terminal:
+        shutil.copy2(context / 'deploy/terminal/MANAGED.md', output / 'REMOTE-SSH.md')
+        (output / 'terminal').mkdir(exist_ok=True)
+        shutil.copy2(context / 'deploy/terminal/MANAGED.md', output / 'terminal/README.md')
+        for name in remote_terminal.RESOURCES:
+            target = output / 'terminal' / name
+            target.parent.mkdir(exist_ok=True)
+            shutil.copy2(context / 'deploy/terminal' / name, target)
     old_recipe = previous.get('runtime_recipe') if previous else None
     old_prefix = checked_path(previous['_root'], old_recipe['directory']) if old_recipe else None
     if ('qwen' in reused and old_recipe and old_recipe['base_image'] == pinned('python:3.12-slim-bookworm')
@@ -282,7 +452,7 @@ def main():
         recipe = {'directory': 'runtime/qwen', 'base_image': old_recipe['base_image']}
         print('VERIFIED_RUNTIME_RECIPE_REUSED', flush=True)
     else:
-        recipe = runtime_recipe(context, output, images['qwen'])
+        recipe = runtime_recipe(context, output, images['qwen'], previous=previous)
     wheel = core_wheel(context, images['backend'], output, args.version)
     schema = {path.name: sha(path) for path in sorted((context / 'backend/alembic/versions').glob('*.py'))}
     schema_epoch = hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest()
@@ -293,6 +463,10 @@ def main():
         'Run ./ccheck install --config site.yaml --trusted-key /trusted/publisher.pem --version ' + args.version + '. '
         'Do not infer model commercial rights from installation success; read models/ notices. '
         'Only final runtime images are distributed, not private source or trusted compiler stages.\n')
+    if args.with_assistant:
+        with (output / 'README.md').open('a') as guide:
+            guide.write('\nAI assistant is opt-in. Read ASSISTANT.md before enabling it; '
+                        'the additive database migration requires an encrypted backup.\n')
     bootstrap_path = output / 'bootstrap.tar.gz'
     small_files = [path for path in sorted(output.rglob('*')) if path.is_file() and not path.is_relative_to(output / 'images')]
     with tarfile.open(bootstrap_path, 'w:gz') as archive:
@@ -310,9 +484,20 @@ def main():
                'bootstrap': {'file': 'bootstrap.tar.gz', 'sha256': sha(bootstrap_path), 'size': bootstrap_path.stat().st_size},
                'artifact_sizes': {name: (output / name).stat().st_size for name in files},
                'profiles': {'a100-40g-fp8': 'target hardware under validation', 'ada-48g-fp8': 'requires hardware acceptance'}}
+    if args.with_assistant:
+        bind_assistant_metadata(context, previous, release)
+        release['review_cli'] = review_cli
+    if args.with_terminal:
+        release['terminal_runtime'] = terminal_resources
+    if args.deployment_patch:
+        bind_patch_distribution(previous, release)
     (output / 'release.json').write_text(json.dumps(release, indent=2) + '\n')
     subprocess.run(['openssl', 'pkeyutl', '-sign', '-inkey', str(key), '-rawin',
                     '-in', str(output / 'release.json'), '-out', str(output / 'release.sig')], check=True)
+    verified = verify_release(output, output / 'publisher.pem', sha(output / 'publisher.pem'))
+    if args.deployment_patch:
+        bundle = patch_bundle(output, verified)
+        print('SIGNED_PATCH', bundle, bundle.stat().st_size, flush=True)
     print('SIGNED_RELEASE', output, 'publisher public key SHA256:', sha(output / 'publisher.pem'))
 
 

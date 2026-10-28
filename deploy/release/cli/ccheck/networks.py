@@ -11,6 +11,11 @@ def subnets(site):
     values = site.get('network_subnets', DEFAULT_SUBNETS)
     if not isinstance(values, dict) or set(values) != set(DEFAULT_SUBNETS):
         raise DeploymentError('network_subnets must contain exactly data, inference and edge')
+    values = dict(values)
+    from .assistant import settings as assistant_settings
+    assistant = assistant_settings(site)
+    if assistant['enabled']:
+        values['assistant'] = assistant['subnet']
     parsed = {}
     try:
         for name, value in values.items():
@@ -27,7 +32,7 @@ def subnets(site):
     for name, left in parsed.items():
         if any(left.overlaps(right) for other, right in parsed.items() if other != name):
             raise DeploymentError('project network subnets overlap')
-    return {name: str(parsed[name]) for name in DEFAULT_SUBNETS}
+    return {name: str(parsed[name]) for name in values}
 
 
 def specifications(site):
@@ -45,14 +50,14 @@ def owned(engine, network):
     project = project_name(engine.site)
     labels = network.get('Labels') or {}
     name = labels.get('com.docker.compose.network')
-    return (name in DEFAULT_SUBNETS and labels.get('com.docker.compose.project') == project
+    return (name in {*DEFAULT_SUBNETS, 'assistant'} and labels.get('com.docker.compose.project') == project
             and network['Name'] == project + '_' + name)
 
 
 def assert_scope(engine, rows):
     from .engine import project_name
     project = project_name(engine.site)
-    expected_names = {project + '_' + name for name in DEFAULT_SUBNETS}
+    expected_names = {project + '_' + name for name in (*DEFAULT_SUBNETS, 'assistant')}
     for network in rows:
         if network['Name'] in expected_names and not owned(engine, network):
             raise DeploymentError('project network name belongs to another owner: ' + network['Name'])
@@ -115,9 +120,10 @@ def needs_recreate(engine, document):
     rows = inventory()
     assert_scope(engine, rows)
     expected = document['networks']
-    if set(expected) != set(DEFAULT_SUBNETS):
+    if not set(DEFAULT_SUBNETS) <= set(expected) <= {*DEFAULT_SUBNETS, 'assistant'}:
         raise DeploymentError('unexpected network set in project recipe')
-    return any(not matches(row, expected[row['Labels']['com.docker.compose.network']])
+    return any(row['Labels']['com.docker.compose.network'] not in expected
+               or not matches(row, expected[row['Labels']['com.docker.compose.network']])
                for row in rows if owned(engine, row))
 
 

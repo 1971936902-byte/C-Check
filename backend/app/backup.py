@@ -7,7 +7,8 @@ import shutil
 import sys
 import tarfile
 
-MEMBERS = ('data/mysql', 'data/redis', 'data/qdrant', 'data/uploads', 'secrets')
+MEMBERS = ('data/mysql', 'data/redis', 'data/qdrant', 'data/uploads', 'secrets', 'data/assistant')
+OPTIONAL = {'data/assistant'}
 IGNORED_LINKS = {'data/mysql/mysql.sock', 'data/mysql/mysqlx.sock'}
 
 
@@ -32,6 +33,8 @@ def create(root):
         return member
     with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
         for name in MEMBERS:
+            if name in OPTIONAL and not (root / name).exists() and not (root / name).is_symlink():
+                continue
             if (root / name).is_symlink():
                 raise RuntimeError('symlinked snapshot root refused')
             archive.add(root / name, arcname=name, filter=clean)
@@ -55,8 +58,10 @@ def restore(root, uid, gid):
                 raise RuntimeError('symlink in restore path')
             member.mode &= 0o777
             archive.extract(member, root, filter='fully_trusted')
-    for name in ('secrets', 'data/uploads', 'data/qdrant'):
+    for name in ('secrets', 'data/uploads', 'data/qdrant', 'data/assistant'):
         base = root / name
+        if name in OPTIONAL and not base.exists():
+            continue
         for path in [base, *base.rglob('*')]:
             os.chown(path, uid, gid, follow_symlinks=False)
 
@@ -65,6 +70,8 @@ def measure(root):
     size, entries = 0, 0
     for name in MEMBERS:
         base = root / name
+        if name in OPTIONAL and not base.exists() and not base.is_symlink():
+            continue
         for path in [base, *base.rglob('*')]:
             if path.is_symlink():
                 if path.relative_to(root).as_posix() in IGNORED_LINKS:

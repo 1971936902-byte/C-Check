@@ -3,6 +3,7 @@
 import argparse
 import gzip
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -11,13 +12,20 @@ import re
 import secrets
 import socket
 import ssl
+import shutil
 import subprocess
 import time
-import urllib.request
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / 'state'
 LOCK = ROOT / 'images.lock.json'
+PROJECT = 'ccheck-terminal'
+IMAGE_POLICY = 'online'
+IMAGE_OVERRIDES = {}
+TLS_CERT = TLS_KEY = None
+PUBLIC_URL = None
+CONFIG_FILES = None
 IMAGES = {'GUACAMOLE_IMAGE': 'guacamole/guacamole:1.6.0',
           'GUACD_IMAGE': 'guacamole/guacd:1.6.0',
           'POSTGRES_IMAGE': 'postgres:17-alpine',
@@ -25,6 +33,7 @@ IMAGES = {'GUACAMOLE_IMAGE': 'guacamole/guacamole:1.6.0',
 
 
 def run(args, **kwargs):
+    kwargs.setdefault('timeout', 600)
     return subprocess.run(args, check=True, text=True, **kwargs)
 
 
@@ -33,7 +42,14 @@ def capture(args):
 
 
 def compose(*args, **kwargs):
-    return run(['docker', 'compose', '--project-name', 'ccheck-terminal',
+    ids = capture(['docker', 'ps', '-a', '-q', '--filter', 'label=com.docker.compose.project=' + PROJECT]).split()
+    for identifier in ids:
+        info = json.loads(capture(['docker', 'inspect', identifier]))[0]
+        labels = info['Config'].get('Labels') or {}
+        allowed = CONFIG_FILES or {str(ROOT / 'compose.yaml')}
+        if labels.get('com.docker.compose.project.config_files') not in allowed:
+            raise ValueError('Terminal project belongs to a different configuration; refusing cross-project action.')
+    return run(['docker', 'compose', '--project-name', PROJECT,
                 '--project-directory', str(ROOT), '--env-file', str(STATE / 'compose.env'),
                 '-f', str(ROOT / 'compose.yaml'), *args], **kwargs)
 
@@ -69,8 +85,46 @@ def ensure_image(reference):
     try:
         return json.loads(capture(['docker', 'image', 'inspect', reference]))[0]
     except subprocess.CalledProcessError:
+        if IMAGE_POLICY == 'offline':
+            raise ValueError('Offline terminal image is missing: ' + reference) from None
         run(['docker', 'pull', reference])
         return json.loads(capture(['docker', 'image', 'inspect', reference]))[0]
+
+
+def runtime_image(key, record):
+    reference = IMAGE_OVERRIDES.get(key, record['image'])
+    if (not re.fullmatch(r'[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}', reference)
+            or reference.rsplit('@', 1)[1] != record['image'].rsplit('@', 1)[1]):
+        raise ValueError('Terminal image mirrors must preserve the locked digest.')
+    metadata = ensure_image(reference)
+    if metadata['Architecture'] != 'amd64' or metadata.get('Os', 'linux') != 'linux':
+        raise ValueError('Terminal images require Linux/amd64.')
+    return reference
+
+
+def prepare_tls(host):
+    if (TLS_CERT is None) != (TLS_KEY is None):
+        raise ValueError('TLS certificate and private key must be supplied together.')
+    if TLS_CERT is None:
+        return
+    for path in (TLS_CERT, TLS_KEY):
+        if not path.is_absolute() or any(parent.is_symlink() for parent in [path, *path.parents]) or not path.is_file():
+            raise ValueError('TLS inputs must be absolute regular files, not symlinks.')
+    if TLS_KEY.stat().st_mode & 0o077 or TLS_KEY.stat().st_uid != os.getuid():
+        raise ValueError('TLS private key must be owner-only.')
+    run(['openssl', 'x509', '-in', str(TLS_CERT), '-noout', '-checkend', '0'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        ipaddress.ip_address(host)
+        option = '-checkip'
+    except ValueError:
+        option = '-checkhost'
+    run(['openssl', 'x509', '-in', str(TLS_CERT), '-noout', option, host],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    public = capture(['openssl', 'x509', '-in', str(TLS_CERT), '-pubkey', '-noout'])
+    private_public = capture(['openssl', 'pkey', '-in', str(TLS_KEY), '-pubout'])
+    if public != private_public:
+        raise ValueError('TLS certificate and private key do not match.')
 
 
 def validate_networks(networks, occupied):
@@ -87,15 +141,16 @@ def validate_networks(networks, occupied):
 def initialize(args):
     if STATE.exists():
         raise ValueError('state already exists. Preserve it; do not reinitialize an existing deployment.')
-    if capture(['docker', 'volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=ccheck-terminal']).strip():
+    if capture(['docker', 'volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=' + PROJECT]).strip():
         raise ValueError('Existing project volumes found. Restore state from backup; do not reset credentials.')
     locks = json.loads(LOCK.read_text())
     if set(locks) != set(IMAGES):
         raise ValueError('Incomplete image lock.')
-    for item in locks.values():
+    images = {}
+    for key, item in locks.items():
         if not re.fullmatch(r'[a-z0-9./_-]+@sha256:[0-9a-f]{64}', item['image']):
             raise ValueError('Images must be pinned by sha256 digest.')
-        ensure_image(item['image'])
+        images[key] = runtime_image(key, item)
     networks = [args.data_subnet, args.ssh_subnet, args.web_subnet]
     ids = capture(['docker', 'network', 'ls', '-q']).split()
     existing = json.loads(capture(['docker', 'network', 'inspect', *ids])) if ids else []
@@ -107,13 +162,19 @@ def initialize(args):
     if not 1024 <= args.port <= 65535:
         raise ValueError('Port must be between 1024 and 65535.')
     bind_address = ipaddress.ip_address(args.bind)
-    if str(bind_address) != '127.0.0.1':
-        raise ValueError('Initial deployment must bind 127.0.0.1. Configure trusted TLS/access controls before exposing it.')
+    if bind_address.version != 4:
+        raise ValueError('Terminal requires an IPv4 bind address.')
+    if not bind_address.is_loopback and (TLS_CERT is None or TLS_KEY is None):
+        raise ValueError('Non-loopback terminal binding requires an operator-provided TLS certificate and key.')
+    if PUBLIC_URL is None and str(bind_address) != '127.0.0.1':
+        raise ValueError('A custom bind address also requires a configured public HTTPS URL.')
+    host = urlsplit(PUBLIC_URL).hostname if PUBLIC_URL else 'localhost'
+    prepare_tls(host)
     with socket.socket() as listener:
         listener.bind((args.bind, args.port))
     schema = capture(['docker', 'run', '--rm', '--network', 'none', '--cap-drop', 'ALL',
                       '--security-opt', 'no-new-privileges:true', '--entrypoint',
-                      '/opt/guacamole/bin/initdb.sh', locks['GUACAMOLE_IMAGE']['image'], '--postgresql'])
+                      '/opt/guacamole/bin/initdb.sh', images['GUACAMOLE_IMAGE'], '--postgresql'])
     password = secrets.token_urlsafe(30)
     salt = secrets.token_bytes(32)
     schema += ("\nBEGIN;\nUPDATE guacamole_user SET password_hash = decode('" + password_hash(password, salt)
@@ -126,15 +187,25 @@ def initialize(args):
     # The host directory is root-only; mounted files must also be readable by image service UIDs.
     write(STATE / 'database-password', secrets.token_urlsafe(36), 0o444)
     write(STATE / 'admin-credentials.json', json.dumps({'username': 'terminal-admin', 'password': password}) + '\n')
-    environment = {key: value['image'] for key, value in locks.items()}
+    environment = images
     environment.update(TERMINAL_BIND=args.bind, TERMINAL_PORT=str(args.port),
                        TERMINAL_DATA_SUBNET=args.data_subnet, TERMINAL_SSH_SUBNET=args.ssh_subnet,
-                       TERMINAL_WEB_SUBNET=args.web_subnet)
+                       TERMINAL_WEB_SUBNET=args.web_subnet, TERMINAL_STATE_DIR=str(STATE),
+                       TERMINAL_TLS_HOST=host, TERMINAL_PUBLIC_URL=PUBLIC_URL or f'https://localhost:{args.port}/guacamole/')
     write(STATE / 'compose.env', ''.join(f'{key}={value}\n' for key, value in environment.items()))
-    run(['openssl', 'req', '-x509', '-newkey', 'rsa:3072', '-sha256', '-nodes', '-days', '90',
-         '-keyout', str(STATE / 'tls.key'), '-out', str(STATE / 'tls.crt'),
-         '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if TLS_CERT is not None:
+        shutil.copyfile(TLS_CERT, STATE / 'tls.crt')
+        shutil.copyfile(TLS_KEY, STATE / 'tls.key')
+    else:
+        try:
+            ipaddress.ip_address(host)
+            san = 'IP:' + host
+        except ValueError:
+            san = 'DNS:' + host
+        run(['openssl', 'req', '-x509', '-newkey', 'rsa:3072', '-sha256', '-nodes', '-days', '90',
+             '-keyout', str(STATE / 'tls.key'), '-out', str(STATE / 'tls.crt'),
+             '-subj', '/CN=' + host, '-addext', 'subjectAltName=' + san],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     (STATE / 'tls.key').chmod(0o444)
     (STATE / 'tls.crt').chmod(0o444)
     compose('config', '--quiet')
@@ -147,14 +218,25 @@ def check():
     environment = dict(line.split('=', 1) for line in (STATE / 'compose.env').read_text().splitlines())
     port = int(environment['TERMINAL_PORT'])
     context = ssl.create_default_context(cafile=str(STATE / 'tls.crt'))
-    url = f'https://localhost:{port}/guacamole/'
+    # The operator-supplied certificate is an explicit local trust anchor, including private CA leaves.
+    context.verify_flags |= getattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN', 0)
+    host = environment.get('TERMINAL_TLS_HOST', 'localhost')
+    address = environment.get('TERMINAL_BIND', '127.0.0.1')
+    if address == '0.0.0.0':
+        address = '127.0.0.1'
+    url = environment.get('TERMINAL_PUBLIC_URL', f'https://localhost:{port}/guacamole/')
     for _ in range(90):
         try:
-            with urllib.request.urlopen(url, context=context, timeout=5) as response:
-                if response.status == 200:
-                    print('HTTPS ready: ' + url)
-                    return
-        except (OSError, ValueError):
+            with socket.create_connection((address, port), timeout=5) as raw:
+                with context.wrap_socket(raw, server_hostname=host) as secured:
+                    connection = http.client.HTTPConnection(host, port, timeout=5)
+                    connection.sock = secured
+                    connection.request('GET', '/guacamole/', headers={'Host': host})
+                    with connection.getresponse() as response:
+                        if response.status == 200:
+                            print('HTTPS ready: ' + url)
+                            return
+        except (OSError, ValueError, http.client.HTTPException):
             pass
         time.sleep(2)
     raise RuntimeError('HTTPS readiness timeout. Inspect only this project with terminal.py logs.')
@@ -176,14 +258,55 @@ def connection_sql(config):
            + ' BEGIN IF EXISTS (SELECT 1 FROM guacamole_connection WHERE connection_name='
            + name + ") THEN RAISE EXCEPTION 'A connection with this name already exists'; END IF; END " + delimiter + ';\n')
     sql += f"INSERT INTO guacamole_connection (connection_name, protocol) VALUES ({name}, 'ssh');\n"
+    parameters = connection_parameters(config)
+    for key, value in parameters.items():
+        sql += ('INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value) '
+                f"VALUES (currval('guacamole_connection_connection_id_seq'), {quote(key)}, {quote(value)});\n")
+    return sql + 'COMMIT;\n'
+
+
+def connection_parameters(config):
     parameters = {k: str(v) for k, v in config.items() if k != 'name'}
     host = config['hostname'] if int(config['port']) == 22 else f"[{config['hostname']}]:{int(config['port'])}"
     parameters['host-key'] = host + ' ' + config['host-key']
     parameters.update({'enable-sftp': 'false', 'color-scheme': 'gray-black', 'font-size': '14',
                        'server-alive-interval': '30', 'scrollback': '2000'})
-    for key, value in parameters.items():
-        sql += ('INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value) '
-                f"VALUES (currval('guacamole_connection_connection_id_seq'), {quote(key)}, {quote(value)});\n")
+    return parameters
+
+
+def managed_connections_sql(configs, previous_names, owner):
+    for config in configs:
+        connection_sql(config)
+    attribute = 'ccheck-managed-project'
+    sql = 'BEGIN;\nLOCK TABLE guacamole_connection IN SHARE ROW EXCLUSIVE MODE;\n'
+    names = {config['name'] for config in configs}
+    for name in set(previous_names) - names:
+        sql += ('DELETE FROM guacamole_connection WHERE parent_id IS NULL AND connection_name=' + quote(name)
+                + ' AND EXISTS (SELECT 1 FROM guacamole_connection_attribute a WHERE '
+                'a.connection_id=guacamole_connection.connection_id AND a.attribute_name=' + quote(attribute)
+                + ' AND a.attribute_value=' + quote(owner) + ');\n')
+    for config in configs:
+        delimiter = '$managed_' + secrets.token_hex(16) + '$'
+        name = quote(config['name'])
+        sql += ('DO ' + delimiter + ' DECLARE cid integer; matches integer; BEGIN '
+                'SELECT count(*) INTO matches FROM guacamole_connection WHERE parent_id IS NULL AND connection_name='
+                + name + "; IF matches > 1 THEN RAISE EXCEPTION 'Ambiguous terminal target name'; END IF; "
+                'SELECT connection_id INTO cid FROM guacamole_connection WHERE parent_id IS NULL AND connection_name='
+                + name + '; IF cid IS NULL THEN INSERT INTO guacamole_connection (connection_name,protocol) VALUES ('
+                + name + ",'ssh') RETURNING connection_id INTO cid; "
+                'INSERT INTO guacamole_connection_attribute (connection_id,attribute_name,attribute_value) VALUES (cid,'
+                + quote(attribute) + ',' + quote(owner) + '); ELSE IF NOT EXISTS (SELECT 1 FROM '
+                'guacamole_connection_attribute a JOIN guacamole_connection c USING(connection_id) '
+                'WHERE a.connection_id=cid AND c.protocol=\'ssh\' AND a.attribute_name=' + quote(attribute)
+                + ' AND a.attribute_value=' + quote(owner)
+                + ") THEN RAISE EXCEPTION 'Target name is not owned by this terminal configuration'; END IF; END IF; "
+                "DELETE FROM guacamole_connection_parameter WHERE connection_id=cid AND parameter_name IN "
+                "('password','private-key','passphrase','private-key-passphrase'); ")
+        for key, value in connection_parameters(config).items():
+            sql += ('INSERT INTO guacamole_connection_parameter (connection_id,parameter_name,parameter_value) '
+                    'VALUES (cid,' + quote(key) + ',' + quote(value) + ') ON CONFLICT (connection_id,parameter_name) '
+                    'DO UPDATE SET parameter_value=EXCLUDED.parameter_value; ')
+        sql += 'END ' + delimiter + ';\n'
     return sql + 'COMMIT;\n'
 
 

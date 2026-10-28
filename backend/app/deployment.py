@@ -72,7 +72,33 @@ def pending():
         count = db.scalar(select(func.count()).select_from(ReviewTask).where(
             or_(ReviewTask.status.in_([TaskStatus.RUNNING, TaskStatus.QUEUED]),
                 ReviewTask.graph_build_status.in_(["queued", "running"]))))
+        settings = get_settings()
+        if settings.assistant_enabled:
+            from app.db.models import AssistantDocument
+            from app.services import assistant_gate
+            state = assistant_gate.request_preemption(db)
+            count += int(state.owner_token is not None or state.fault is not None)
+            count += db.scalar(select(func.count()).select_from(AssistantDocument).where(
+                AssistantDocument.status.in_(['queued', 'processing'])))
+            db.commit()
         print(json.dumps({"pending": count}))
+
+
+def recover_assistant(stage, token):
+    if not get_settings().assistant_enabled:
+        raise RuntimeError('assistant is disabled')
+    from app.services import assistant_recovery
+    with SessionLocal() as db:
+        if stage == 'begin':
+            assistant_recovery.begin(db, token)
+            paused = None
+        else:
+            paused = assistant_recovery.finish(db, token)
+        db.commit()
+        if stage == 'finish':
+            from app.services.review_queue import dispatch_next_review
+            dispatch_next_review(db)
+    print(json.dumps({'assistant_recovery': stage, 'paused_documents': paused}))
 
 
 def disable_model():
@@ -192,11 +218,17 @@ def audit_index(task_id):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["migrate", "register-model", "disable-model", "pending", "audit-core", "verify-runtime", "data-health", "audit-index"])
+    parser.add_argument("command", choices=["migrate", "register-model", "disable-model", "pending", "audit-core", "verify-runtime", "data-health", "audit-index", "assistant-recovery-begin", "assistant-recovery-finish"])
     parser.add_argument('--task-id')
+    parser.add_argument('--recovery-token')
     args = parser.parse_args()
     if args.command == 'audit-index' and not args.task_id:
         parser.error('--task-id is required for audit-index')
+    if args.command.startswith('assistant-recovery-'):
+        if not args.recovery_token:
+            parser.error('--recovery-token is required')
+        recover_assistant(args.command.rsplit('-', 1)[-1], args.recovery_token)
+        return
     {"migrate": migrate, "register-model": register_model, "pending": pending, "audit-core": audit_core,
      "verify-runtime": verify_runtime, "disable-model": disable_model, 'data-health': data_health,
      'audit-index': lambda: audit_index(args.task_id)}[args.command]()

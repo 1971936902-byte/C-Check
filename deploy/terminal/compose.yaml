@@ -13,8 +13,8 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/database-password
     volumes:
       - database:/var/lib/postgresql/data
-      - ./state/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
-      - ./state/database-password:/run/secrets/database-password:ro
+      - ${TERMINAL_STATE_DIR:-./state}/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - ${TERMINAL_STATE_DIR:-./state}/database-password:/run/secrets/database-password:ro
     networks: [data]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
@@ -68,7 +68,7 @@ services:
       POSTGRESQL_ABSOLUTE_MAX_CONNECTIONS: '10'
       POSTGRESQL_USER_PASSWORD_MIN_LENGTH: '12'
     volumes:
-      - ./state/database-password:/run/secrets/database-password:ro
+      - ${TERMINAL_STATE_DIR:-./state}/database-password:/run/secrets/database-password:ro
     networks: [data, ssh, web]
     depends_on:
       database: {condition: service_healthy}
@@ -89,8 +89,8 @@ services:
     ports: ['${TERMINAL_BIND:-127.0.0.1}:${TERMINAL_PORT:-8803}:8443']
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./state/tls.crt:/etc/nginx/tls.crt:ro
-      - ./state/tls.key:/etc/nginx/tls.key:ro
+      - ${TERMINAL_STATE_DIR:-./state}/tls.crt:/etc/nginx/tls.crt:ro
+      - ${TERMINAL_STATE_DIR:-./state}/tls.key:/etc/nginx/tls.key:ro
     networks: [web]
     depends_on: [guacamole]
     security_opt: [no-new-privileges:true]

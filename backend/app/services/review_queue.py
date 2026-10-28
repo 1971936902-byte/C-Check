@@ -36,6 +36,13 @@ def _send_to_worker(task_id: str) -> None:
 
 
 def dispatch_next_review(db: Session) -> ReviewTask | None:
+    from app.core.config import get_settings
+    guarded = get_settings().assistant_enabled
+    if guarded:
+        from app.services.assistant_gate import review_may_start
+        if not review_may_start(db):
+            db.commit()
+            return None
     running_node_ids = set(
         db.scalars(select(ReviewTask.model_node_id).where(ReviewTask.status == TaskStatus.RUNNING)).all()
     )
@@ -46,6 +53,8 @@ def dispatch_next_review(db: Session) -> ReviewTask | None:
         queued_order(queued_query.limit(1))
     )
     if task is None:
+        if guarded:
+            db.commit()
         return None
     try:
         task.status = TaskStatus.RUNNING

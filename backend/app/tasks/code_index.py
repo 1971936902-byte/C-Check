@@ -9,10 +9,12 @@ from app.db.models import ReviewTask
 from app.db.session import SessionLocal
 from app.services.code_index.indexer import build_code_index
 from app.services.code_index.retriever import retrieve_context_diagnostics
+from app.services.assistant_gate import AssistantDrainPending, require_review_admission
 from app.worker import celery_app
 
 
 def run_graph_build(task_id: str, build_id: str) -> None:
+    require_review_admission()
     with SessionLocal() as db:
         try:
             task = db.scalar(select(ReviewTask).where(ReviewTask.id == task_id).with_for_update())
@@ -45,6 +47,8 @@ def run_graph_build(task_id: str, build_id: str) -> None:
             db.commit()
 
 
-@celery_app.task(name="app.tasks.code_index.dispatch_graph_build")
+@celery_app.task(name="app.tasks.code_index.dispatch_graph_build",
+                 autoretry_for=(AssistantDrainPending,), max_retries=None,
+                 default_retry_delay=2)
 def dispatch_graph_build(task_id: str, build_id: str) -> None:
     run_graph_build(task_id, build_id)

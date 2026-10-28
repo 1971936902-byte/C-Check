@@ -1,0 +1,5 @@
+# Preserve the existing rc20 reverse-proxy configuration and non-root runtime.
+ARG FRONTEND_BASE
+FROM ${FRONTEND_BASE}
+COPY --chown=101:101 frontend/dist /usr/share/nginx/html
+USER 101:101

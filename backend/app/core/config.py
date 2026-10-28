@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173"]
     storage_path: Path = Path("uploads")
     mock_model_enabled: bool = False
+    assistant_enabled: bool = False
+    assistant_lease_seconds: int = Field(default=30, ge=10, le=300)
+    assistant_gateway_key: SecretStr | None = None
+    assistant_qwen_base_url: str | None = None
+    assistant_qwen_api_key: SecretStr | None = None
+    assistant_control_key: SecretStr | None = None
+    assistant_anythingllm_url: str | None = None
+    assistant_anythingllm_api_key: SecretStr | None = None
     model_max_attempts: int = Field(default=3, ge=1, le=5)
     model_context_window: int = Field(default=12288, ge=1024, le=1048576)
     model_max_tokens: int = Field(default=2048, ge=256, le=16384)
@@ -115,6 +123,10 @@ class Settings(BaseSettings):
     rag_embedding_api_key_file: Path | None = None
     rag_qdrant_api_key_file: Path | None = None
     vllm_api_key_file: Path | None = None
+    assistant_gateway_key_file: Path | None = None
+    assistant_qwen_api_key_file: Path | None = None
+    assistant_control_key_file: Path | None = None
+    assistant_anythingllm_api_key_file: Path | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -125,6 +137,7 @@ class Settings(BaseSettings):
         for name in (
             "database_url", "jwt_secret", "admin_password", "rag_embedding_api_key",
             "rag_qdrant_api_key", "vllm_api_key",
+            "assistant_gateway_key", "assistant_qwen_api_key", "assistant_control_key", "assistant_anythingllm_api_key",
         ):
             filename = values.get(f"{name}_file")
             if filename is None:

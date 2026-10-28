@@ -1,0 +1,11 @@
+diff --git a/server/utils/EmbeddingEngines/genericOpenAi/index.js b/server/utils/EmbeddingEngines/genericOpenAi/index.js
+--- a/server/utils/EmbeddingEngines/genericOpenAi/index.js
++++ b/server/utils/EmbeddingEngines/genericOpenAi/index.js
+@@ -166,6 +166,7 @@ class GenericOpenAiEmbedder {
+           .create({
+             model: this.model,
+             input: chunk,
++            encoding_format: "float",
+           })
+           .then((result) => resolve({ data: result?.data, error: null }))
+           .catch((e) => {

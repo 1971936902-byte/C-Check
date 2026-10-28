@@ -7,12 +7,20 @@ from pathlib import Path
 import subprocess
 import tarfile
 
-PREFIXES = ['backend', 'frontend', 'deploy/models', 'deploy/release', 'deploy/terminal', 'tools/review-cli']
+PREFIXES = ['backend', 'frontend', 'deploy/models', 'deploy/release', 'deploy/terminal',
+            'deploy/assistant', 'tools/review-cli']
 EXCLUDED = {'__pycache__', '.pytest_cache', '.venv', 'node_modules', 'dist', 'wheelhouse', 'release-input', 'built-image-records'}
 
 
 def git(*args):
     return subprocess.check_output(['git', *args])
+
+
+def snapshot_data(name, commit, *, working_tree, changed, committed_names):
+    # Preserve Git's canonical bytes for unchanged files on CRLF checkouts.
+    if working_tree and (name in changed or name not in committed_names):
+        return Path(name).read_bytes()
+    return git('show', commit + ':' + name)
 
 
 def main():
@@ -22,11 +30,14 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     commit = git('rev-parse', args.ref + '^{commit}').decode().strip()
+    committed_names = set(git('ls-tree', '-r', '-z', '--name-only', commit, '--', *PREFIXES).decode().split('\0'))
+    changed = set()
     if args.working_tree:
         names = set(git('ls-files', '-z', '--', *PREFIXES).decode().split('\0'))
         names.update(git('ls-files', '-z', '--others', '--exclude-standard', '--', *PREFIXES).decode().split('\0'))
+        changed = set(git('diff', '--name-only', '-z', commit, '--', *PREFIXES).decode().split('\0'))
     else:
-        names = set(git('ls-tree', '-r', '-z', '--name-only', commit, '--', *PREFIXES).decode().split('\0'))
+        names = committed_names
     files = {}
     for name in sorted(names - {''}):
         path = Path(name)
@@ -36,7 +47,8 @@ def main():
             raise RuntimeError('private key/environment/weight file in source input: ' + name)
         if args.working_tree and path.is_symlink():
             raise RuntimeError('symlink in trusted source input: ' + name)
-        data = path.read_bytes() if args.working_tree else git('show', commit + ':' + name)
+        data = snapshot_data(name, commit, working_tree=args.working_tree,
+                             changed=changed, committed_names=committed_names)
         if len(data) > 20 * 1024 * 1024:
             raise RuntimeError('unexpected large source input: ' + name)
         files[name] = data

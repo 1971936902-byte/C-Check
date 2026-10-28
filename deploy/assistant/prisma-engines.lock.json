@@ -1,0 +1,17 @@
+{
+  "prisma_version": "5.3.1",
+  "commit": "61e140623197a131c2a6189271ffee05a7aa9a59",
+  "platform": "debian-openssl-3.0.x",
+  "engines": [
+    {
+      "name": "libquery_engine.so.node",
+      "archive": "query-engine-verified.gz",
+      "sha256": "2f078bf67f783e94ea754e7fc71b8e848486e85a1632e648c1102699508d9cd7"
+    },
+    {
+      "name": "schema-engine",
+      "archive": "schema-engine-verified.gz",
+      "sha256": "8636da05a1c5743c57792f2ba704e19172bae9ab6a51796c80d1c39534629e87"
+    }
+  ]
+}

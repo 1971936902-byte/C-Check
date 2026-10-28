@@ -7,6 +7,7 @@ const AppLayout = () => import('../layouts/AppLayout.vue')
 const WorkspaceView = () => import('../views/WorkspaceView.vue')
 const DashboardView = () => import('../views/DashboardView.vue')
 const HelpView = () => import('../views/HelpView.vue')
+const AssistantView = () => import('../views/AssistantView.vue')
 const ReportView = () => import('../views/ReportView.vue')
 const HistoryView = () => import('../views/HistoryView.vue')
 const ProfileView = () => import('../views/ProfileView.vue')
@@ -24,6 +25,7 @@ const router = createRouter({
       { path: 'history', component: HistoryView },
       { path: 'profile', component: ProfileView },
       { path: 'help', component: HelpView },
+      { path: 'assistant', component: AssistantView },
       { path: 'admin', component: AdminView, meta: { admin: true } },
     ] },
   ],

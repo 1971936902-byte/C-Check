@@ -139,7 +139,7 @@ def load_site(path):
         raise DeploymentError("instance must be a 3-36 character lower-case project name")
     allowed = {"instance", "data_dir", "profile", "gpu", "web", "model_cache", "model_paths",
                "model_download_policy", "license_mode", "engine", "runtime_source", "backup", "gpu_access_mode", "network_subnets", "performance", "delivery",
-               "review_model", "qwen_model_revision"}
+               "review_model", "qwen_model_revision", "assistant", "terminal"}
     if set(site) - allowed:
         raise DeploymentError("unknown site configuration keys")
     if site.get("engine", "docker") != "docker" or site.get("runtime_source", "image") not in {"image", "build"}:
@@ -154,6 +154,10 @@ def load_site(path):
     settings(site)
     from .delivery import settings as delivery_settings
     delivery_settings(site)
+    from .assistant import settings as assistant_settings
+    assistant_settings(site)
+    from .remote_terminal import settings as terminal_settings
+    terminal_settings(site)
     backup = site.get('backup', {'keep': 3})
     if not isinstance(backup, dict) or set(backup) != {'keep'} or type(backup['keep']) is not int or not 1 <= backup['keep'] <= 30:
         raise DeploymentError('backup.keep must be an integer between 1 and 30')

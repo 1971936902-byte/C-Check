@@ -1,0 +1,46 @@
+# Internal API provider; the user-facing assistant UI is built with C-Check.
+FROM node:22.21.1-bookworm-slim@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+
+ENV NODE_ENV=production \
+    PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    DISABLE_TELEMETRY=true \
+    CHECKPOINT_DISABLE=1 \
+    CCHECK_ASSISTANT_MODE=true \
+    ANYTHING_LLM_RUNTIME=docker
+
+RUN --mount=type=cache,id=ccheck-assistant-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,id=ccheck-assistant-apt-cache,target=/var/cache/apt,sharing=locked \
+    apt-get -o Acquire::http::Timeout=20 -o Acquire::Retries=3 -o Acquire::http::Pipeline-Depth=0 \
+        -o Acquire::Languages=none update \
+    && apt-get -o Acquire::http::Timeout=20 -o Acquire::Retries=3 -o Acquire::http::Pipeline-Depth=0 \
+        install -y --no-install-recommends \
+    ca-certificates git openssl python3 make g++ pkg-config \
+    libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev libgfortran5
+
+RUN groupadd --gid 10001 anythingllm \
+    && useradd --uid 10001 --gid 10001 --home-dir /app --create-home anythingllm
+WORKDIR /app
+COPY --chown=10001:10001 server /app/server
+COPY --chown=10001:10001 collector /app/collector
+COPY --chown=10001:10001 ccheck-prisma-engines /opt/prisma-engines
+COPY --chown=10001:10001 ccheck-libvips /opt/libvips-prebuilds
+ENV PRISMA_QUERY_ENGINE_LIBRARY=/opt/prisma-engines/libquery_engine.so.node \
+    PRISMA_SCHEMA_ENGINE_BINARY=/opt/prisma-engines/schema-engine \
+    npm_config_sharp_libvips_local_prebuilds=/opt/libvips-prebuilds \
+    npm_config_build_from_source=true \
+    npm_config_nodedir=/usr/local \
+    LIBRARY_PATH=/app/server/node_modules/sharp/vendor/8.14.5/linux-x64/lib:/app/collector/node_modules/sharp/vendor/8.14.5/linux-x64/lib
+USER 10001:10001
+WORKDIR /app/server
+RUN --mount=type=cache,id=ccheck-assistant-yarn,target=/app/.cache/yarn,uid=10001,gid=10001,sharing=locked \
+    yarn install --production --frozen-lockfile --network-timeout 100000 --cache-folder /app/.cache/yarn \
+    && node node_modules/prisma/build/index.js generate --schema=prisma/schema.prisma
+WORKDIR /app/collector
+RUN --mount=type=cache,id=ccheck-assistant-yarn,target=/app/.cache/yarn,uid=10001,gid=10001,sharing=locked \
+    yarn install --production --frozen-lockfile --network-timeout 100000 --cache-folder /app/.cache/yarn
+WORKDIR /app/server
+COPY --chown=10001:10001 LICENSE /usr/share/licenses/anythingllm/LICENSE
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=5 \
+    CMD node -e "Promise.all(['http://127.0.0.1:3001/api/ping','http://127.0.0.1:8888/accepts'].map(u=>fetch(u,{signal:AbortSignal.timeout(3000)}))).then(rs=>{if(rs.some(r=>!r.ok)||!require('fs').existsSync('/app/server/storage/comkey/ipc-pub.pem'))process.exit(1)}).catch(()=>process.exit(1))"
+ENTRYPOINT ["node", "/opt/assistant/anythingllm-entrypoint.cjs"]
