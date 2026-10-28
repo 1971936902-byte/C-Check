@@ -232,6 +232,28 @@ def main():
                 stdout=stream, stderr=subprocess.STDOUT, env=environment)
         release = verify_release(release_root, root / 'base/publisher.pem', base['_publisher'])
         validate(base, release)
+        execute([sys.executable, '-I', '-c', """
+import sys, json, hashlib
+sys.path.insert(0, sys.argv[1])
+from ccheck import acceleration
+from ccheck.core import DeploymentError
+with open(sys.argv[2]) as stream:
+    release = json.load(stream)
+site = {'profile': 'ada-48g-fp8', 'performance': {}}
+acceleration.validate_release(site, release)
+assert release['runtime_launchers'] == {
+    name: hashlib.sha256(acceleration.resource(name)).hexdigest()
+    for name in ('qwen_gpu.py', 'embedding_gpu.py')}
+stale = dict(release['runtime_launchers'], **{'qwen_gpu.py': '0' * 64})
+for bad in ({}, {'runtime_launchers': stale}):
+    try:
+        acceleration.validate_release(site, bad)
+    except DeploymentError:
+        pass
+    else:
+        raise AssertionError('unauthorized recipe accepted')
+""",
+            str(release_root / 'cli/ccheck.pyz'), str(release_root / 'release.json')])
         assert release.get('review_cli') == base['review_cli'], 'review CLI metadata was lost'
         inherited = {'cli/ccheck-review.pyz', 'ccheck-review', 'CLI-REVIEW.md'}
         if not with_terminal:
@@ -268,6 +290,7 @@ def main():
             'source_tree': frozen['tree_sha256'], 'original_base_sha256': original['_sha256'],
             'fixture_release_sha256': release['_sha256'], 'images': images,
             'signature_tamper_rejected': True, 'bundled_resources_and_migrations': True,
+            'packaged_gpu_recipe_authorized': True,
             'existing_cli_and_terminal_preserved': True,
             'managed_terminal': with_terminal,
             'snapshot_roundtrip': snapshot, 'hardware_changed': False,

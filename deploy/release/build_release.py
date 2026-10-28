@@ -52,6 +52,20 @@ def bind_assistant_metadata(context, previous, release):
     validate(previous, release)
 
 
+def bind_runtime_launchers(context, output, release):
+    from ccheck import acceleration
+    names = ('qwen_gpu.py', 'embedding_gpu.py')
+    with zipfile.ZipFile(output / 'cli/ccheck.pyz') as archive:
+        packaged = {name: hashlib.sha256(archive.read('ccheck/launchers/' + name)).hexdigest()
+                    for name in names}
+    source = {name: sha(context / 'deploy/release/cli/ccheck/launchers' / name) for name in names}
+    runtime = {name: hashlib.sha256(acceleration.resource(name)).hexdigest() for name in names}
+    if packaged != source or packaged != runtime:
+        raise RuntimeError('packaged runtime launchers differ from the frozen publisher source')
+    release['runtime_launchers'] = packaged
+    acceleration.validate_release({'profile': 'ada-48g-fp8', 'performance': {}}, release)
+
+
 def assistant_notices(context, image, output):
     lock = json.loads((context / 'deploy/assistant/anythingllm.lock.json').read_text())
     license_text = subprocess.check_output(['docker', 'run', '--rm', '--network', 'none',
@@ -490,6 +504,7 @@ def main():
         release['review_cli'] = review_cli
     if args.with_terminal:
         release['terminal_runtime'] = terminal_resources
+    bind_runtime_launchers(context, output, release)
     if args.deployment_patch:
         bind_patch_distribution(previous, release)
     (output / 'release.json').write_text(json.dumps(release, indent=2) + '\n')

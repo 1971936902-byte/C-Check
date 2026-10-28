@@ -5,18 +5,44 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]),
                 str(Path(__file__).resolve().parents[1] / 'cli')]
 from build_release import (assistant_notices, bind_assistant_metadata, validate_assistant_gates,
-                           retain_assistant_baseline_interfaces, bind_patch_distribution, patch_bundle)
-from ccheck import assistant
+                           retain_assistant_baseline_interfaces, bind_patch_distribution, patch_bundle,
+                           bind_runtime_launchers)
+from ccheck import assistant, acceleration
 from ccheck.schema_migration import epoch
 from ccheck.core import DeploymentError
 
 
 class AssistantPublisherTests(unittest.TestCase):
+    def test_signed_gpu_recipe_uses_exact_packaged_launchers_and_rejects_missing_or_stale_hashes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            (output / 'cli').mkdir()
+            names = ('qwen_gpu.py', 'embedding_gpu.py')
+            with zipfile.ZipFile(output / 'cli/ccheck.pyz', 'w') as archive:
+                for name in names:
+                    archive.writestr('ccheck/launchers/' + name, acceleration.resource(name))
+            release = {}
+            bind_runtime_launchers(Path(__file__).resolve().parents[3], output, release)
+            expected = {name: hashlib.sha256(acceleration.resource(name)).hexdigest() for name in names}
+            self.assertEqual(release['runtime_launchers'], expected)
+            site = {'profile': 'ada-48g-fp8', 'performance': {}}
+            acceleration.validate_release(site, release)
+            for invalid in ({}, {'runtime_launchers': dict(expected, **{'qwen_gpu.py': '0' * 64})},
+                            {'runtime_launchers': dict(expected, **{'qwen3_gpu.py': '0' * 64})}):
+                with self.subTest(invalid=invalid), self.assertRaises(DeploymentError):
+                    acceleration.validate_release(site, invalid)
+            with zipfile.ZipFile(output / 'cli/ccheck.pyz', 'w') as archive:
+                for name in names:
+                    archive.writestr('ccheck/launchers/' + name, b'changed')
+            with self.assertRaisesRegex(RuntimeError, 'packaged runtime launchers differ'):
+                bind_runtime_launchers(Path(__file__).resolve().parents[3], output, {})
+
     def test_combined_patch_preserves_original_asset_versions_and_omits_unchanged_archives(self):
         name = 'images/qwen.tar.gz.part0000'
         previous = {'version': 'v0.1.0-rc.20', '_sha256': 'base-sha', 'files': {name: 'unchanged'},
