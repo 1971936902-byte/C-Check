@@ -418,7 +418,8 @@ def main():
     subprocess.run(['openssl', 'pkey', '-in', str(key), '-pubout', '-out', str(output / 'publisher.pem')], check=True)
     if args.with_assistant and sha(output / 'publisher.pem') != previous['_publisher']:
         raise RuntimeError('assistant upgrade must retain the installed publisher identity')
-    template = (context / 'deploy/release/INSTALL-RTX5880.template.md').read_text(encoding='utf-8')
+    guide_name = 'INSTALL-ASSISTANT-PATCH.template.md' if args.with_assistant else 'INSTALL-RTX5880.template.md'
+    template = (context / 'deploy/release' / guide_name).read_text(encoding='utf-8')
     (output / 'INSTALL-RTX5880.md').write_text(render_install_guide(template, args.version,
                                                                  sha(output / 'publisher.pem')), encoding='utf-8')
     specifications, reused = {}, []
