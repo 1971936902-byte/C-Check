@@ -127,11 +127,14 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     for name in ('publisher-sha256', 'backend-image', 'frontend-image', 'provider-image'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--terminal-evidence', type=Path)
+    parser.add_argument('--terminal-browser-evidence', type=Path)
     parser.add_argument('--scratch', type=Path, default=Path('/dev/shm'))
     args = parser.parse_args()
     source = args.source.resolve()
     sys.path[:0] = [str(source / 'deploy/release'), str(source / 'deploy/release/cli')]
     from ccheck import assistant
+    from ccheck import remote_terminal
     from ccheck.core import digest, verify_release, DeploymentError
     from ccheck.image_identity import inspect_image, locate
     from ccheck.schema_migration import validate
@@ -163,6 +166,18 @@ def main():
     if browser.get('mockedApi') is not False or not all(browser.get(name) is True for name in
             ('batchUpload', 'rag', 'sources', 'realReviewPreemption', 'busyDisabled', 'explicitStop')):
         raise RuntimeError('real browser evidence is incomplete')
+    with_terminal = args.terminal_evidence is not None
+    if with_terminal != (args.terminal_browser_evidence is not None):
+        raise RuntimeError('terminal lifecycle and real browser evidence must be supplied together')
+    if with_terminal:
+        terminal = json.loads(args.terminal_evidence.read_text())
+        terminal_browser = json.loads(args.terminal_browser_evidence.read_text())
+        if (not all(terminal.get(name) is True for name in
+                ('passed', 'tls', 'restart_preservation', 'configuration', 'isolation'))
+                or terminal.get('runtime') != remote_terminal.hashes()
+                or not all(terminal_browser.get(name) is True for name in
+                    ('passed', 'real_ssh', 'interactive_commands', 'ctrl_c', 'fresh_remote_file_verified_and_removed'))):
+            raise RuntimeError('managed terminal acceptance is incomplete or runtime changed')
     if shutil.disk_usage(args.scratch).free < 8 * 1024**3:
         raise RuntimeError('signing probe requires 8 GiB free scratch space')
     available = next(int(line.split()[1]) for line in Path('/proc/meminfo').read_text().splitlines()
@@ -196,6 +211,8 @@ def main():
         gates = {'passed': True, 'version': 'v0.1.0-rc.999', 'source_tree': frozen['tree_sha256'],
             'images': images, 'evaluation_fixture': True, 'assistant': dict.fromkeys(
                 ('passed', 'real_gpu', 'review_preemption', 'rag', 'owner_isolation', 'recovery', 'source_native_parity'), True)}
+        if with_terminal:
+            gates['terminal'] = dict.fromkeys(('passed', 'real_ssh', 'tls', 'restart_preservation', 'configuration', 'isolation'), True)
         gate_file = root / 'gates.json'
         gate_file.write_text(json.dumps(gates))
         pins = {'python:3.12-slim-bookworm': base['runtime_recipe']['base_image']}
@@ -210,19 +227,31 @@ def main():
             execute([sys.executable, '-B', str(context / 'deploy/release/build_release.py'), str(context),
                 '--version', gates['version'], '--output', str(release_root), '--gates', str(gate_file),
                 '--signing-key', str(key), '--yaml-package', str(yaml), '--with-assistant',
-                '--reuse-release', str(root / 'base'), '--reuse-trusted-key', str(root / 'base/publisher.pem')],
+                '--reuse-release', str(root / 'base'), '--reuse-trusted-key', str(root / 'base/publisher.pem')]
+                + (['--with-terminal', '--deployment-patch'] if with_terminal else []),
                 stdout=stream, stderr=subprocess.STDOUT, env=environment)
         release = verify_release(release_root, root / 'base/publisher.pem', base['_publisher'])
         validate(base, release)
         assert release.get('review_cli') == base['review_cli'], 'review CLI metadata was lost'
         inherited = {'cli/ccheck-review.pyz', 'ccheck-review', 'CLI-REVIEW.md'}
-        inherited.update(name for name in base['files'] if name.startswith('terminal/'))
+        if not with_terminal:
+            inherited.update(name for name in base['files'] if name.startswith('terminal/'))
         assert all(release['files'].get(name) == base['files'][name] for name in inherited)
         with zipfile.ZipFile(release_root / 'cli/ccheck.pyz') as archive:
             for name, checksum in release['assistant_runtime'].items():
                 assert hashlib.sha256(archive.read('ccheck/assistant_runtime/' + name)).hexdigest() == checksum
             for name, checksum in assistant.migration_hashes().items():
                 assert hashlib.sha256(archive.read('ccheck/assistant_migrations/' + name)).hexdigest() == checksum
+            if with_terminal:
+                assert release['terminal_runtime'] == remote_terminal.hashes()
+                for name, checksum in release['terminal_runtime'].items():
+                    assert hashlib.sha256(archive.read('ccheck/terminal_runtime/' + name)).hexdigest() == checksum
+                bundle = release_root.parent / ('release-' + release['version'] + '-patch.tar.gz')
+                with tarfile.open(bundle) as patch:
+                    entries = set(patch.getnames())
+                assert all(release_root.name + '/' + name not in entries
+                           for name in release['distribution']['reused_files'])
+                assert release_root.name + '/REMOTE-SSH.md' in entries
         original_manifest = (release_root / 'release.json').read_bytes()
         (release_root / 'release.json').write_bytes(original_manifest + b'\n')
         try:
@@ -240,6 +269,7 @@ def main():
             'fixture_release_sha256': release['_sha256'], 'images': images,
             'signature_tamper_rejected': True, 'bundled_resources_and_migrations': True,
             'existing_cli_and_terminal_preserved': True,
+            'managed_terminal': with_terminal,
             'snapshot_roundtrip': snapshot, 'hardware_changed': False,
             'scope': 'real release assembly/signature, additive manifest approval and native encrypted snapshot protocol'}
         (args.output / 'release-pipeline.json').write_text(json.dumps(report, indent=2))

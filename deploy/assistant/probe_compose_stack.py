@@ -28,6 +28,7 @@ def main():
     parser.add_argument('--browser-done-file', type=Path)
     parser.add_argument('--exercise-recovery', action='store_true')
     parser.add_argument('--backend-image', default='ccheck-assistant-backend:development')
+    parser.add_argument('--frontend-image', default='ccheck-assistant-frontend:development')
     parser.add_argument('--provider-image', default='ccheck-anythingllm:verified-development')
     parser.add_argument('--compiled-backend', action='store_true',
                         help='use the canonical /app/backend runtime layout')
@@ -44,7 +45,7 @@ def main():
     snapshots = [json.loads(run('docker', 'inspect', name))[0] for name in originals]
     if len(set(originals)) != 2 or not all(item['State']['Running'] for item in snapshots):
         raise RuntimeError('both distinct original inference containers must be running')
-    if shutil.disk_usage('/tmp').free < 2 * 1024**3:
+    if shutil.disk_usage(tempfile.gettempdir()).free < 2 * 1024**3:
         raise RuntimeError('full Compose probe requires 2 GiB free temporary space')
     for model in (args.model_dir, args.jina_model_dir):
         if not model.is_absolute() or not (model / 'config.json').is_file():
@@ -54,7 +55,7 @@ def main():
                                       ('qdrant', args.qdrant_container), ('embedding', args.embedding_container))}
     images.update({name: run('docker', 'image', 'inspect', '--format', '{{.Id}}', tag)
         for name, tag in (('backend', args.backend_image),
-                          ('frontend', 'ccheck-assistant-frontend:development'),
+                          ('frontend', args.frontend_image),
                           ('anythingllm', args.provider_image),
                           ('qwen', args.inference_image))})
     resources = Path(__file__).resolve().parent
