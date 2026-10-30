@@ -54,6 +54,14 @@ def frontend_notices(frontend):
     (destination / 'components.json').write_text(json.dumps(records, indent=2))
 
 
+def public_dist_permissions(dist):
+    paths = [dist, *dist.rglob('*')]
+    if any(path.is_symlink() for path in paths):
+        raise RuntimeError('public frontend output must not contain symlinks')
+    for path in paths:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+
+
 def validate_sources(base, source, previous):
     if base['version'] != 'v0.1.0-rc.22' or base['_sha256'] != BASE_SHA:
         raise RuntimeError('only the original signed rc22 baseline is supported')
@@ -122,6 +130,7 @@ def main():
         run([str(args.node_bin / 'npm'), 'test'], 'frontend-tests', frontend)
         run([str(args.node_bin / 'npm'), 'run', 'build'], 'frontend-build', frontend)
         frontend_notices(frontend)
+        public_dist_permissions(frontend / 'dist')
         old = locate(base['images']['frontend'])
         if old is None:
             raise RuntimeError('signed rc22 frontend image is not loaded')

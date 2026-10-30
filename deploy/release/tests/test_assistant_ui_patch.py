@@ -1,13 +1,34 @@
 import copy
 from pathlib import Path
 import sys
+import os
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from build_assistant_ui_patch import BASE_SHA, validate_sources
+from build_assistant_ui_patch import BASE_SHA, validate_sources, public_dist_permissions
 
 
 class AssistantUiPatchTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'POSIX static-file permissions')
+    def test_only_public_dist_is_readable_by_nonroot_nginx(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dist = root / 'dist'
+            (dist / 'assets').mkdir(parents=True, mode=0o700)
+            private = root / 'private'
+            private.write_text('not public')
+            private.chmod(0o600)
+            for name in ('index.html', 'assets/main.js'):
+                path = dist / name
+                path.write_text('public output')
+                path.chmod(0o600)
+            public_dist_permissions(dist)
+            self.assertEqual((dist / 'assets').stat().st_mode & 0o777, 0o755)
+            self.assertEqual((dist / 'index.html').stat().st_mode & 0o777, 0o644)
+            self.assertEqual((dist / 'assets/main.js').stat().st_mode & 0o777, 0o644)
+            self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+
     def baseline(self):
         previous = {'git_sha': 'a' * 40, 'tree_sha256': 'b' * 64,
                     'files': {'frontend/src/views/AssistantView.vue': 'old'}}
