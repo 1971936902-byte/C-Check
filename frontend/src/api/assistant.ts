@@ -78,6 +78,7 @@ export function assistantReason(reason: string): string {
     'Interrupted by a higher-priority review.': '因审查任务启动而中断',
     assistant_interrupted: '回答在完成前中断', 'Response interrupted before completion.': '回答在完成前中断',
     assistant_service_unavailable: '助手服务暂不可用', assistant_upstream_unavailable: '模型服务暂不可用',
+    assistant_stream_incomplete: '连接已断开，回答可能不完整',
     assistant_recovery_required: '计算状态待确认，请联系管理员', unavailable: '无法确认模型状态，暂不可发送',
   } as Record<string, string>)[reason] || reason
 }

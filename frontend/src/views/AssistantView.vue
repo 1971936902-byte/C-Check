@@ -2,10 +2,12 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
-import { Plus, Delete, Refresh, Upload, Position, Close, CopyDocument, ChatDotRound } from '@element-plus/icons-vue'
+import { Plus, Delete, Refresh, Upload, Position, Close, CopyDocument, ChatDotRound, Service, User, ArrowDown } from '@element-plus/icons-vue'
+import AssistantMarkdown from '../components/AssistantMarkdown.vue'
 import { assistantApi, assistantReason, sendAssistantMessage, type AssistantState, type Conversation, type KnowledgeDocument, type Message } from '../api/assistant'
 import { errorMessage } from '../api/client'
 import { createLatestRequest } from './latest-request'
+import { nearBottom, questionForAnswer, generationLabel, type GenerationPhase } from './assistant-interactions'
 
 const route = useRoute(), router = useRouter()
 const state = ref<AssistantState>({ enabled: false, available: false, reason: 'unavailable' })
@@ -16,6 +18,11 @@ const fileInput = ref<HTMLInputElement>(), messageArea = ref<HTMLElement>()
 const selectedId = computed(() => typeof route.query.conversation === 'string' ? route.query.conversation : '')
 const selected = computed(() => conversations.value.find(item => item.id === selectedId.value))
 const canSend = computed(() => state.value.available && selected.value?.status === 'ready' && !loading.value && !sending.value && !!draft.value.trim())
+const canReplay = computed(() => state.value.available && selected.value?.status === 'ready' && !loading.value && !sending.value)
+const atBottom = ref(true), newBelow = ref(false), activeIndex = ref(-1), phase = ref<GenerationPhase>('waiting')
+const started = ref(0), now = ref(0)
+const progress = computed(() => `${generationLabel(phase.value, !!selected.value?.rag_enabled)} · ${Math.max(0, Math.floor((now.value - started.value) / 1000))} 秒`)
+let tick: ReturnType<typeof setInterval> | undefined
 const historyRequest = createLatestRequest()
 let controller: AbortController | undefined, timer: ReturnType<typeof setTimeout> | undefined, alive = true, polling = false
 
@@ -40,6 +47,8 @@ async function poll() {
 }
 async function loadHistory() {
   controller?.abort()
+  controller = undefined; sending.value = false; activeIndex.value = -1; clearInterval(tick)
+  atBottom.value = true; newBelow.value = false
   const current = historyRequest.begin(), id = selectedId.value
   messages.value = []; error.value = ''; loading.value = !!id
   if (!id) return
@@ -48,11 +57,17 @@ async function loadHistory() {
     if (current()) messages.value = result.data.messages.map(message => message.interrupted
       ? { ...message, interrupted: assistantReason(message.interrupted) } : message)
   } catch (cause) { if (current()) error.value = errorMessage(cause) }
-  finally { if (current()) { loading.value = false; await scrollBottom() } }
+  finally { if (current()) { loading.value = false; await scrollBottom(true) } }
 }
-async function scrollBottom() {
+async function scrollBottom(force = false) {
   await nextTick()
+  if (!force && !atBottom.value) return
   messageArea.value?.scrollTo({ top: messageArea.value.scrollHeight, behavior: 'instant' })
+  atBottom.value = true; newBelow.value = false
+}
+function trackScroll() {
+  if (messageArea.value) atBottom.value = nearBottom(messageArea.value)
+  if (atBottom.value) newBelow.value = false
 }
 function choose(id: string) { mode.value = 'chat'; void router.push({ path: '/assistant', query: { conversation: id } }) }
 async function create() {
@@ -80,24 +95,55 @@ async function remove() {
 }
 async function send() {
   if (!canSend.value) return
-  const id = selectedId.value, text = draft.value.trim(), active = new AbortController()
-  controller = active; sending.value = true; draft.value = ''; error.value = ''
-  messages.value.push({ role: 'user', content: text }, { role: 'assistant', content: '', sources: [] })
-  const answer = messages.value[messages.value.length - 1]!
-  await scrollBottom()
+  await sendText(draft.value.trim(), true)
+}
+async function replay(index: number) {
+  if (!canReplay.value) return
+  const id = selectedId.value, question = questionForAnswer(messages.value, index)
+  if (!question) return
   try {
+    await ElMessageBox.confirm('将原问题作为新请求发送，保留已有回答。若前次请求结果不确定，服务器可能仍在处理。继续？',
+      messages.value[index]?.interrupted ? '重试回答' : '重新生成', { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' })
+    if (selectedId.value === id && canReplay.value) await sendText(question, false)
+  } catch (cause) { if (cause !== 'cancel' && cause !== 'close') error.value = errorMessage(cause) }
+}
+async function sendText(text: string, fromComposer: boolean) {
+  if (!canReplay.value || !text.trim()) return
+  const id = selectedId.value, active = new AbortController()
+  const current = () => alive && selectedId.value === id && controller === active
+  controller = active; sending.value = true; error.value = ''; phase.value = 'waiting'
+  started.value = now.value = Date.now(); tick = setInterval(() => { now.value = Date.now() }, 1000)
+  let answer: Message | undefined
+  try {
+    const status = await assistantApi.status()
+    if (!current() || active.signal.aborted) return
+    state.value = status.data
+    if (!status.data.available) throw new Error(assistantReason(status.data.reason))
+    if (fromComposer && draft.value.trim() === text) draft.value = ''
+    messages.value.push({ role: 'user', content: text }, { role: 'assistant', content: '', sources: [] })
+    activeIndex.value = messages.value.length - 1
+    answer = messages.value[activeIndex.value]!
+    await scrollBottom(true)
     await sendAssistantMessage(id, text, active.signal, event => {
-      if (!alive || selectedId.value !== id) return
-      if (event.event === 'delta') answer.content += event.text
-      if (event.event === 'sources') answer.sources = event.sources
-      if (event.event === 'error') answer.interrupted = assistantReason(event.code)
-      const area = messageArea.value
-      if (area && area.scrollHeight - area.scrollTop - area.clientHeight < 150) void scrollBottom()
+      if (!current() || !answer) return
+      if (event.event === 'delta') { answer.content += event.text; phase.value = 'generating' }
+      if (event.event === 'sources') { answer.sources = event.sources; if (phase.value !== 'generating') phase.value = 'sources' }
+      if (event.event === 'error') {
+        answer.interrupted = assistantReason(event.code)
+        if (event.code === 'review_priority_interrupted') state.value = { ...state.value, available: false, reason: 'review_busy' }
+      }
+      if (atBottom.value) void scrollBottom()
+      else if (event.event === 'delta' || event.event === 'sources') newBelow.value = true
     })
+    if (current() && !answer.content.trim() && !answer.interrupted) answer.interrupted = '模型未返回有效内容，请手动重试'
   } catch (cause) {
-    answer.interrupted = active.signal.aborted ? '已停止生成' : assistantReason(errorMessage(cause))
+    if (current()) {
+      const reason = active.signal.aborted ? '已停止生成' : assistantReason(errorMessage(cause))
+      if (answer) answer.interrupted = reason
+      else error.value = reason
+    }
   } finally {
-    if (controller === active) { sending.value = false; controller = undefined }
+    if (current()) { sending.value = false; controller = undefined; activeIndex.value = -1; clearInterval(tick) }
   }
 }
 async function upload(event: Event) {
@@ -126,7 +172,7 @@ onMounted(async () => {
   void poll()
   try { await refreshLists(); await loadHistory() } catch (cause) { error.value = errorMessage(cause) }
 })
-onUnmounted(() => { alive = false; clearTimeout(timer); controller?.abort(); historyRequest.dispose() })
+onUnmounted(() => { alive = false; clearTimeout(timer); clearInterval(tick); controller?.abort(); historyRequest.dispose() })
 </script>
 
 <template>
@@ -150,22 +196,33 @@ onUnmounted(() => { alive = false; clearTimeout(timer); controller?.abort(); his
         <template v-if="mode === 'chat'">
           <div class="chat-heading"><h2>{{ selected?.title || '选择或新建会话' }}</h2><span v-if="selected">{{ selected.rag_enabled ? 'RAG 已开启' : 'RAG 已关闭' }}</span></div>
           <el-button v-if="selected && selected.status !== 'ready'" :icon="Refresh" :disabled="!state.enabled" @click="prepare">重新初始化会话</el-button>
-          <div ref="messageArea" class="messages" :aria-busy="loading" aria-label="聊天记录">
+          <div class="messages-wrap">
+          <div ref="messageArea" class="messages" :aria-busy="loading || sending" aria-label="聊天记录" @scroll="trackScroll">
             <p v-if="loading" class="empty-label">正在读取聊天记录…</p>
             <div v-else-if="!messages.length" class="chat-empty"><el-icon><ChatDotRound /></el-icon><span>{{ selected ? '暂无消息' : '尚未选择会话' }}</span></div>
-            <article v-for="(message, index) in messages" :key="index" class="message" :class="message.role">
-              <header><strong>{{ message.role === 'user' ? '你' : 'Qwen' }}</strong><el-button :icon="CopyDocument" text title="复制消息" aria-label="复制消息" :disabled="!message.content" @click="copy(message.content)" /></header>
-              <div class="message-content">{{ message.content || (sending && index === messages.length - 1 ? '正在生成…' : '') }}</div>
+            <article v-for="(message, index) in messages" :key="index" class="message" :class="message.role" :aria-label="message.role === 'user' ? '用户消息' : '智能助手回复'">
+              <div class="message-avatar" aria-hidden="true"><el-icon><User v-if="message.role === 'user'" /><Service v-else /></el-icon></div>
+              <div class="message-body">
+              <header><strong>{{ message.role === 'user' ? '你' : '智能助手' }}</strong><el-button :icon="CopyDocument" text title="复制消息" aria-label="复制消息" :disabled="!message.content" @click="copy(message.content)" /></header>
+              <AssistantMarkdown v-if="message.role === 'assistant' && message.content" class="message-content" :content="message.content" @error="error = $event" />
+              <div v-else class="message-content plain-text">{{ message.content }}</div>
+              <p v-if="sending && index === activeIndex" class="generation-status">{{ progress }}</p>
               <p v-if="message.interrupted" class="interrupted" role="status">{{ message.interrupted }}</p>
               <details v-if="message.sources?.length" class="sources"><summary>引用来源 · {{ message.sources.length }}</summary><div v-for="(source, n) in message.sources" :key="n"><strong>{{ source.title }}</strong><p>{{ source.text || source.pageContent }}</p></div></details>
+              <div v-if="index === messages.length - 1 && !sending" class="answer-actions">
+                <el-button v-if="message.role === 'assistant' || message.role === 'user'" :icon="Refresh" text :title="message.interrupted || message.role === 'user' ? '重试回答' : '重新生成'" :disabled="!canReplay || !questionForAnswer(messages, index)" @click="replay(index)">{{ message.interrupted || message.role === 'user' ? '重试回答' : '重新生成' }}</el-button>
+              </div>
+              </div>
             </article>
+          </div>
+          <el-button v-if="!atBottom && messages.length" class="return-bottom" :icon="ArrowDown" circle :title="newBelow ? '有新内容，回到底部' : '回到底部'" :aria-label="newBelow ? '有新内容，回到底部' : '回到底部'" @click="scrollBottom(true)"><span v-if="newBelow" class="new-content-dot" aria-hidden="true"></span></el-button>
           </div>
           <form class="composer" @submit.prevent="send">
             <label for="assistant-message">消息</label>
             <el-input id="assistant-message" v-model="draft" type="textarea" :rows="3" maxlength="16000" :disabled="!selected || selected.status !== 'ready' || !state.available || sending" aria-label="消息" />
-            <div class="composer-actions"><span>{{ sending ? '正在生成回答' : !state.available ? assistantReason(state.reason) : '' }}</span>
-              <el-button v-if="sending" :icon="Close" @click="controller?.abort()">停止生成</el-button>
-              <el-button v-else type="primary" :icon="Position" native-type="submit" :disabled="!canSend">发送</el-button>
+            <div class="composer-actions"><span><span role="status">{{ sending ? generationLabel(phase, !!selected?.rag_enabled) : !state.available ? assistantReason(state.reason) : '' }}</span><span v-if="sending" aria-hidden="true"> · {{ Math.max(0, Math.floor((now - started) / 1000)) }} 秒</span></span>
+              <el-button v-if="sending" :icon="Close" circle title="停止生成" aria-label="停止生成" @click="controller?.abort()" />
+              <el-button v-else type="primary" :icon="Position" circle title="发送消息" aria-label="发送消息" native-type="submit" :disabled="!canSend" />
             </div>
           </form>
         </template>
@@ -187,26 +244,41 @@ onUnmounted(() => { alive = false; clearTimeout(timer); controller?.abort(); his
 .assistant-page { min-width: 0; }
 .availability { max-width: 100%; padding: 7px 10px; background: #fff4d6; color: #775913; font-size: 13px; border-radius: 4px; overflow-wrap: anywhere; }
 .availability.available { background: #e6f3ec; color: #256747; }
-.assistant-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); margin-top: 18px; border-top: 1px solid var(--border); background: #fff; min-height: 620px; }
-.conversation-list { border-right: 1px solid var(--border); padding: 16px 12px; min-width: 0; max-height: 760px; overflow: auto; }
+.assistant-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); margin-top: 18px; border: 1px solid var(--border); border-radius: 8px; background: #fff; min-height: 620px; }
+.conversation-list { border-right: 1px solid var(--border); padding: 20px 12px; min-width: 0; max-height: 860px; overflow: auto; background: #f6f8fa; border-radius: 8px 0 0 8px; }
 .list-heading, .assistant-toolbar, .files-heading, .chat-heading, .message header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 h2 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
 .conversation { display: block; text-align: left; width: 100%; border: 0; border-left: 3px solid transparent; background: transparent; padding: 12px 8px; margin-top: 6px; cursor: pointer; color: inherit; }
 .conversation:hover { background: #f4f7fa; }.conversation.selected { background: #edf5fa; border-left-color: var(--primary); }
 .conversation strong { display: block; overflow-wrap: anywhere; font-size: 14px; }.conversation span { display: block; color: #657589; font-size: 12px; margin-top: 5px; }
-.assistant-main { min-width: 0; padding: 16px 20px; display: flex; flex-direction: column; }
+.assistant-main { min-width: 0; padding: 16px 24px; display: flex; flex-direction: column; }
 .assistant-toolbar { min-height: 40px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .chat-heading { padding: 14px 0; }.chat-heading span { flex-shrink: 0; font-size: 12px; color: #607188; }
-.messages { height: 420px; overflow-y: auto; overscroll-behavior: contain; padding-right: 8px; }
+.messages { height: clamp(320px, 46dvh, 600px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 16px 8px 24px; display: flex; flex-direction: column; gap: 24px; }
+.messages-wrap { position: relative; min-width: 0; }
+.return-bottom { position: absolute; bottom: 14px; right: 24px; width: 40px; height: 40px; box-shadow: 0 3px 12px #25364b20; z-index: 1; }
+.new-content-dot { position: absolute; right: 2px; top: 2px; width: 8px; height: 8px; border-radius: 50%; background: #277c64; }
+.generation-status { margin: 10px 0 0; font-size: 12px; color: #476d65; }
+.answer-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
 .chat-empty { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: #6b7e8e; }.chat-empty .el-icon { font-size: 40px; }
-.message { padding: 12px 0 18px; border-bottom: 1px solid #eef1f3; }.message.user { background: #f7f9fb; padding: 12px; }.message header { font-size: 13px; color: #50677c; }
-.message-content { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.8; }
+.message { display: flex; align-items: flex-start; gap: 10px; width: fit-content; max-width: 90%; min-width: 0; flex-shrink: 0; align-self: flex-start; }
+.message.user { align-self: flex-end; flex-direction: row-reverse; }
+.message-avatar { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; color: #356e62; background: #e7f2ed; border: 1px solid #d6e8e0; border-radius: 8px; }
+.user .message-avatar { color: #49647a; background: #edf2f7; border-color: #dee7ee; }
+.message-body { min-width: 0; max-width: 100%; padding: 10px 16px 14px; background: #fff; border: 1px solid #e1e7ec; border-radius: 0 8px 8px; }
+.user .message-body { background: #edf5f8; border-color: #d8e7ef; border-radius: 8px 0 8px 8px; }
+.message header { justify-content: flex-start; gap: 20px; font-size: 12px; color: #586e7a; margin-bottom: 6px; }
+.message header .el-button { margin-left: auto; min-width: 32px; min-height: 32px; padding: 6px; }
+.message-content { min-width: 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.85; }
+.plain-text { white-space: pre-wrap; }.generating { color: #657589; }
 .interrupted { color: #96631b; font-size: 13px; }.sources { margin-top: 12px; font-size: 12px; }.sources summary { cursor: pointer; color: #346382; }.sources div { padding: 10px 0; }.sources p { white-space: pre-wrap; overflow-wrap: anywhere; }
-.composer { border-top: 1px solid var(--border); padding-top: 12px; margin-top: auto; }.composer label, form label { display: block; font-size: 13px; margin-bottom: 8px; }
+.composer { border-top: 1px solid var(--border); padding-top: 16px; margin-top: auto; }.composer label, form label { display: block; font-size: 13px; margin-bottom: 8px; }
+.composer :deep(.el-textarea__inner) { border-radius: 6px; padding: 12px; line-height: 1.7; background: #fafcfd; resize: vertical; }
+.composer-actions > .el-button { width: 44px; height: 44px; flex-shrink: 0; }
 .composer-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px; }.composer-actions span { font-size: 12px; color: #7a651f; overflow-wrap: anywhere; }
 .files-heading { margin: 20px 0; }.file-input { display: none; }.file-list { list-style: none; padding: 0; margin: 0; }.file-list li { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }.file-list li>div { flex: 1; min-width: 0; }.file-list strong { display: block; font-size: 14px; overflow-wrap: anywhere; }.file-list small { display: block; color: #657589; margin-top: 6px; }.file-list li>span { font-size: 12px; max-width: 100px; }.file-ready { color: #256747; }
 .empty-label { color: #657589; font-size: 13px; }.dialog-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
 button:focus-visible, summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 @media (max-width: 1100px) { .assistant-layout { grid-template-columns: 170px minmax(0, 1fr); }.assistant-main { padding: 12px; } }
-@media (max-width: 650px) { .assistant-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }.conversation-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 190px; }.conversation { margin-top: 2px; padding: 8px; }.messages { height: 360px; }.chat-heading { flex-wrap: wrap; }.assistant-main { padding: 12px; }.composer-actions span { max-width: 65%; } }
+@media (max-width: 650px) { .assistant-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }.conversation-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 190px; border-radius: 8px 8px 0 0; }.conversation { margin-top: 2px; padding: 8px; }.messages { height: 380px; padding: 12px 0 20px; gap: 18px; }.message { max-width: 96%; gap: 6px; }.message-avatar { width: 26px; height: 26px; flex-basis: 26px; }.message-body { padding: 8px 10px 12px; }.chat-heading { flex-wrap: wrap; }.assistant-main { padding: 12px; }.composer-actions span { max-width: 65%; } }
 </style>
