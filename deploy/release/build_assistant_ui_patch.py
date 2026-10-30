@@ -32,6 +32,28 @@ ALLOWED = {
 }
 
 
+def frontend_notices(frontend):
+    lock = json.loads((frontend / 'package-lock.json').read_text())
+    destination = frontend / 'dist/third-party-licenses'
+    destination.mkdir()
+    records = []
+    for name, entry in sorted(lock['packages'].items()):
+        if not name or entry.get('dev') or not (frontend / name / 'package.json').is_file():
+            continue
+        package = frontend / name
+        metadata = json.loads((package / 'package.json').read_text())
+        target = destination / name.removeprefix('node_modules/').replace('/', '__')
+        target.mkdir(parents=True)
+        licenses = []
+        for path in package.iterdir():
+            if path.is_file() and path.name.upper().startswith(('LICENSE', 'COPYING', 'NOTICE')):
+                shutil.copy2(path, target / path.name)
+                licenses.append((target / path.name).relative_to(destination).as_posix())
+        records.append({'name': metadata['name'], 'version': metadata['version'],
+                        'license': metadata.get('license'), 'integrity': entry.get('integrity'), 'files': licenses})
+    (destination / 'components.json').write_text(json.dumps(records, indent=2))
+
+
 def validate_sources(base, source, previous):
     if base['version'] != 'v0.1.0-rc.22' or base['_sha256'] != BASE_SHA:
         raise RuntimeError('only the original signed rc22 baseline is supported')
@@ -85,7 +107,7 @@ def main():
     changed = validate_sources(base, source, verify_source(args.base_source, committed=True))
     image = 'c-check-frontend:0.1.0-rc.23'
     env = dict(os.environ, PATH=str(args.node_bin) + ':' + os.environ['PATH'],
-               TMPDIR='/dev/shm', PYTHONDONTWRITEBYTECODE='1', VITE_USE_MOCK_API='false')
+               TMPDIR=str(args.gates.parent / 'tmp'), PYTHONDONTWRITEBYTECODE='1', VITE_USE_MOCK_API='false')
     def run(command, name, cwd=None):
         print('RUN', name, flush=True)
         with (args.gates / (name + '.log')).open('wb') as log:
@@ -99,6 +121,7 @@ def main():
         run([str(args.node_bin / 'npm'), 'ci', '--cache', '/mnt/c-check-build/cache/npm'], 'npm-ci', frontend)
         run([str(args.node_bin / 'npm'), 'test'], 'frontend-tests', frontend)
         run([str(args.node_bin / 'npm'), 'run', 'build'], 'frontend-build', frontend)
+        frontend_notices(frontend)
         old = locate(base['images']['frontend'])
         if old is None:
             raise RuntimeError('signed rc22 frontend image is not loaded')
@@ -147,6 +170,9 @@ def main():
     shutil.copy2(args.gates / 'build-gates.json', output / 'verify/build-gates.json')
     shutil.copy2(args.browser_proof, output / 'verify/assistant-ui-browser.json')
     shutil.copy2(args.interaction_proof, output / 'verify/assistant-interactions-browser.json')
+    shutil.copytree(args.gates / 'frontend/dist/third-party-licenses', output / 'licenses/frontend')
+    with (output / 'licenses/THIRD_PARTY_NOTICES.md').open('a') as notices:
+        notices.write('\nFrontend dependency notices and pinned versions are in frontend/components.json and accompanying files.\n')
     public = subprocess.check_output(['openssl', 'pkey', '-in', str(key), '-pubout'])
     if hashlib.sha256(public).hexdigest() != base['_publisher']:
         raise RuntimeError('original trusted publisher key required')
