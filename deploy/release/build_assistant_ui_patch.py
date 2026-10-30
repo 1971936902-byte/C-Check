@@ -111,7 +111,7 @@ def main():
     def run(command, name, cwd=None):
         print('RUN', name, flush=True)
         with (args.gates / (name + '.log')).open('wb') as log:
-            subprocess.run(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
+            subprocess.run(command, cwd=cwd, env=dict(env, VITE_USE_MOCK_API='true' if name == 'frontend-tests' else 'false'), stdout=log, stderr=subprocess.STDOUT,
                            check=True, timeout=1800)
     if args.phase == 'build':
         args.gates.mkdir(mode=0o700, parents=True, exist_ok=False)
